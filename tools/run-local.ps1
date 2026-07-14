@@ -9,7 +9,8 @@ $env:BASE_PORT = "15100"
 $env:GAME_SERVER_IP = "127.0.0.1"
 $env:GAME_SERVER_PORT = "15001"
 $env:MAP_DIR = "./Map"
-$env:RUST_LOG = "info"
+$env:RUST_LOG = "ko_game=debug,ko_server=debug,ko_protocol=debug,info"
+$env:KO_VERSION_MODE = "99"
 
 Write-Host "Starting ko-server with local PostgreSQL..." -ForegroundColor Cyan
 cargo run -p ko-server
