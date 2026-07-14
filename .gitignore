@@ -83,3 +83,18 @@ venv/
 
 # Frida output
 tools/frida_output.txt
+
+
+# Local database backups
+db_backup/
+*.bak
+*.backup
+*.dump
+
+# Local environment
+.env
+.env.local
+
+# Runtime logs and dumps
+*.log
+*.dmp
