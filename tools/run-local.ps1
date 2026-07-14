@@ -13,4 +13,12 @@ $env:RUST_LOG = "ko_game=debug,ko_server=debug,ko_protocol=debug,info"
 $env:KO_VERSION_MODE = "99"
 
 Write-Host "Starting ko-server with local PostgreSQL..." -ForegroundColor Cyan
-cargo run -p ko-server
+$logDir = Join-Path $repo "logs"
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$logFile = Join-Path $logDir "ko-server_$timestamp.log"
+
+Write-Host "Log file: $logFile" -ForegroundColor Yellow
+
+cmd /d /s /c "cargo run -p ko-server 2>&1" | Tee-Object -FilePath $logFile
