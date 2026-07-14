@@ -378,7 +378,8 @@ async fn handle_inventory_system(
                 | GLOVE
                 | FOOT
         );
-        if is_non_hand_slot && is_weapon_item(&item_table) {
+        let is_pet_item = item_table.kind.unwrap_or(0) == ITEM_KIND_PET;
+        if is_non_hand_slot && !is_pet_item && is_weapon_item(&item_table) {
             return send_item_move_result(session, false).await;
         }
     }
