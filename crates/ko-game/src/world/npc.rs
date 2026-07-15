@@ -1453,7 +1453,6 @@ impl WorldState {
     /// can be called from both sync and async contexts. The lock is
     /// uncontended at startup / in tests so this always succeeds.
     ///
-    #[cfg(test)]
     pub(crate) fn insert_npc_instance(&self, instance: crate::npc::NpcInstance) {
         let nid = instance.nid;
         let zone_id = instance.zone_id;
@@ -4013,12 +4012,15 @@ mod tests {
         let nid = world.allocate_npc_id();
         assert_eq!(world.npc_buff_count(nid), 0);
         assert!(!world.has_npc_buff(nid, 100));
-        world.apply_npc_buff(nid, NpcBuffEntry {
-            skill_id: 1000,
-            buff_type: 100,
-            start_time: Instant::now(),
-            duration_secs: 30,
-        });
+        world.apply_npc_buff(
+            nid,
+            NpcBuffEntry {
+                skill_id: 1000,
+                buff_type: 100,
+                start_time: Instant::now(),
+                duration_secs: 30,
+            },
+        );
         assert!(world.has_npc_buff(nid, 100));
         assert_eq!(world.npc_buff_count(nid), 1);
     }
@@ -4029,12 +4031,15 @@ mod tests {
         let world = WorldState::new();
         let nid = world.allocate_npc_id();
         assert!(!world.remove_npc_buff(nid, 100));
-        world.apply_npc_buff(nid, NpcBuffEntry {
-            skill_id: 1000,
-            buff_type: 100,
-            start_time: Instant::now(),
-            duration_secs: 30,
-        });
+        world.apply_npc_buff(
+            nid,
+            NpcBuffEntry {
+                skill_id: 1000,
+                buff_type: 100,
+                start_time: Instant::now(),
+                duration_secs: 30,
+            },
+        );
         assert!(world.remove_npc_buff(nid, 100));
         assert!(!world.has_npc_buff(nid, 100));
         assert_eq!(world.npc_buff_count(nid), 0);
@@ -4046,12 +4051,15 @@ mod tests {
         let world = WorldState::new();
         let nid = world.allocate_npc_id();
         for i in 0..5 {
-            world.apply_npc_buff(nid, NpcBuffEntry {
-                skill_id: 1000 + i,
-                buff_type: i as i32,
-                start_time: Instant::now(),
-                duration_secs: 60,
-            });
+            world.apply_npc_buff(
+                nid,
+                NpcBuffEntry {
+                    skill_id: 1000 + i,
+                    buff_type: i as i32,
+                    start_time: Instant::now(),
+                    duration_secs: 60,
+                },
+            );
         }
         assert_eq!(world.npc_buff_count(nid), 5);
         world.clear_npc_buffs(nid);
@@ -4088,8 +4096,26 @@ mod tests {
     fn test_npc_dot_replace_same_skill() {
         let world = WorldState::new();
         let nid = world.allocate_npc_id();
-        world.add_npc_dot(nid, NpcDotSlot { skill_id: 100, hp_amount: 50, tick_count: 0, tick_limit: 5, caster_sid: 1 });
-        world.add_npc_dot(nid, NpcDotSlot { skill_id: 100, hp_amount: 80, tick_count: 0, tick_limit: 3, caster_sid: 2 });
+        world.add_npc_dot(
+            nid,
+            NpcDotSlot {
+                skill_id: 100,
+                hp_amount: 50,
+                tick_count: 0,
+                tick_limit: 5,
+                caster_sid: 1,
+            },
+        );
+        world.add_npc_dot(
+            nid,
+            NpcDotSlot {
+                skill_id: 100,
+                hp_amount: 80,
+                tick_count: 0,
+                tick_limit: 3,
+                caster_sid: 2,
+            },
+        );
         // Same skill_id → replaced, not duplicated
         let dots = world.npc_dots.get(&nid).unwrap();
         assert_eq!(dots.len(), 1);
@@ -4103,7 +4129,16 @@ mod tests {
         let world = WorldState::new();
         let nid = world.allocate_npc_id();
         for i in 0..6 {
-            world.add_npc_dot(nid, NpcDotSlot { skill_id: i, hp_amount: 10, tick_count: 0, tick_limit: 5, caster_sid: 1 });
+            world.add_npc_dot(
+                nid,
+                NpcDotSlot {
+                    skill_id: i,
+                    hp_amount: 10,
+                    tick_count: 0,
+                    tick_limit: 5,
+                    caster_sid: 1,
+                },
+            );
         }
         let dots = world.npc_dots.get(&nid).unwrap();
         assert_eq!(dots.len(), 4); // Max 4 slots
@@ -4114,8 +4149,26 @@ mod tests {
     fn test_clear_npc_dots() {
         let world = WorldState::new();
         let nid = world.allocate_npc_id();
-        world.add_npc_dot(nid, NpcDotSlot { skill_id: 1, hp_amount: 10, tick_count: 0, tick_limit: 5, caster_sid: 1 });
-        world.add_npc_dot(nid, NpcDotSlot { skill_id: 2, hp_amount: 20, tick_count: 0, tick_limit: 5, caster_sid: 1 });
+        world.add_npc_dot(
+            nid,
+            NpcDotSlot {
+                skill_id: 1,
+                hp_amount: 10,
+                tick_count: 0,
+                tick_limit: 5,
+                caster_sid: 1,
+            },
+        );
+        world.add_npc_dot(
+            nid,
+            NpcDotSlot {
+                skill_id: 2,
+                hp_amount: 20,
+                tick_count: 0,
+                tick_limit: 5,
+                caster_sid: 1,
+            },
+        );
         assert!(world.npc_dots.get(&nid).is_some());
         world.clear_npc_dots(nid);
         assert!(world.npc_dots.get(&nid).is_none());
@@ -4255,14 +4308,28 @@ mod tests {
         let world = WorldState::new();
         let nid = world.allocate_npc_id();
         // Permanent buff (duration_secs=0) → never expires
-        world.apply_npc_buff(nid, NpcBuffEntry {
-            skill_id: 100, buff_type: 1, duration_secs: 0, start_time: Instant::now(),
-        });
+        world.apply_npc_buff(
+            nid,
+            NpcBuffEntry {
+                skill_id: 100,
+                buff_type: 1,
+                duration_secs: 0,
+                start_time: Instant::now(),
+            },
+        );
         // Already expired buff (duration very short, applied in past)
-        let past = Instant::now().checked_sub(std::time::Duration::from_secs(100)).unwrap();
-        world.apply_npc_buff(nid, NpcBuffEntry {
-            skill_id: 200, buff_type: 2, duration_secs: 1, start_time: past,
-        });
+        let past = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(100))
+            .unwrap();
+        world.apply_npc_buff(
+            nid,
+            NpcBuffEntry {
+                skill_id: 200,
+                buff_type: 2,
+                duration_secs: 1,
+                start_time: past,
+            },
+        );
         let expired = world.process_npc_buff_tick();
         // Only buff_type=2 should expire
         assert_eq!(expired.len(), 1);
@@ -4278,12 +4345,29 @@ mod tests {
         let world = WorldState::new();
         let nid = world.allocate_npc_id();
         let inst = NpcInstance {
-            nid, proto_id: 500, zone_id: 21, region_x: 3, region_z: 3,
-            x: 50.0, y: 0.0, z: 50.0, direction: 0, is_monster: false,
-            object_type: 0, nation: 0, special_type: 0, trap_number: 0,
-            event_room: 0, is_event_npc: false, summon_type: 0, gate_open: 0,
-            user_name: String::new(), pet_name: String::new(),
-            clan_name: String::new(), clan_id: 0, clan_mark_version: 0,
+            nid,
+            proto_id: 500,
+            zone_id: 21,
+            region_x: 3,
+            region_z: 3,
+            x: 50.0,
+            y: 0.0,
+            z: 50.0,
+            direction: 0,
+            is_monster: false,
+            object_type: 0,
+            nation: 0,
+            special_type: 0,
+            trap_number: 0,
+            event_room: 0,
+            is_event_npc: false,
+            summon_type: 0,
+            gate_open: 0,
+            user_name: String::new(),
+            pet_name: String::new(),
+            clan_name: String::new(),
+            clan_id: 0,
+            clan_mark_version: 0,
         };
         world.npc_instances.insert(nid, Arc::new(inst));
         // Match
@@ -4301,12 +4385,29 @@ mod tests {
         for _ in 0..3 {
             let nid = world.allocate_npc_id();
             let inst = NpcInstance {
-                nid, proto_id: 700, zone_id: 51, region_x: 1, region_z: 1,
-                x: 10.0, y: 0.0, z: 10.0, direction: 0, is_monster: true,
-                object_type: 0, nation: 0, special_type: 0, trap_number: 0,
-                event_room: 0, is_event_npc: false, summon_type: 0, gate_open: 0,
-                user_name: String::new(), pet_name: String::new(),
-                clan_name: String::new(), clan_id: 0, clan_mark_version: 0,
+                nid,
+                proto_id: 700,
+                zone_id: 51,
+                region_x: 1,
+                region_z: 1,
+                x: 10.0,
+                y: 0.0,
+                z: 10.0,
+                direction: 0,
+                is_monster: true,
+                object_type: 0,
+                nation: 0,
+                special_type: 0,
+                trap_number: 0,
+                event_room: 0,
+                is_event_npc: false,
+                summon_type: 0,
+                gate_open: 0,
+                user_name: String::new(),
+                pet_name: String::new(),
+                clan_name: String::new(),
+                clan_id: 0,
+                clan_mark_version: 0,
             };
             world.npc_instances.insert(nid, Arc::new(inst));
         }
@@ -4322,12 +4423,29 @@ mod tests {
         let world = WorldState::new();
         let nid = world.allocate_npc_id();
         let inst = NpcInstance {
-            nid, proto_id: 100, zone_id: 21, region_x: 0, region_z: 0,
-            x: 0.0, y: 0.0, z: 0.0, direction: 0, is_monster: false,
-            object_type: 0, nation: 0, special_type: 0, trap_number: 0,
-            event_room: 0, is_event_npc: false, summon_type: 0, gate_open: 0,
-            user_name: String::new(), pet_name: String::new(),
-            clan_name: String::new(), clan_id: 0, clan_mark_version: 0,
+            nid,
+            proto_id: 100,
+            zone_id: 21,
+            region_x: 0,
+            region_z: 0,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            direction: 0,
+            is_monster: false,
+            object_type: 0,
+            nation: 0,
+            special_type: 0,
+            trap_number: 0,
+            event_room: 0,
+            is_event_npc: false,
+            summon_type: 0,
+            gate_open: 0,
+            user_name: String::new(),
+            pet_name: String::new(),
+            clan_name: String::new(),
+            clan_id: 0,
+            clan_mark_version: 0,
         };
         world.npc_instances.insert(nid, Arc::new(inst));
         world.update_npc_position(nid, 500.0, 600.0);
@@ -4420,11 +4538,19 @@ mod tests {
     fn test_event_npc_ai_aggressive_by_act_type() {
         for act_type in 1..=4u8 {
             let is_aggressive = !matches!(act_type, 1..=4);
-            assert!(!is_aggressive, "act_type {} should be non-aggressive (TENDER)", act_type);
+            assert!(
+                !is_aggressive,
+                "act_type {} should be non-aggressive (TENDER)",
+                act_type
+            );
         }
         for act_type in [0u8, 5, 6, 10, 255] {
             let is_aggressive = !matches!(act_type, 1..=4);
-            assert!(is_aggressive, "act_type {} should be aggressive (ATROCITY)", act_type);
+            assert!(
+                is_aggressive,
+                "act_type {} should be aggressive (ATROCITY)",
+                act_type
+            );
         }
     }
 
@@ -4487,17 +4613,37 @@ mod tests {
         let world = WorldState::new();
         let nid = world.allocate_npc_id();
         let inst = NpcInstance {
-            nid, proto_id: 100, zone_id: 21, region_x: 0, region_z: 0,
-            x: 50.0, y: 0.0, z: 50.0, direction: 0, is_monster: true,
-            object_type: 0, nation: 0, special_type: 0, trap_number: 0,
-            event_room: 0, is_event_npc: false, summon_type: 0, gate_open: 0,
-            user_name: String::new(), pet_name: String::new(),
-            clan_name: String::new(), clan_id: 0, clan_mark_version: 0,
+            nid,
+            proto_id: 100,
+            zone_id: 21,
+            region_x: 0,
+            region_z: 0,
+            x: 50.0,
+            y: 0.0,
+            z: 50.0,
+            direction: 0,
+            is_monster: true,
+            object_type: 0,
+            nation: 0,
+            special_type: 0,
+            trap_number: 0,
+            event_room: 0,
+            is_event_npc: false,
+            summon_type: 0,
+            gate_open: 0,
+            user_name: String::new(),
+            pet_name: String::new(),
+            clan_name: String::new(),
+            clan_id: 0,
+            clan_mark_version: 0,
         };
         world.npc_instances.insert(nid, Arc::new(inst));
         // Insert AI state at initial position
         let ai = NpcAiState {
-            cur_x: 50.0, cur_z: 50.0, region_x: 0, region_z: 0,
+            cur_x: 50.0,
+            cur_z: 50.0,
+            region_x: 0,
+            region_z: 0,
             ..test_ai_state()
         };
         world.insert_npc_ai(nid, ai);

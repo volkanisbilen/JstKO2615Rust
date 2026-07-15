@@ -26,9 +26,11 @@ use ko_protocol::{Opcode, Packet, PacketReader};
 use std::sync::Arc;
 use tracing::debug;
 
+use crate::npc::{build_npc_inout, NpcInstance, NPC_IN};
 use crate::session::{ClientSession, SessionState};
 
 /// Pet mode constants — `GameDefine.h:1153-1158`.
+const MODE_SUMMON: u8 = 2;
 pub(crate) const MODE_ATTACK: u8 = 3;
 const MODE_DEFENCE: u8 = 4;
 const MODE_LOOTING: u8 = 8;
@@ -229,6 +231,147 @@ async fn handle_normal_mode(
     r: &mut PacketReader<'_>,
 ) -> anyhow::Result<()> {
     match mode {
+        MODE_SUMMON => {
+            let world = session.world().clone();
+            let sid = session.session_id();
+
+            let snapshot = world.with_session(sid, |h| {
+                (
+                    h.position,
+                    h.event_room,
+                    h.character.clone(),
+                    h.pet_data.clone(),
+                )
+            });
+
+            let (pos, event_room, owner, pet) = match snapshot {
+                Some((pos, event_room, Some(owner), Some(pet))) => (pos, event_room, owner, pet),
+                _ => {
+                    debug!(
+                        "[{}] WIZ_PET: summon rejected, owner or pet state missing",
+                        session.addr()
+                    );
+                    return Ok(());
+                }
+            };
+
+            // Zaten dünyada kayıtlıysa ikinci kez NPC oluşturma.
+            if pet.nid != 0 && world.get_npc_instance(pet.nid as u32).is_some() {
+                debug!(
+                    "[{}] WIZ_PET: summon ignored, pet already spawned nid={}",
+                    session.addr(),
+                    pet.nid
+                );
+                return Ok(());
+            }
+
+            // PetState.pid pet NPC template/proto kimliğidir.
+            let template = match world.get_npc_template(pet.pid, false) {
+                Some(t) => t,
+                None => {
+                    tracing::warn!(
+                        "[{}] WIZ_PET: summon failed, NPC template missing pid={}",
+                        session.addr(),
+                        pet.pid
+                    );
+                    return Ok(());
+                }
+            };
+
+            let runtime_nid = world.allocate_npc_id();
+
+            // Sahibin hemen yanında doğur.
+            let spawn_x = pos.x + 1.5;
+            let spawn_z = pos.z + 1.5;
+
+            let instance = NpcInstance {
+                nid: runtime_nid,
+                proto_id: pet.pid,
+                is_monster: false,
+                zone_id: pos.zone_id,
+                x: spawn_x,
+                y: pos.y,
+                z: spawn_z,
+                direction: 0,
+                region_x: pos.region_x,
+                region_z: pos.region_z,
+                gate_open: 0,
+                object_type: 0,
+                nation: owner.nation,
+                special_type: 0,
+                trap_number: 0,
+                event_room,
+                is_event_npc: false,
+                summon_type: 0,
+                user_name: owner.name.clone(),
+                pet_name: pet.name.clone(),
+                clan_name: String::new(),
+                clan_id: 0,
+                clan_mark_version: 0,
+            };
+
+            world.insert_npc_instance(instance.clone());
+            world.init_npc_hp(runtime_nid, pet.hp as i32);
+
+            world.update_session(sid, |h| {
+                if let Some(ref mut active_pet) = h.pet_data {
+                    active_pet.nid = runtime_nid as u16;
+                    active_pet.state_change = MODE_DEFENCE;
+                    active_pet.attack_started = false;
+                    active_pet.attack_target_id = -1;
+                }
+            });
+
+            let npc_in = build_npc_inout(NPC_IN, &instance, &template);
+            world.broadcast_to_3x3(
+                pos.zone_id,
+                pos.region_x,
+                pos.region_z,
+                Arc::new(npc_in),
+                None,
+                event_room,
+            );
+
+            let stats = world.get_pet_stats_info(pet.level);
+
+            let spawn_info = PetSpawnInfo {
+                index: pet.index,
+                name: pet.name.clone(),
+                level: pet.level,
+                exp_percent: 0,
+                max_hp: stats
+                    .as_ref()
+                    .map(|v| v.pet_max_hp as u16)
+                    .unwrap_or(pet.hp),
+                hp: pet.hp,
+                max_mp: stats
+                    .as_ref()
+                    .map(|v| v.pet_max_sp as u16)
+                    .unwrap_or(pet.mp),
+                mp: pet.mp,
+                satisfaction: pet.satisfaction.max(0) as u16,
+                attack: stats.as_ref().map(|v| v.pet_attack as u16).unwrap_or(0),
+                defence: stats.as_ref().map(|v| v.pet_defence as u16).unwrap_or(0),
+                resistance: stats.as_ref().map(|v| v.pet_res as u16).unwrap_or(0),
+            };
+
+            let pet_ui = build_pet_spawn_packet(&spawn_info);
+            session.send_packet(&pet_ui).await?;
+
+            tracing::info!(
+                "[sid={}] WIZ_PET: summoned nid={} pid={} name={} zone={} pos={:.1}/{:.1}/{:.1}",
+                sid,
+                runtime_nid,
+                pet.pid,
+                pet.name,
+                pos.zone_id,
+                spawn_x,
+                pos.y,
+                spawn_z
+            );
+
+            return Ok(());
+        }
         MODE_ATTACK | MODE_DEFENCE | MODE_LOOTING => {
             // Update pet mode
             session.world().update_session(session.session_id(), |h| {
