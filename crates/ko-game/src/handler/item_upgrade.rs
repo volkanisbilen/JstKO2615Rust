@@ -2563,9 +2563,9 @@ async fn pet_hatching(
         )
         .await
     {
-        Ok(idx) if idx >= 10 => idx as u32,
+        Ok(idx) if idx > 0 => idx as u32,
         Ok(status) => {
-            // DB returned error code (<10)
+            // Non-positive index means pet creation failed.
             warn!("[sid={}] pet_hatching: DB returned status {}", sid, status);
             // Send DB error response (C++ sends nStatus as the first byte)
             let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
