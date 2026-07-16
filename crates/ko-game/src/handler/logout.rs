@@ -2032,7 +2032,9 @@ mod tests {
         let invite = world.with_session(1, |h| h.pending_knights_invite);
         assert_eq!(invite, Some(42));
         world.unregister_session(1);
-        assert!(world.with_session(1, |h| h.pending_knights_invite).is_none());
+        assert!(world
+            .with_session(1, |h| h.pending_knights_invite)
+            .is_none());
     }
 
     /// Target ID defaults to 0 on fresh session.

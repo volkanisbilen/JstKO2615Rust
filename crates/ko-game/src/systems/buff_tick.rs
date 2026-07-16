@@ -61,7 +61,9 @@ fn process_buff_tick(world: &WorldState) {
         world.set_user_ability(sid);
         world.send_item_move_refresh(sid);
 
-        if let Some((pos, sender_event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+        if let Some((pos, sender_event_room)) =
+            world.with_session(sid, |h| (h.position, h.event_room))
+        {
             world.broadcast_to_3x3(
                 pos.zone_id,
                 pos.region_x,
@@ -133,7 +135,9 @@ fn process_blink_expiry_from_results(world: &WorldState, expired: &[(SessionId, 
             ABNORMAL_NORMAL
         };
         let pkt = build_blink_expired_packet_with_type(sid as u32, normal_type);
-        if let Some((pos, sender_event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+        if let Some((pos, sender_event_room)) =
+            world.with_session(sid, |h| (h.position, h.event_room))
+        {
             world.broadcast_to_3x3(
                 pos.zone_id,
                 pos.region_x,
@@ -215,7 +219,9 @@ pub(crate) fn buff_type_cleanup(world: &WorldState, sid: u16, buff_type: i32, is
             });
 
             // Broadcast StateChangeServerDirect(3, ABNORMAL_NORMAL)
-            if let Some((pos, sender_event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, sender_event_room)) =
+                world.with_session(sid, |h| (h.position, h.event_room))
+            {
                 let state_pkt = build_blink_expired_packet_with_type(sid as u32, ABNORMAL_NORMAL);
                 world.broadcast_to_3x3(
                     pos.zone_id,
@@ -273,7 +279,9 @@ pub(crate) fn buff_type_cleanup(world: &WorldState, sid: u16, buff_type: i32, is
                 }
             });
 
-            if let Some((pos, sender_event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, sender_event_room)) =
+                world.with_session(sid, |h| (h.position, h.event_room))
+            {
                 let abnormal = match transform_skill_id {
                     Some(Some(skill_id)) => skill_id,
                     _ => ABNORMAL_NORMAL,
@@ -316,7 +324,9 @@ pub(crate) fn buff_type_cleanup(world: &WorldState, sid: u16, buff_type: i32, is
 
         // REDUCE_TARGET: broadcast ABNORMAL_NORMAL
         BUFF_TYPE_REDUCE_TARGET => {
-            if let Some((pos, sender_event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, sender_event_room)) =
+                world.with_session(sid, |h| (h.position, h.event_room))
+            {
                 let state_pkt = build_blink_expired_packet_with_type(sid as u32, ABNORMAL_NORMAL);
                 world.broadcast_to_3x3(
                     pos.zone_id,
@@ -353,7 +363,9 @@ pub(crate) fn buff_type_cleanup(world: &WorldState, sid: u16, buff_type: i32, is
                 h.can_use_skills = true;
             });
 
-            if let Some((pos, sender_event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, sender_event_room)) =
+                world.with_session(sid, |h| (h.position, h.event_room))
+            {
                 // Restore previous visual state
                 let state_pkt = build_blink_expired_packet_with_type(sid as u32, old_abnormal);
                 world.broadcast_to_3x3(
@@ -414,7 +426,9 @@ pub(crate) fn buff_type_cleanup(world: &WorldState, sid: u16, buff_type: i32, is
             world.update_session(sid, |h| {
                 h.is_devil = false;
             });
-            if let Some((pos, sender_event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, sender_event_room)) =
+                world.with_session(sid, |h| (h.position, h.event_room))
+            {
                 let pkt = build_blink_expired_packet_with_type12(sid as u32, 0);
                 world.broadcast_to_3x3(
                     pos.zone_id,
@@ -482,7 +496,9 @@ pub(crate) fn buff_type_cleanup(world: &WorldState, sid: u16, buff_type: i32, is
             let old_abnormal = world
                 .with_session(sid, |h| h.old_abnormal_type)
                 .unwrap_or(ABNORMAL_NORMAL);
-            if let Some((pos, sender_event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, sender_event_room)) =
+                world.with_session(sid, |h| (h.position, h.event_room))
+            {
                 let state_pkt = build_blink_expired_packet_with_type(sid as u32, old_abnormal);
                 world.broadcast_to_3x3(
                     pos.zone_id,
@@ -510,7 +526,8 @@ pub(crate) fn buff_type_cleanup(world: &WorldState, sid: u16, buff_type: i32, is
             });
 
             // Restore weapon visuals via UserLookChange
-            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room))
+            {
                 use crate::inventory_constants::{LEFTHAND, RIGHTHAND};
 
                 // Restore right hand
@@ -676,7 +693,9 @@ fn process_transformation_expiry_from_results(
         state_pkt.write_u32(sid as u32);
         state_pkt.write_u8(STATE_CHANGE_ABNORMAL);
         state_pkt.write_u32(ABNORMAL_NORMAL);
-        if let Some((pos, sender_event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+        if let Some((pos, sender_event_room)) =
+            world.with_session(sid, |h| (h.position, h.event_room))
+        {
             world.broadcast_to_3x3(
                 pos.zone_id,
                 pos.region_x,

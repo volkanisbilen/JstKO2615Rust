@@ -95,14 +95,10 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         }
         MERCHANT_BUY_BUY => buying_merchant_buy(session, &mut reader).await,
         MERCHANT_BUY_CLOSE => buying_merchant_close_handler(session).await,
-        MERCHANT_OFFICIAL_LIST => {
-            merchant_official_list(session, &mut reader).await
-        }
+        MERCHANT_OFFICIAL_LIST => merchant_official_list(session, &mut reader).await,
         // v2600: merchant preview via WIZ_MERCHANT sub=0x31
         // (replaces separate WIZ_MERCHANTLIST 0xBD opcode)
-        MERCHANT_LIST_PREVIEW => {
-            merchant_list_preview(session, &mut reader, sub_opcode).await
-        }
+        MERCHANT_LIST_PREVIEW => merchant_list_preview(session, &mut reader, sub_opcode).await,
         _ => {
             debug!(
                 "[{}] Merchant unhandled sub-opcode 0x{:02X}",
@@ -378,7 +374,9 @@ pub(crate) async fn merchant_close(session: &mut ClientSession) -> anyhow::Resul
 
     if is_selling {
         // Broadcast to region
-        let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+        let (pos, event_room) = world
+            .with_session(sid, |h| (h.position, h.event_room))
+            .unwrap_or_default();
         world.broadcast_to_3x3(
             pos.zone_id,
             pos.region_x,
@@ -640,7 +638,9 @@ fn merchant_insert(
     }
 
     // Broadcast to region
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -1648,7 +1648,9 @@ fn buying_merchant_close_broadcast(world: &crate::world::WorldState, sid: crate:
     close_pkt.write_u8(MERCHANT_BUY_CLOSE);
     close_pkt.write_u32(sid as u32);
 
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -1674,7 +1676,9 @@ fn buying_merchant_region_insert(session: &mut ClientSession) -> anyhow::Result<
         result.write_u32(item.item_id);
     }
 
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -2829,14 +2833,26 @@ mod tests {
     #[test]
     fn test_sell_buy_no_overlap() {
         let sell = [
-            MERCHANT_OPEN, MERCHANT_CLOSE, MERCHANT_ITEM_ADD,
-            MERCHANT_ITEM_CANCEL, MERCHANT_ITEM_LIST, MERCHANT_ITEM_BUY,
-            MERCHANT_INSERT, MERCHANT_TRADE_CANCEL, MERCHANT_ITEM_PURCHASED,
+            MERCHANT_OPEN,
+            MERCHANT_CLOSE,
+            MERCHANT_ITEM_ADD,
+            MERCHANT_ITEM_CANCEL,
+            MERCHANT_ITEM_LIST,
+            MERCHANT_ITEM_BUY,
+            MERCHANT_INSERT,
+            MERCHANT_TRADE_CANCEL,
+            MERCHANT_ITEM_PURCHASED,
         ];
         let buy = [
-            MERCHANT_BUY_OPEN, MERCHANT_BUY_INSERT, MERCHANT_BUY_LIST,
-            MERCHANT_BUY_BUY, MERCHANT_BUY_SOLD, MERCHANT_BUY_BOUGHT,
-            MERCHANT_BUY_CLOSE, MERCHANT_BUY_REGION_INSERT, MERCHANT_BUY_LIST_NEW,
+            MERCHANT_BUY_OPEN,
+            MERCHANT_BUY_INSERT,
+            MERCHANT_BUY_LIST,
+            MERCHANT_BUY_BUY,
+            MERCHANT_BUY_SOLD,
+            MERCHANT_BUY_BOUGHT,
+            MERCHANT_BUY_CLOSE,
+            MERCHANT_BUY_REGION_INSERT,
+            MERCHANT_BUY_LIST_NEW,
         ];
         for &s in &sell {
             for &b in &buy {

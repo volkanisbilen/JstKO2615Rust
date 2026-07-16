@@ -138,11 +138,26 @@ async fn handle_pet_use_skill(
     };
 
     if skill_id < 300000 {
+        tracing::warn!(
+            "[sid={}] PET_SKILL_REJECT invalid_skill={} sub={}",
+            sid,
+            skill_id,
+            _sub_code
+        );
         return Ok(());
     }
 
     let _caster_id = r.read_u32().unwrap_or(0);
     let target_id = r.read_u32().unwrap_or(0);
+
+    tracing::info!(
+        "[sid={}] PET_SKILL_RX sub={} skill={} caster={} target={}",
+        sid,
+        _sub_code,
+        skill_id,
+        _caster_id,
+        target_id
+    );
 
     // Build and broadcast WIZ_MAGIC_PROCESS effecting packet from the pet's
     // perspective so the skill visual plays on all nearby clients.
@@ -455,7 +470,7 @@ pub(crate) async fn handle_normal_mode(
                 resistance: stats.as_ref().map(|v| v.pet_res as u16).unwrap_or(0),
             };
 
-            let pet_ui = build_pet_spawn_packet(&spawn_info);
+            let pet_ui = build_pet_spawn_packet_with_items(&spawn_info, &pet.items);
             session.send_packet(&pet_ui).await?;
 
             tracing::info!(
@@ -755,6 +770,20 @@ pub struct PetSpawnInfo {
 /// This sends the full pet status window to the owning player.
 /// Called when a pet is first summoned or after leveling up.
 pub fn build_pet_spawn_packet(info: &PetSpawnInfo) -> Packet {
+    let empty_items = vec![crate::world::UserItemSlot::default(); PET_INVENTORY_TOTAL as usize];
+
+    build_pet_spawn_packet_with_items(info, &empty_items)
+}
+
+/// Build the full pet status packet including the pet's four equipment slots.
+///
+/// Pet item slots must be included whenever the active pet window is refreshed.
+/// Sending four empty slots causes the 2614/2615 client to erase the displayed
+/// pet equipment and disables item-dependent modes such as automatic looting.
+pub fn build_pet_spawn_packet_with_items(
+    info: &PetSpawnInfo,
+    pet_items: &[crate::world::UserItemSlot],
+) -> Packet {
     // C++ layout:
     // WIZ_PET << u8(1) << u8(5) << u8(1) << u8(1) << u8(0) << nIndex
     //   .DByte() << strPetName << u8(119) << bLevel << u16(exp_percent)
@@ -788,16 +817,22 @@ pub fn build_pet_spawn_packet(info: &PetSpawnInfo) -> Packet {
         resp.write_u16(info.resistance);
     }
 
-    // Pet inventory: PET_INVENTORY_TOTAL (4) empty slots
-    //      + sRemainingRentalTime(u16) + u32(0) + nExpirationTime(u32)
-    for _ in 0..PET_INVENTORY_TOTAL {
-        resp.write_u32(0); // nNum
-        resp.write_u16(0); // sDuration
-        resp.write_u16(0); // sCount
-        resp.write_u8(0); // bFlag
-        resp.write_u16(0); // sRemainingRentalTime
-        resp.write_u32(0); // padding
-        resp.write_u32(0); // nExpirationTime
+    // Pet inventory: four real pet equipment slots.
+    //
+    // Layout:
+    // item_id(u32), durability(u16), count(u16), flag(u8),
+    // remaining rental time(u16), unique-item placeholder(u32),
+    // expiration time(u32).
+    for slot_index in 0..PET_INVENTORY_TOTAL as usize {
+        let slot = pet_items.get(slot_index).cloned().unwrap_or_default();
+
+        resp.write_u32(slot.item_id);
+        resp.write_u16(slot.durability as u16);
+        resp.write_u16(slot.count);
+        resp.write_u8(slot.flag);
+        resp.write_u16(slot.remaining_rental_minutes());
+        resp.write_u32(0);
+        resp.write_u32(slot.expire_time);
     }
 
     resp

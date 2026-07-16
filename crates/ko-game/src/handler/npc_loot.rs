@@ -538,6 +538,13 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
         }
     };
 
+    tracing::info!(
+        "PET_LOOT_SCAN killer={} bundle={} eligible={:?}",
+        killer_sid,
+        bundle_id,
+        auto_loot_user
+    );
+
     let looter_sid = match auto_loot_user {
         Some(sid) => sid,
         None => return, // No eligible auto-loot user
@@ -567,12 +574,20 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
         return;
     }
 
-    // Zone auto_loot check
+    // Normal player auto-loot respects the zone flag.
+    // A summoned pet with item 850680000 and MODE_LOOTING is explicitly
+    // allowed to loot regardless of the normal zone auto_loot setting.
     let zone_allows = world
         .get_zone(npc.zone_id)
         .and_then(|z| z.zone_info.as_ref().map(|zi| zi.abilities.auto_loot))
         .unwrap_or(false);
-    if !zone_allows {
+
+    if !zone_allows && !pet_loot_active {
+        tracing::debug!(
+            "Auto-loot rejected: zone={} bundle={} zone_allows=false pet_loot=false",
+            npc.zone_id,
+            bundle_id
+        );
         return;
     }
 

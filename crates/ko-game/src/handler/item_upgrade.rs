@@ -1698,7 +1698,8 @@ async fn item_disassemble(
     let mut total_result_weight: i32 = 0;
     for res in &results {
         if let Some(p) = world.get_item(res.item_id) {
-            total_result_weight = total_result_weight.saturating_add((p.weight.unwrap_or(0) as i32).saturating_mul(res.count as i32));
+            total_result_weight = total_result_weight
+                .saturating_add((p.weight.unwrap_or(0) as i32).saturating_mul(res.count as i32));
         }
     }
     if let Some(ch) = world.get_character_info(sid) {
@@ -2061,7 +2062,11 @@ async fn bifrost_piece_exchange(
     if reward_item_type == 4 || reward_item_id == 379_068_000 {
         let (char_name, personal_rank) = world
             .with_session(sid, |h| {
-                let name = h.character.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+                let name = h
+                    .character
+                    .as_ref()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
                 (name, h.personal_rank)
             })
             .unwrap_or_default();
@@ -4030,7 +4035,12 @@ mod tests {
         assert_eq!(ITEM_MIDDLE_CLASS_TRINA, 352900000);
         assert_eq!(ITEM_RING_TRINA, 354000000);
         // All distinct
-        let trinas = [ITEM_TRINA, ITEM_LOW_CLASS_TRINA, ITEM_MIDDLE_CLASS_TRINA, ITEM_RING_TRINA];
+        let trinas = [
+            ITEM_TRINA,
+            ITEM_LOW_CLASS_TRINA,
+            ITEM_MIDDLE_CLASS_TRINA,
+            ITEM_RING_TRINA,
+        ];
         for i in 0..trinas.len() {
             for j in (i + 1)..trinas.len() {
                 assert_ne!(trinas[i], trinas[j]);
@@ -4121,8 +4131,12 @@ mod tests {
         assert_eq!(UpgradeResult::Rental as u8, 5);
         // 6 distinct result codes
         let results = [
-            UpgradeResult::Failed, UpgradeResult::Succeeded, UpgradeResult::Trading,
-            UpgradeResult::NeedCoins, UpgradeResult::NoMatch, UpgradeResult::Rental,
+            UpgradeResult::Failed,
+            UpgradeResult::Succeeded,
+            UpgradeResult::Trading,
+            UpgradeResult::NeedCoins,
+            UpgradeResult::NoMatch,
+            UpgradeResult::Rental,
         ];
         assert_eq!(results.len(), 6);
     }
@@ -4151,10 +4165,17 @@ mod tests {
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
         // All distinct
-        let subs = [ITEM_BIFROST_REQ, ITEM_BIFROST_EXCHANGE, PET_HATCHING, ITEM_SEAL,
-                     PET_IMAGE_TRANSFORM, SPECIAL_PART_SEWING, ITEM_OLDMAN_EXCHANGE];
+        let subs = [
+            ITEM_BIFROST_REQ,
+            ITEM_BIFROST_EXCHANGE,
+            PET_HATCHING,
+            ITEM_SEAL,
+            PET_IMAGE_TRANSFORM,
+            SPECIAL_PART_SEWING,
+            ITEM_OLDMAN_EXCHANGE,
+        ];
         for i in 0..subs.len() {
-            for j in (i+1)..subs.len() {
+            for j in (i + 1)..subs.len() {
                 assert_ne!(subs[i], subs[j]);
             }
         }

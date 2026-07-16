@@ -6569,10 +6569,22 @@ mod tests {
     /// TempleEventType from_i16 round-trip for all variants.
     #[test]
     fn test_temple_event_type_from_i16_roundtrip() {
-        assert_eq!(TempleEventType::from_i16(4), Some(TempleEventType::BorderDefenceWar));
-        assert_eq!(TempleEventType::from_i16(14), Some(TempleEventType::ForgottenTemple));
-        assert_eq!(TempleEventType::from_i16(24), Some(TempleEventType::ChaosDungeon));
-        assert_eq!(TempleEventType::from_i16(100), Some(TempleEventType::JuraidMountain));
+        assert_eq!(
+            TempleEventType::from_i16(4),
+            Some(TempleEventType::BorderDefenceWar)
+        );
+        assert_eq!(
+            TempleEventType::from_i16(14),
+            Some(TempleEventType::ForgottenTemple)
+        );
+        assert_eq!(
+            TempleEventType::from_i16(24),
+            Some(TempleEventType::ChaosDungeon)
+        );
+        assert_eq!(
+            TempleEventType::from_i16(100),
+            Some(TempleEventType::JuraidMountain)
+        );
         assert_eq!(TempleEventType::from_i16(0), None);
         assert_eq!(TempleEventType::from_i16(-1), None);
         assert_eq!(TempleEventType::from_i16(50), None);
@@ -6667,9 +6679,9 @@ mod tests {
     /// BDW level exp bonus boundary: level 57 uses low formula, 58 uses high formula.
     #[test]
     fn test_bdw_level_exp_bonus_formula_boundary() {
-        let low = bdw_level_exp_bonus(57);   // (57-20)*203000 = 7_511_000
-        let high = bdw_level_exp_bonus(58);  // (58+55)*120000 = 13_560_000
-        // High formula gives significantly more EXP at the boundary
+        let low = bdw_level_exp_bonus(57); // (57-20)*203000 = 7_511_000
+        let high = bdw_level_exp_bonus(58); // (58+55)*120000 = 13_560_000
+                                            // High formula gives significantly more EXP at the boundary
         assert!(high > low);
         // The jump ratio at boundary
         assert!((high as f64 / low as f64) > 1.5);

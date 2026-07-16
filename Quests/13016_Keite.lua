@@ -119,6 +119,6 @@ if (EVENT == 3002) then
 end
 
 if (EVENT == 5000) then 
-	--InsertRepurchase(UID)
+	InsertRepurchase(UID)
 end
 

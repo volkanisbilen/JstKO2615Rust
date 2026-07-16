@@ -696,9 +696,7 @@ fn calculate_r_damage_with_class_bonus(
 
             damage.max(1) as i16
         }
-        _ => {
-            0
-        }
+        _ => 0,
     }
 }
 
@@ -1179,10 +1177,11 @@ fn handle_player_attack(
     }
 
     if damage > 0 && is_mage(attacker.class) {
-        damage = (damage as f64 * world.get_plus_damage_from_item_ids(
-            attacker_snap.left_hand_item_id,
-            attacker_snap.right_hand_item_id,
-        )) as i16;
+        damage = (damage as f64
+            * world.get_plus_damage_from_item_ids(
+                attacker_snap.left_hand_item_id,
+                attacker_snap.right_hand_item_id,
+            )) as i16;
     }
 
     // ── R-attack damage multiplier for level>30 non-priests ──────────
@@ -1211,12 +1210,16 @@ fn handle_player_attack(
     // Reduces damage based on target's weapon-type-specific armor resistances (PvP only).
     if damage > 0 {
         let right_kind = if attacker_snap.right_hand_item_id != 0 {
-            world.get_item(attacker_snap.right_hand_item_id).and_then(|w| w.kind)
+            world
+                .get_item(attacker_snap.right_hand_item_id)
+                .and_then(|w| w.kind)
         } else {
             None
         };
         let left_kind = if attacker_snap.left_hand_item_id != 0 {
-            world.get_item(attacker_snap.left_hand_item_id).and_then(|w| w.kind)
+            world
+                .get_item(attacker_snap.left_hand_item_id)
+                .and_then(|w| w.kind)
         } else {
             None
         };
@@ -1325,7 +1328,9 @@ fn handle_player_attack(
                 }
                 // Convert absorbed damage to MP
                 world.update_character_stats(target_sid, |ch| {
-                    ch.mp = (ch.mp as i32).saturating_add(absorbed as i32).min(ch.max_mp as i32) as i16;
+                    ch.mp = (ch.mp as i32)
+                        .saturating_add(absorbed as i32)
+                        .min(ch.max_mp as i32) as i16;
                 });
                 // Decrement absorb count for pct==15 skills
                 if absorb_pct == 15 {
@@ -2045,10 +2050,11 @@ async fn handle_npc_attack(
     };
 
     if damage > 0 && is_mage(attacker.class) {
-        damage = (damage as f64 * world.get_plus_damage_from_item_ids(
-            npc_attacker_snap.left_hand_item_id,
-            npc_attacker_snap.right_hand_item_id,
-        )) as i16;
+        damage = (damage as f64
+            * world.get_plus_damage_from_item_ids(
+                npc_attacker_snap.left_hand_item_id,
+                npc_attacker_snap.right_hand_item_id,
+            )) as i16;
     }
 
     // ── R-attack damage multiplier for level>30 non-priests ──────────
@@ -2064,7 +2070,8 @@ async fn handle_npc_attack(
     // ── Elemental weapon damage bonuses (GetMagicDamage) ─────────────
     // Uses NPC template elemental resistances instead of player session values.
     if damage > 0 {
-        damage = apply_elemental_weapon_damage_npc(&npc_attacker_snap.equipped_stats, &tmpl, damage);
+        damage =
+            apply_elemental_weapon_damage_npc(&npc_attacker_snap.equipped_stats, &tmpl, damage);
     }
 
     if damage > 0 {
@@ -2285,19 +2292,21 @@ pub(crate) async fn handle_npc_death(
                     let mut eligible: Vec<(SessionId, u8)> = Vec::with_capacity(8);
                     for &member_sid in &party.active_members() {
                         // Single DashMap read: alive + in-range + level (3 reads → 1)
-                        let member_level = world.with_session(member_sid, |h| {
-                            let ch = h.character.as_ref()?;
-                            if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
-                                return None;
-                            }
-                            let dx = h.position.x - npc_x;
-                            let dz = h.position.z - npc_z;
-                            if dx * dx + dz * dz <= RANGE_50M {
-                                Some(ch.level)
-                            } else {
-                                None
-                            }
-                        }).flatten();
+                        let member_level = world
+                            .with_session(member_sid, |h| {
+                                let ch = h.character.as_ref()?;
+                                if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
+                                    return None;
+                                }
+                                let dx = h.position.x - npc_x;
+                                let dz = h.position.z - npc_z;
+                                if dx * dx + dz * dz <= RANGE_50M {
+                                    Some(ch.level)
+                                } else {
+                                    None
+                                }
+                            })
+                            .flatten();
                         if let Some(level) = member_level {
                             eligible.push((member_sid, level));
                         }
@@ -4279,8 +4288,12 @@ fn apply_elemental_weapon_damage_pvp(
     target_pct_poison_r: u8,
     base_damage: i16,
 ) -> i16 {
-    let (pct_fire, pct_cold, pct_lightning, pct_poison) =
-        (target_pct_fire_r, target_pct_cold_r, target_pct_lightning_r, target_pct_poison_r);
+    let (pct_fire, pct_cold, pct_lightning, pct_poison) = (
+        target_pct_fire_r,
+        target_pct_cold_r,
+        target_pct_lightning_r,
+        target_pct_poison_r,
+    );
 
     let resist_bonus = target_stats.resistance_bonus as i32;
     let mut elemental_bonus: i32 = 0;
