@@ -275,8 +275,10 @@ fn write_npc_info_type15(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate
         // C++ calls `pkt.SByte()` which sets mode to u8-length-prefix for strings.
         // SByte() writes NOTHING — it only sets the mode flag (m_doubleByte=false).
         // Numeric writes (u16, u8, u32) are NOT affected by SByte mode.
-        pkt.write_u16(0x00);
-        pkt.write_u8(0x01); // monster-like flag
+        // 2614/2615 client requires the real template identity.
+        // SID=0 creates the pet UI/NID but does not create a render object.
+        pkt.write_u16(tmpl.s_sid);
+        pkt.write_u8(2); // NPC/type-15 pet
         pkt.write_u16(tmpl.pid);
         pkt.write_u32(0x00);
         pkt.write_u8(15); // actual type
@@ -881,10 +883,9 @@ mod tests {
         r.read_u32(); // npcId
 
         // C++ pkt.SByte() writes nothing — just sets mode.
-        // First bytes are: u16(0x00) + u8(0x01)
-        assert_eq!(r.read_u16(), Some(0));
-        // u8(1) monster-like
-        assert_eq!(r.read_u8(), Some(1));
+        // 2614/2615 requires the real template SID and NPC flag.
+        assert_eq!(r.read_u16(), Some(1000));
+        assert_eq!(r.read_u8(), Some(2));
         // pid
         assert_eq!(r.read_u16(), Some(5000));
         // u32(0)

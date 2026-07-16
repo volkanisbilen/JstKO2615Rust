@@ -422,15 +422,18 @@ fn get_item_routing_user(
         };
 
         // Single DashMap read: check alive + in-range (2 reads → 1)
-        let alive_in_range = world.with_session(member_sid, |h| {
-            let ch = h.character.as_ref()?;
-            if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
-                return None;
-            }
-            let dx = h.position.x - sender_pos.x;
-            let dz = h.position.z - sender_pos.z;
-            Some(dx * dx + dz * dz <= RANGE_50M)
-        }).flatten().unwrap_or(false);
+        let alive_in_range = world
+            .with_session(member_sid, |h| {
+                let ch = h.character.as_ref()?;
+                if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
+                    return None;
+                }
+                let dx = h.position.x - sender_pos.x;
+                let dz = h.position.z - sender_pos.z;
+                Some(dx * dx + dz * dz <= RANGE_50M)
+            })
+            .flatten()
+            .unwrap_or(false);
         if !alive_in_range {
             continue;
         }
@@ -463,6 +466,9 @@ fn get_item_routing_user(
 /// Try to auto-loot a ground bundle for the killer or their party.
 /// Checks killer and party members for `auto_loot` flag, then picks up all
 /// items in the bundle automatically. `fairy_check` blocks auto-loot.
+const PET_AUTO_LOOT_ITEM_ID: u32 = 850_680_000;
+const PET_LOOT_MODE: u8 = 8;
+
 fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc: &NpcInstance) {
     use super::{INVENTORY_TOTAL, SLOT_MAX};
     use crate::world::{COIN_MAX, ITEMCOUNT_MAX, ITEM_GOLD, RANGE_50M};
@@ -473,27 +479,59 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
 
     // C++ Npc.cpp:7934-7982 — party scan checks ONLY m_bAutoLoot (NOT fairy_check).
     // fairy_check is checked later inside auto-loot bundle pickup (BundleSystem.cpp:43).
-    let auto_loot_user = if let Some(ref party) = party {
-        let mut found = None;
-        for &member_sid in &party.active_members() {
-            // Single DashMap read: auto_loot flag + range check (2 reads → 1)
-            let auto_in_range = world.with_session(member_sid, |h| {
-                if !h.auto_loot { return false; }
+    let is_pet_loot_eligible = |member_sid: SessionId| -> bool {
+        world
+            .with_session(member_sid, |h| {
+                let pet_ok = h
+                    .pet_data
+                    .as_ref()
+                    .map(|pet| {
+                        pet.nid != 0
+                            && pet.state_change == PET_LOOT_MODE
+                            && pet
+                                .items
+                                .iter()
+                                .any(|slot| slot.item_id == PET_AUTO_LOOT_ITEM_ID)
+                    })
+                    .unwrap_or(false);
+
                 let dx = h.position.x - npc.x;
                 let dz = h.position.z - npc.z;
-                dx * dx + dz * dz <= RANGE_50M * 4.0
-            }).unwrap_or(false);
-            if auto_in_range {
+
+                pet_ok && dx * dx + dz * dz <= RANGE_50M * 4.0
+            })
+            .unwrap_or(false)
+    };
+
+    let auto_loot_user = if let Some(ref party) = party {
+        let mut found = None;
+
+        for &member_sid in &party.active_members() {
+            let normal_auto_loot = world
+                .with_session(member_sid, |h| {
+                    if !h.auto_loot {
+                        return false;
+                    }
+
+                    let dx = h.position.x - npc.x;
+                    let dz = h.position.z - npc.z;
+                    dx * dx + dz * dz <= RANGE_50M * 4.0
+                })
+                .unwrap_or(false);
+
+            if normal_auto_loot || is_pet_loot_eligible(member_sid) {
                 found = Some(member_sid);
                 break;
             }
         }
+
         found
     } else {
-        let has_auto = world
+        let normal_auto_loot = world
             .with_session(killer_sid, |h| h.auto_loot)
             .unwrap_or(false);
-        if has_auto {
+
+        if normal_auto_loot || is_pet_loot_eligible(killer_sid) {
             Some(killer_sid)
         } else {
             None
@@ -506,10 +544,26 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
     };
 
     // C++ BundleSystem.cpp:43 — fairy_check blocks auto-loot inside bundle pickup
-    let fairy_blocks = world
-        .with_session(looter_sid, |h| h.fairy_check)
-        .unwrap_or(false);
-    if fairy_blocks {
+    let (fairy_blocks, pet_loot_active) = world
+        .with_session(looter_sid, |h| {
+            let pet_loot_active = h
+                .pet_data
+                .as_ref()
+                .map(|pet| {
+                    pet.nid != 0
+                        && pet.state_change == PET_LOOT_MODE
+                        && pet
+                            .items
+                            .iter()
+                            .any(|slot| slot.item_id == PET_AUTO_LOOT_ITEM_ID)
+                })
+                .unwrap_or(false);
+
+            (h.fairy_check, pet_loot_active)
+        })
+        .unwrap_or((false, false));
+
+    if fairy_blocks && !pet_loot_active {
         return;
     }
 
@@ -536,15 +590,18 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
                 let mut eligible: Vec<SessionId> = Vec::with_capacity(8);
                 for &member_sid in &party.active_members() {
                     // Single DashMap read: check alive + in-range (2 reads → 1)
-                    let in_range = world.with_session(member_sid, |h| {
-                        let ch = h.character.as_ref()?;
-                        if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
-                            return None;
-                        }
-                        let dx = h.position.x - npc.x;
-                        let dz = h.position.z - npc.z;
-                        Some(dx * dx + dz * dz <= RANGE_50M)
-                    }).flatten().unwrap_or(false);
+                    let in_range = world
+                        .with_session(member_sid, |h| {
+                            let ch = h.character.as_ref()?;
+                            if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
+                                return None;
+                            }
+                            let dx = h.position.x - npc.x;
+                            let dz = h.position.z - npc.z;
+                            Some(dx * dx + dz * dz <= RANGE_50M)
+                        })
+                        .flatten()
+                        .unwrap_or(false);
                     if in_range {
                         eligible.push(member_sid);
                     }
@@ -711,7 +768,12 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
         }
     }
 
-    tracing::debug!("Auto-loot: bundle_id={} looter={}", bundle_id, looter_sid);
+    tracing::debug!(
+        "Auto-loot: bundle_id={} looter={} pet_loot={}",
+        bundle_id,
+        looter_sid,
+        pet_loot_active
+    );
 }
 
 #[cfg(test)]

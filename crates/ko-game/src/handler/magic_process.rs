@@ -124,6 +124,22 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         *d = reader.read_u32().unwrap_or(0) as i32;
     }
 
+    // Pet summon skill: Type 9 state_change=8 is not stealth.
+    // Route it to the runtime pet NPC spawn path.
+    if skill_id == 500117 && b_opcode == MAGIC_EFFECTING {
+        let empty_data: [u8; 0] = [];
+        let mut pet_reader = PacketReader::new(&empty_data);
+
+        crate::handler::pet::handle_normal_mode(
+            session,
+            2, // MODE_SUMMON
+            &mut pet_reader,
+        )
+        .await?;
+
+        return Ok(());
+    }
+
     // ── Basic validation ────────────────────────────────────────────
 
     // Skill ID 0 = invalid
@@ -386,7 +402,12 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     //   if (pCaster && (pCaster->isInEnemySafetyArea() && nSkillID < 400000))
     //       return SkillUseFail;
     if skill_id < 400000
-        && crate::handler::attack::is_in_enemy_safety_area(caster_pos.zone_id, caster_pos.x, caster_pos.z, caster.nation)
+        && crate::handler::attack::is_in_enemy_safety_area(
+            caster_pos.zone_id,
+            caster_pos.x,
+            caster_pos.z,
+            caster.nation,
+        )
     {
         let fail_pkt = build_skill_failed_packet(skill_id, caster_id, target_id, &s_data);
         world.send_to_session_owned(sid, fail_pkt);
@@ -399,7 +420,8 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let skill_type = skill.type1.unwrap_or(0) as u8;
     let (has_instant_cast, on_cooldown) = world
         .with_session(sid, |h| {
-            let cd = h.skill_cooldowns
+            let cd = h
+                .skill_cooldowns
                 .get(&skill_id)
                 .map(|expiry| std::time::Instant::now() < *expiry)
                 .unwrap_or(false);
@@ -2173,7 +2195,8 @@ async fn execute_type3(
         // Register HOT if time_damage > 0 and duration > 0 (undead: HOT becomes DOT)
         if time_damage > 0 && duration > 0 {
             let tick_count = (duration / 2).max(1) as u8;
-            let raw_per_tick = (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let raw_per_tick =
+                (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             let hp_per_tick = if world.is_undead(caster_sid) {
                 -raw_per_tick
             } else {
@@ -2284,7 +2307,8 @@ async fn execute_type3(
         // Register HOT if time_damage > 0 and duration > 0 (undead: HOT becomes DOT)
         if time_damage > 0 && duration > 0 {
             let tick_count = (duration / 2).max(1) as u8;
-            let raw_per_tick = (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let raw_per_tick =
+                (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             let hp_per_tick = if world.is_undead(target_sid) {
                 -raw_per_tick
             } else {
@@ -2503,8 +2527,14 @@ async fn execute_type3(
                     && instance.skill_id < 400000;
                 if use_magic_formula {
                     let pvp_attr = type3_data.attribute.unwrap_or(0) as u8;
-                    let pvp_ctx =
-                        build_player_ctx(world, target_sid, &target_snap, &target, pvp_attr, caster_sid);
+                    let pvp_ctx = build_player_ctx(
+                        world,
+                        target_sid,
+                        &target_snap,
+                        &target,
+                        pvp_attr,
+                        caster_sid,
+                    );
                     let mut pvp_rng = rand::rngs::StdRng::from_entropy();
                     let mut damage = compute_magic_damage(
                         &caster,
@@ -2549,7 +2579,14 @@ async fn execute_type3(
             };
             let dot_attr = type3_data.attribute.unwrap_or(0) as u8;
             let duration_damage = if time_damage < 0 && dot_attr != 4 {
-                let dot_ctx = build_player_ctx(world, target_sid, &target_snap, &target, dot_attr, caster_sid);
+                let dot_ctx = build_player_ctx(
+                    world,
+                    target_sid,
+                    &target_snap,
+                    &target,
+                    dot_attr,
+                    caster_sid,
+                );
                 let mut dot_rng = rand::rngs::StdRng::from_entropy();
                 let raw = compute_magic_damage(
                     &caster_for_dot,
@@ -2778,7 +2815,9 @@ async fn execute_type3(
 
                 if time_damage > 0 && duration > 0 {
                     let tick_count = (duration / 2).max(1) as u8;
-                    let raw_per_tick = (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                    let raw_per_tick = (time_damage / tick_count as i32)
+                        .clamp(i16::MIN as i32, i16::MAX as i32)
+                        as i16;
                     let hp_per_tick = if world.is_undead(target_sid) {
                         -raw_per_tick
                     } else {
@@ -2801,8 +2840,14 @@ async fn execute_type3(
                 };
                 // for direct_type 1/8, negative first_damage, skill < 400000
                 let damage = if aoe_use_magic_formula {
-                    let aoe_player_ctx =
-                        build_player_ctx(world, target_sid, &aoe_target_snap, &target, aoe_attr, caster_sid);
+                    let aoe_player_ctx = build_player_ctx(
+                        world,
+                        target_sid,
+                        &aoe_target_snap,
+                        &target,
+                        aoe_attr,
+                        caster_sid,
+                    );
                     let mut d = compute_magic_damage(
                         &caster,
                         first_damage,
@@ -2901,8 +2946,14 @@ async fn execute_type3(
                         tick_count = (tick_count as u16 * 2).min(255) as u8;
                     }
                     let duration_damage = if time_damage < 0 && aoe_attr != 4 {
-                        let aoe_dot_ctx =
-                            build_player_ctx(world, target_sid, &aoe_target_snap, &target, aoe_attr, caster_sid);
+                        let aoe_dot_ctx = build_player_ctx(
+                            world,
+                            target_sid,
+                            &aoe_target_snap,
+                            &target,
+                            aoe_attr,
+                            caster_sid,
+                        );
                         let raw = compute_magic_damage(
                             &caster,
                             time_damage,
@@ -2953,7 +3004,9 @@ async fn execute_type3(
 
                     if time_damage > 0 && duration > 0 {
                         let tick_count = (duration / 2).max(1) as u8;
-                        let raw_per_tick = (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        let raw_per_tick = (time_damage / tick_count as i32)
+                            .clamp(i16::MIN as i32, i16::MAX as i32)
+                            as i16;
                         let hp_per_tick = if world.is_undead(caster_sid) {
                             -raw_per_tick
                         } else {
@@ -5007,9 +5060,8 @@ fn compute_pvp_skill_target_ac(
     } else {
         snap.ac_amount
     };
-    let mut ac = ((snap.equipped_stats.total_ac as i32) * snap.ac_pct / 100 + buff_ac
-        - snap.ac_sour)
-        .max(0);
+    let mut ac =
+        ((snap.equipped_stats.total_ac as i32) * snap.ac_pct / 100 + buff_ac - snap.ac_sour).max(0);
 
     if let Some(idx) = crate::handler::attack::class_group_index(target.class) {
         let bonus = snap.equipped_stats.ac_class_bonus[idx] as i32;
@@ -6296,9 +6348,9 @@ async fn execute_type5(
 /// 4. Activate blink (10s invulnerability)
 fn post_resurrection_sequence(world: &WorldState, sid: SessionId, zone_id: u16) {
     // ── 1. Broadcast INOUT_RESPAWN to 3×3 region ─────────────────────
-    if let Some((pos, my_char, event_room)) = world.with_session(sid, |h| {
-        (h.position, h.character.clone(), h.event_room)
-    }) {
+    if let Some((pos, my_char, event_room)) =
+        world.with_session(sid, |h| (h.position, h.character.clone(), h.event_room))
+    {
         let my_clan = my_char.as_ref().and_then(|ch| {
             if ch.knights_id > 0 {
                 world.get_knights(ch.knights_id)

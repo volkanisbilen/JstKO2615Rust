@@ -291,7 +291,11 @@ async fn handle_inventory_system(
 
     tracing::info!(
         "[{}] ItemMove: dir={} item={} src={} dst={}",
-        session.addr(), dir_byte, item_id, src_pos, dst_pos
+        session.addr(),
+        dir_byte,
+        item_id,
+        src_pos,
+        dst_pos
     );
 
     // Look up item definition
@@ -661,7 +665,11 @@ async fn handle_inventory_system(
                     // Client sends destpos=9 for bag1, destpos=10 for bag2, destpos=11 for bag3 (v2600)
                     let bag_idx = INVENTORY_COSP + dst_pos as usize;
                     // v2600: bag3 maps to 53 (=INVENTORY_MBAG) but stored at CBAG3(96)
-                    let bag_idx = if bag_idx == INVENTORY_MBAG { CBAG3 } else { bag_idx };
+                    let bag_idx = if bag_idx == INVENTORY_MBAG {
+                        CBAG3
+                    } else {
+                        bag_idx
+                    };
                     if bag_idx != CBAG1 && bag_idx != CBAG2 && bag_idx != CBAG3 {
                         return false;
                     }
@@ -718,7 +726,10 @@ async fn handle_inventory_system(
                 if dst_idx < INVENTORY_MBAG2 && inv[CBAG1].item_id == 0 {
                     return false;
                 }
-                if dst_idx >= INVENTORY_MBAG2 && dst_idx < INVENTORY_MBAG3 && inv[CBAG2].item_id == 0 {
+                if dst_idx >= INVENTORY_MBAG2
+                    && dst_idx < INVENTORY_MBAG3
+                    && inv[CBAG2].item_id == 0
+                {
                     return false;
                 }
                 // Bag 3: no cospre check — accessible via PUS purchase
@@ -781,7 +792,10 @@ async fn handle_inventory_system(
                 if dst_idx < INVENTORY_MBAG2 && inv[CBAG1].item_id == 0 {
                     return false;
                 }
-                if dst_idx >= INVENTORY_MBAG2 && dst_idx < INVENTORY_MBAG3 && inv[CBAG2].item_id == 0 {
+                if dst_idx >= INVENTORY_MBAG2
+                    && dst_idx < INVENTORY_MBAG3
+                    && inv[CBAG2].item_id == 0
+                {
                     return false;
                 }
                 // Bag 3: no cospre check — accessible via PUS purchase
@@ -1102,7 +1116,9 @@ fn is_valid_cosp_slot_pos(item: &Item, dest_pos: u8) -> bool {
         ITEM_SLOT_COSP_WINGS => dest_pos == COSP_WINGS,
         // C++ ItemHandler.cpp:2377 — bags go to COSP_BAG1+3(=9) or COSP_BAG2(=10)
         // v2600 adds bag 3 at position COSP_BAG2+1(=11)
-        ITEM_SLOT_BAG => dest_pos == COSP_BAG1 + 3 || dest_pos == COSP_BAG2 || dest_pos == COSP_BAG2 + 1,
+        ITEM_SLOT_BAG => {
+            dest_pos == COSP_BAG1 + 3 || dest_pos == COSP_BAG2 || dest_pos == COSP_BAG2 + 1
+        }
         ITEM_SLOT_COSP_FAIRY => dest_pos == COSP_FAIRY,
         ITEM_SLOT_COSP_TATTOO => dest_pos == COSP_TATTO,
         ITEM_SLOT_COSP_TALISMAN => dest_pos == COSP_TALISMAN,
@@ -2920,7 +2936,10 @@ mod tests {
         let bag3_end = INVENTORY_MBAG3 + MBAG_MAX;
         assert_eq!(bag3_end - bag3_start, MBAG_MAX);
         // Knight royale slots follow after magic bags
-        assert_eq!(bag3_end, INVENTORY_TOTAL - crate::inventory_constants::KNIGHT_ROYALE_MAX);
+        assert_eq!(
+            bag3_end,
+            INVENTORY_TOTAL - crate::inventory_constants::KNIGHT_ROYALE_MAX
+        );
     }
 
     #[test]

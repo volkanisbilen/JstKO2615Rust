@@ -83,6 +83,83 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
 
     let items = items_result?;
 
+    // Restore the equipped pet from pet_user_data.
+    //
+    // Pet records are keyed by the pet item's serial number. Older/current
+    // inventory mappings may expose the pet equipment as DB slot 5 or as the
+    // absolute CFAIRY slot 48, so check both mappings. The item-ID fallback
+    // also covers an existing Kaul before the slot mapping is normalised.
+    let mut loaded_pet_state: Option<crate::world::PetState> = None;
+    let pet_repo = ko_db::repositories::pet::PetRepository::new(&pool);
+
+    let mut pet_serial_candidates: Vec<i64> = items
+        .iter()
+        .filter(|item| {
+            item.serial_num > 0
+                && (item.slot_index as usize == crate::world::CFAIRY_SLOT
+                    || item.slot_index == 5
+                    || item.item_id == 610_001_000)
+        })
+        .map(|item| item.serial_num)
+        .collect();
+
+    pet_serial_candidates.sort_unstable();
+    pet_serial_candidates.dedup();
+
+    for serial_id in pet_serial_candidates {
+        match pet_repo.load_pet_data(serial_id).await {
+            Ok(Some(row)) => {
+                loaded_pet_state = Some(crate::world::PetState {
+                    serial_id: row.n_serial_id.max(0) as u64,
+                    level: row.b_level.clamp(1, 60) as u8,
+                    satisfaction: row.s_satisfaction.clamp(0, 10_000),
+                    exp: row.n_exp.max(0) as u32,
+                    hp: row.s_hp.max(0) as u16,
+                    nid: 0,
+                    index: row.n_index.max(0) as u32,
+                    mp: row.s_mp.max(0) as u16,
+                    state_change: 4,
+                    name: row.s_pet_name,
+                    pid: row.s_pid.max(0) as u16,
+                    size: row.s_size.max(0) as u16,
+                    attack_started: false,
+                    attack_target_id: -1,
+                    ..Default::default()
+                });
+
+                tracing::info!(
+                    "[sid={}] GAMESTART: restored pet serial={} index={} pid={}",
+                    session.session_id(),
+                    row.n_serial_id,
+                    row.n_index,
+                    row.s_pid
+                );
+                break;
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "[sid={}] GAMESTART: no pet_user_data row for serial={}",
+                    session.session_id(),
+                    serial_id
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[sid={}] GAMESTART: failed loading pet serial={}: {}",
+                    session.session_id(),
+                    serial_id,
+                    e
+                );
+            }
+        }
+    }
+
+    session
+        .world()
+        .update_session(session.session_id(), |holder| {
+            holder.pet_data = loaded_pet_state;
+        });
+
     // Process achieve summary for cover/skill title IDs
     let (cover_title, skill_title) = {
         let mut ct: u16 = 0;
@@ -207,9 +284,9 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
 
     pkt.write_u8(ch.nation as u8); // nation
     pkt.write_u8(ch.race as u8); // race
-    // IDA-verified order: class(i16) → hairColor(u8,+3000) → hairPacked(u32,+3004)
-    //                     → face(u8,+3016) → title2(u8,+1964) → title1(u8,+1960)
-    //                     → rank(u8,+3020) → level(u8,+1744) → points(i16,+3044)
+                                 // IDA-verified order: class(i16) → hairColor(u8,+3000) → hairPacked(u32,+3004)
+                                 //                     → face(u8,+3016) → title2(u8,+1964) → title1(u8,+1960)
+                                 //                     → rank(u8,+3020) → level(u8,+1744) → points(i16,+3044)
     pkt.write_i16(ch.class as i16); // class (sub_61EE80 = i16)
     let hair_color: u8 = ((ch.hair_rgb >> 24) & 0xFF) as u8; // top byte of packed hair
     pkt.write_u8(hair_color); // hairColor (+3000)
@@ -249,7 +326,11 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
                 pkt.write_u16(ki.mark_version);
                 // Cape: sniffer shows u16 cape_id + u32(R,G,B,flag)
                 let cape_id = if ch.rank == 1 {
-                    if ch.nation == 1 { 97u16 } else { 98u16 }
+                    if ch.nation == 1 {
+                        97u16
+                    } else {
+                        98u16
+                    }
                 } else {
                     ki.cape
                 };
@@ -270,7 +351,7 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
         // No clan — sniffer verified: u64(0) + cape(0xFFFF) + u32(0)
         pkt.write_u64(0);
         pkt.write_u16(0xFFFF); // cape_id = -1 (no cape)
-        pkt.write_u32(0);      // cape RGB
+        pkt.write_u32(0); // cape RGB
     }
 
     // 8 unknown bytes (sniffer verified: always zeros)
@@ -425,12 +506,18 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     // Build the 90-slot list in client's expected order
     let mut myinfo_slots: Vec<Option<i16>> = Vec::with_capacity(90);
     // Phase 1: Equipment (0-13)
-    for s in 0..14i16 { myinfo_slots.push(Some(s)); }
+    for s in 0..14i16 {
+        myinfo_slots.push(Some(s));
+    }
     // Phase 2: Bag (14-41)
-    for s in 14..42i16 { myinfo_slots.push(Some(s)); }
+    for s in 14..42i16 {
+        myinfo_slots.push(Some(s));
+    }
     // Phase 3: 9 cospre items — sequential abs slots 42-50
     // Client stores wire items at cosprItems[0,1,2,3,4,5,7,8,9] (skips [6]=CBAG1).
-    for s in 42..51i16 { myinfo_slots.push(Some(s)); }
+    for s in 42..51i16 {
+        myinfo_slots.push(Some(s));
+    }
     // Phase 4: 3 special items → client SetSpecialSlot(i, item) (myinfo.cpp:1247-1252)
     // These fill the gaps NOT covered by Phase 3 (which skips position 6=CBAG1):
     //   specialItems[0] → CBAG1 (abs 51, cospre pos 6)
@@ -439,9 +526,11 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     myinfo_slots.push(Some(51)); // CBAG1
     myinfo_slots.push(Some(52)); // CBAG2
     myinfo_slots.push(Some(INVENTORY_TOTAL as i16)); // CBAG3 at dedicated slot
-    // Phase 5: Magic bags (53-88, 3 bags × 12 slots)
-    // CBAG3 is stored at dedicated slot 96, so slot 53 is free for magic bag 1 items.
-    for s in 53..89i16 { myinfo_slots.push(Some(s)); }
+                                                     // Phase 5: Magic bags (53-88, 3 bags × 12 slots)
+                                                     // CBAG3 is stored at dedicated slot 96, so slot 53 is free for magic bag 1 items.
+    for s in 53..89i16 {
+        myinfo_slots.push(Some(s));
+    }
 
     for slot_opt in &myinfo_slots {
         let item = slot_opt.and_then(|s| items.iter().find(|i| i.slot_index == s));
@@ -507,10 +596,14 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     }
     // Sniffer-verified: activePremiumType u8 between premium entries and collRaceEnabled
     pkt.write_u8(premium_in_use); // activePremiumType (+1844)
-    // IDA-verified trailer order (lines 707205-707418):
+                                  // IDA-verified trailer order (lines 707205-707418):
     pkt.write_u8(0); // collRaceEnabled (forced to 0)
     pkt.write_u32(return_symbol_ok); // coverTitle_u32 (+3236)
-    pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); // skillSave x5
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0); // skillSave x5
     pkt.write_u8(0); // petType
     pkt.write_i16(genie_time as i16); // petHP/genieTime
     pkt.write_u8(ch.rebirth_level as u8);
@@ -540,7 +633,12 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
         if let Err(e) = std::fs::write(dump_path, &full) {
             tracing::warn!("Failed to write MyInfo dump: {}", e);
         } else {
-            tracing::info!("[{}] MyInfo dumped to {} ({} bytes)", session.addr(), dump_path, full.len());
+            tracing::info!(
+                "[{}] MyInfo dumped to {} ({} bytes)",
+                session.addr(),
+                dump_path,
+                full.len()
+            );
         }
     }
 
@@ -647,7 +745,9 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
         }
         soul_pkt.write_u32(5);
         soul_pkt.write_u8(0);
-        for i in 1u32..=4 { soul_pkt.write_u32(i); }
+        for i in 1u32..=4 {
+            soul_pkt.write_u32(i);
+        }
         session.send_packet(&soul_pkt).await?;
     }
 
@@ -666,8 +766,13 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
         let npc_ids = world.get_nearby_npc_ids(zone_id, rx, rz, event_room);
         let mut npc_pkt = Packet::new(Opcode::WizNpcRegion as u8);
         npc_pkt.write_u16(npc_ids.len() as u16);
-        for &nid in &npc_ids { npc_pkt.write_u32(nid); }
-        let to_send_npc = match npc_pkt.to_compressed() { Some(c) => c, None => npc_pkt };
+        for &nid in &npc_ids {
+            npc_pkt.write_u32(nid);
+        }
+        let to_send_npc = match npc_pkt.to_compressed() {
+            Some(c) => c,
+            None => npc_pkt,
+        };
         session.send_packet(&to_send_npc).await?;
     }
 
@@ -680,14 +785,19 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     }
 
     // seq 33: WIZ_TIME (0x13, 11 bytes)
-    session.send_packet(&crate::systems::time_weather::build_time_packet()).await?;
+    session
+        .send_packet(&crate::systems::time_weather::build_time_packet())
+        .await?;
 
     // seq 34: WIZ_WEATHER (0x14, 4 bytes)
     {
         let tw = session.world().game_time_weather();
-        session.send_packet(&crate::systems::time_weather::build_weather_packet(
-            tw.get_weather_type(), tw.get_weather_amount(),
-        )).await?;
+        session
+            .send_packet(&crate::systems::time_weather::build_weather_packet(
+                tw.get_weather_type(),
+                tw.get_weather_amount(),
+            ))
+            .await?;
     }
 
     // seq 35: Empty GAMESTART
@@ -987,7 +1097,6 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
     // SNIFFER EVIDENCE: Original server sends WIZ_ITEM_MOVE (seq 43) AFTER knights/friends/quest
     // (seq 36-42), NOT at the beginning. Sending it too early clears bag items from MyInfo.
 
-
     // 3b3. Detect fairy (CFAIRY=48) and robin loot (SHOULDER=5) on login.
     {
         let sid = session.session_id();
@@ -1124,7 +1233,12 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
         .map(|s| s.auto_quest_skill != 0)
         .unwrap_or(false);
     if auto_quest_skill {
-        open_etc_skill(&world, session.session_id(), ch.class as u16, ch.level as u8);
+        open_etc_skill(
+            &world,
+            session.session_id(),
+            ch.class as u16,
+            ch.level as u8,
+        );
     }
 
     // 7d. Send completed achievement notifications (sniffer seq 38-39, before quest data)
@@ -1845,7 +1959,10 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
     }
 
     // SetUserAbility + SendItemMove at END of Phase 2 (sniffer: seq 43)
-    tracing::info!("[{}] Phase2 FINAL: set_user_ability + item_move_refresh", session.addr());
+    tracing::info!(
+        "[{}] Phase2 FINAL: set_user_ability + item_move_refresh",
+        session.addr()
+    );
     world.set_user_ability(session.session_id());
     world.send_item_move_refresh(session.session_id());
 
@@ -2192,7 +2309,11 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
                 pkt.write_u8(ki.ranking);
                 pkt.write_u16(ki.mark_version);
                 let cape_id = if ch.rank == 1 {
-                    if ch.nation == 1 { 97u16 } else { 98u16 }
+                    if ch.nation == 1 {
+                        97u16
+                    } else {
+                        98u16
+                    }
                 } else {
                     ki.cape
                 };
@@ -2269,21 +2390,38 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
         let mut s = [None; 90];
         let mut idx = 0;
         // Phase 1: Equipment (0-13)
-        for i in 0..14 { s[idx] = Some(i); idx += 1; }
+        for i in 0..14 {
+            s[idx] = Some(i);
+            idx += 1;
+        }
         // Phase 2: Bag (14-41)
-        for i in 14..42 { s[idx] = Some(i); idx += 1; }
+        for i in 14..42 {
+            s[idx] = Some(i);
+            idx += 1;
+        }
         // Phase 3: Cospre (positions 0,1,2,3,4,5,7,8,9 → skip pos 6=slot 48)
-        for &pos in &[0, 1, 2, 3, 4, 5, 7, 8, 9] { s[idx] = Some(42 + pos); idx += 1; }
+        for &pos in &[0, 1, 2, 3, 4, 5, 7, 8, 9] {
+            s[idx] = Some(42 + pos);
+            idx += 1;
+        }
         // Phase 4: 3 special — CBAG1(51), CBAG2(52), CBAG3(slot 96)
-        s[idx] = Some(51); idx += 1;
-        s[idx] = Some(52); idx += 1;
-        s[idx] = Some(INVENTORY_TOTAL); idx += 1; // CBAG3 dedicated slot (96)
-        // Phase 5: Magic bags (53-88)
-        for i in 53..89 { s[idx] = Some(i); idx += 1; }
+        s[idx] = Some(51);
+        idx += 1;
+        s[idx] = Some(52);
+        idx += 1;
+        s[idx] = Some(INVENTORY_TOTAL);
+        idx += 1; // CBAG3 dedicated slot (96)
+                  // Phase 5: Magic bags (53-88)
+        for i in 53..89 {
+            s[idx] = Some(i);
+            idx += 1;
+        }
         s
     };
     for slot_opt in &myinfo_slots {
-        let item = slot_opt.and_then(|s| inv.get(s)).filter(|it| it.item_id != 0);
+        let item = slot_opt
+            .and_then(|s| inv.get(s))
+            .filter(|it| it.item_id != 0);
         match item {
             Some(it) => {
                 pkt.write_u32(it.item_id);
@@ -2331,8 +2469,13 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
     }
     // Sniffer-verified: 4 extra empty items after Phase 5 (always present)
     for _ in 0..4u8 {
-        pkt.write_u32(0); pkt.write_i16(0); pkt.write_u16(0);
-        pkt.write_u8(0); pkt.write_u16(0); pkt.write_u32(0); pkt.write_u32(0);
+        pkt.write_u32(0);
+        pkt.write_i16(0);
+        pkt.write_u16(0);
+        pkt.write_u8(0);
+        pkt.write_u16(0);
+        pkt.write_u32(0);
+        pkt.write_u32(0);
     }
 
     // accountStatus
@@ -2345,13 +2488,17 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
         pkt.write_u16(time_hours);
     }
     pkt.write_u8(premium_in_use); // activePremiumType — sniffer verified
-    // IDA-verified trailer order (lines 707205-707418):
+                                  // IDA-verified trailer order (lines 707205-707418):
     let genie_remaining = genie_abs.saturating_sub(now_ts);
     let genie_hours = crate::handler::genie::get_genie_hours_pub(genie_remaining);
 
     pkt.write_u8(0); // collRaceEnabled (forced to 0)
     pkt.write_u32(return_sym); // coverTitle_u32 (+3236)
-    pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); // skillSave x5
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0); // skillSave x5
     pkt.write_u8(0); // petType
     pkt.write_i16(genie_hours as i16); // petHP/genieTime
     pkt.write_u8(ch.rebirth_level); // rebirthLevel
@@ -3985,7 +4132,11 @@ mod tests {
     fn test_robin_items_valid() {
         const ROBIN_ITEMS: [u32; 4] = [950680000, 850680000, 510000000, 520000000];
         for &id in &ROBIN_ITEMS {
-            assert!(id >= 500_000_000 && id <= 960_000_000, "robin item {} out of range", id);
+            assert!(
+                id >= 500_000_000 && id <= 960_000_000,
+                "robin item {} out of range",
+                id
+            );
         }
         for i in 0..ROBIN_ITEMS.len() {
             for j in (i + 1)..ROBIN_ITEMS.len() {
@@ -4054,7 +4205,12 @@ mod tests {
     /// is_pk_ranking_zone covers exactly 4 zones.
     #[test]
     fn test_pk_ranking_zone_count() {
-        let pk_zones = [ZONE_ARDREAM, ZONE_RONARK_LAND, ZONE_RONARK_LAND_BASE, ZONE_BIFROST];
+        let pk_zones = [
+            ZONE_ARDREAM,
+            ZONE_RONARK_LAND,
+            ZONE_RONARK_LAND_BASE,
+            ZONE_BIFROST,
+        ];
         for &z in &pk_zones {
             assert!(is_pk_ranking_zone(z));
         }
@@ -4163,7 +4319,11 @@ mod tests {
     fn test_total_temple_event_zone_count() {
         let zones: [u16; 11] = [55, 76, 81, 82, 83, 84, 85, 86, 87, 89, 95];
         for &z in &zones {
-            assert!(is_in_total_temple_event_zone(z), "zone {} should be temple", z);
+            assert!(
+                is_in_total_temple_event_zone(z),
+                "zone {} should be temple",
+                z
+            );
         }
         // Verify none of the gaps are included
         assert!(!is_in_total_temple_event_zone(56));
@@ -4174,7 +4334,13 @@ mod tests {
     /// War zone kickout covers exactly 5 zones.
     #[test]
     fn test_war_zone_kickout_count_5() {
-        let kickout_zones = [ZONE_ARDREAM, ZONE_RONARK_LAND_BASE, ZONE_RONARK_LAND, ZONE_BIFROST, ZONE_KROWAZ_DOMINION];
+        let kickout_zones = [
+            ZONE_ARDREAM,
+            ZONE_RONARK_LAND_BASE,
+            ZONE_RONARK_LAND,
+            ZONE_BIFROST,
+            ZONE_KROWAZ_DOMINION,
+        ];
         for &z in &kickout_zones {
             assert!(is_war_zone_kickout(z), "zone {} should be war-kickout", z);
         }
@@ -4198,7 +4364,7 @@ mod tests {
     /// NATION_KARUS=1 and NATION_ELMORAD=2 match ishome relocation checks.
     #[test]
     fn test_nation_constants_for_ishome() {
-        use crate::world::types::{NATION_KARUS, NATION_ELMORAD};
+        use crate::world::types::{NATION_ELMORAD, NATION_KARUS};
         assert_eq!(NATION_KARUS, 1);
         assert_eq!(NATION_ELMORAD, 2);
         // Karus player in Elmorad zone → check uses nation==1
