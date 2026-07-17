@@ -262,7 +262,7 @@ fn write_npc_info_type15(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate
         pkt.write_u8(tmpl.level);
         pkt.write_u16((npc.x * 10.0) as u16);
         pkt.write_u16((npc.z * 10.0) as u16);
-        pkt.write_u16(0);
+        pkt.write_u16((npc.y * 10.0).clamp(0.0, u16::MAX as f32) as u16);
         pkt.write_u32(npc.gate_open as u32);
         pkt.write_u8(npc.object_type);
         // If clan exists: clan ID + mark version; else: u16(0) + u16(0)

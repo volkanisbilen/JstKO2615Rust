@@ -425,6 +425,30 @@ pub(crate) async fn handle_normal_mode(
                 clan_mark_version: 0,
             };
 
+            tracing::info!(
+                "[sid={}] PET_SPAWN_DIAG nid={} template_sid={} model_spid={} \
+zone={} owner_pos={:.3}/{:.3}/{:.3} owner_region={}/{} \
+pet_pos={:.3}/{:.3}/{:.3} pet_region={}/{} wire_xyz={}/{}/{}",
+                sid,
+                runtime_nid,
+                PET_RUNTIME_TEMPLATE_SID,
+                pet.pid,
+                pos.zone_id,
+                pos.x,
+                pos.y,
+                pos.z,
+                pos.region_x,
+                pos.region_z,
+                instance.x,
+                instance.y,
+                instance.z,
+                instance.region_x,
+                instance.region_z,
+                (instance.x * 10.0).clamp(0.0, u16::MAX as f32) as u16,
+                (instance.z * 10.0).clamp(0.0, u16::MAX as f32) as u16,
+                (instance.y * 10.0).clamp(0.0, u16::MAX as f32) as u16,
+            );
+
             world.insert_npc_instance(instance.clone());
             world.init_npc_hp(runtime_nid, pet.hp as i32);
 
@@ -812,9 +836,10 @@ pub fn build_pet_spawn_packet_with_items(
     resp.write_u16(info.satisfaction);
     resp.write_u16(info.attack);
     resp.write_u16(info.defence);
-    // 6x resistance values (all the same in C++)
+    // 2615 client parser reads six resistance fields as BYTE.
+    let resistance = info.resistance.min(u8::MAX as u16) as u8;
     for _ in 0..6 {
-        resp.write_u16(info.resistance);
+        resp.write_u8(resistance);
     }
 
     // Pet inventory: four real pet equipment slots.
@@ -997,9 +1022,9 @@ mod tests {
         assert_eq!(r.read_u16(), Some(9000)); // satisfaction
         assert_eq!(r.read_u16(), Some(36)); // attack
         assert_eq!(r.read_u16(), Some(90)); // defence
-                                            // 6x resistance
+                                            // 2615 parser: 6x BYTE resistance
         for _ in 0..6 {
-            assert_eq!(r.read_u16(), Some(18));
+            assert_eq!(r.read_u8(), Some(18));
         }
         // 4x empty pet inventory items
         for _ in 0..PET_INVENTORY_TOTAL {
