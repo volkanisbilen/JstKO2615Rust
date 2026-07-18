@@ -49,9 +49,13 @@ pub async fn writer_loop(
 
     while let Some(first_packet) = rx.recv().await {
         // Block opcodes that cause v2600 client inventory corruption:
-        // - 0xE9 (WIZ_EXT_HOOK): outside client dispatch range (0x06-0xD9), not in sniffer
+        // - 0xE9 (WIZ_EXT_HOOK), except the verified JstKO narration subpacket
         // - 0xC7 (WIZ_DAILY_QUEST): not in sniffer, causes bag item clearing on parse
-        if first_packet.opcode == 0xE9 || first_packet.opcode == 0xC7 {
+        let is_death_narration = first_packet.opcode == 0xE9
+            && first_packet.data.first().copied() == Some(0xD7);
+        if (first_packet.opcode == 0xE9 && !is_death_narration)
+            || first_packet.opcode == 0xC7
+        {
             tracing::debug!(
                 "Writer DROP opcode=0x{:02X} len={} (blocked: causes v2600 client corruption)",
                 first_packet.opcode, first_packet.data.len()
@@ -86,7 +90,11 @@ pub async fn writer_loop(
 
         // Drain all additional pending packets (non-blocking)
         while let Ok(packet) = rx.try_recv() {
-            if packet.opcode == 0xE9 || packet.opcode == 0xC7 { continue; }
+            let is_death_narration = packet.opcode == 0xE9
+                && packet.data.first().copied() == Some(0xD7);
+            if (packet.opcode == 0xE9 && !is_death_narration) || packet.opcode == 0xC7 {
+                continue;
+            }
             let seq = sequence.load(Ordering::Acquire);
             batch_count += 1;
             total_packets += 1;

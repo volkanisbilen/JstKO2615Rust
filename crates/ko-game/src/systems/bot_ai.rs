@@ -723,7 +723,10 @@ fn tick_pk_party_ai(world: &WorldState, bot: &BotInstance, now_ms: u64) {
                 && (entry.level - bot.level as i16).unsigned_abs() <= 15
                 && !world.has_party_invitation(entry.sid)
         })
-        .map(|entry| (entry.sid, entry.party_id))
+        // The BBS row is a snapshot and can still say party_id=0 after the
+        // player accepted an invitation. Always use the live party roster so
+        // bots do not keep inviting somebody who is already grouped.
+        .map(|entry| (entry.sid, world.get_party_id(entry.sid).unwrap_or(0)))
         .or_else(|| {
             // The client can also expose the seek icon through STATE_CHANGE
             // without opening Party BBS. Treat that flag as an equivalent
@@ -1017,7 +1020,7 @@ fn tick_bot_regen(world: &WorldState, bot: &BotInstance, now_ms: u64) {
     trace!(bot_id = bot.id, hp = new_hp, mp = new_mp, "bot regen tick");
 }
 
-fn broadcast_bot_party_hp(world: &WorldState, bot_id: BotId) {
+pub(crate) fn broadcast_bot_party_hp(world: &WorldState, bot_id: BotId) {
     let Some(bot) = world.get_bot(bot_id) else {
         return;
     };
@@ -3001,6 +3004,9 @@ pub fn bot_on_death(world: &WorldState, bot_id: BotId, now_ms: u64) {
         b.regene_at_ms = now_ms + BOT_REGENE_DELAY_MS;
         b.last_attacker_id = -1;
     });
+    // Runtime bots share the NPC DOT registry. Do not let an expired poison
+    // continue ticking after death/regeneration.
+    world.clear_npc_dots(bot_id);
     broadcast_bot_party_hp(world, bot_id);
 
     let mut dead_pkt = Packet::new(Opcode::WizDead as u8);

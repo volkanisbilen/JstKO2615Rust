@@ -3034,6 +3034,86 @@ async fn execute_type3(
             send_target_hp_update(world, caster_sid, target_sid, aoe_target_damage);
         }
 
+        // Runtime PK bots live in `world.bots`, not in the player session or
+        // NPC instance indexes traversed by the loops above/below. Include
+        // them explicitly so Nova/Inferno and other hostile Type3 areas use
+        // the same direct-damage and DOT paths as ordinary NPC targets.
+        if moral == MORAL_AREA_ENEMY && !caster_in_genie_aoe {
+            let nearby_bots = world.get_bots_in_zone_live(caster_pos.zone_id);
+            for bot in nearby_bots {
+                if !bot.is_alive() || bot.nation == caster.nation {
+                    continue;
+                }
+
+                let dx = aoe_x - bot.x;
+                let dz = aoe_z - bot.z;
+                if radius_sq > 0.0 && dx * dx + dz * dz > radius_sq {
+                    continue;
+                }
+
+                let bot_ctx = build_npc_ctx(world, bot.id, aoe_attr, caster_sid);
+                let mut bot_damage = if aoe_use_magic_formula {
+                    compute_magic_damage(
+                        &caster,
+                        first_damage,
+                        mag_atk_aoe,
+                        &bot_ctx,
+                        &mut aoe_rng,
+                    )
+                } else {
+                    (-first_damage).max(0) as i16
+                };
+                let adp_npc = type3_data.add_dmg_perc_to_npc.unwrap_or(0);
+                if adp_npc != 0 {
+                    bot_damage = ((bot_damage as i32 * adp_npc as i32) / 100) as i16;
+                }
+
+                apply_skill_damage_to_npc(
+                    world,
+                    caster_sid,
+                    bot.id,
+                    instance,
+                    bot_damage,
+                    skill,
+                    aoe_attr,
+                )
+                .await;
+
+                if time_damage != 0
+                    && duration > 0
+                    && world.get_bot(bot.id).is_some_and(|target| target.is_alive())
+                {
+                    let mut tick_count = (duration / 2).clamp(1, 255) as u8;
+                    if caster_pos.zone_id == ZONE_CHAOS_DUNGEON {
+                        tick_count = (tick_count as u16 * 2).min(255) as u8;
+                    }
+                    let duration_damage = if time_damage < 0 && aoe_attr != 4 {
+                        compute_magic_damage(
+                            &caster,
+                            time_damage,
+                            mag_atk_aoe,
+                            &bot_ctx,
+                            &mut aoe_rng,
+                        )
+                    } else {
+                        (-time_damage).max(0) as i16
+                    };
+                    let hp_per_tick =
+                        -(duration_damage.unsigned_abs() as i16 / tick_count as i16).max(1);
+                    world.add_npc_dot(
+                        bot.id,
+                        crate::world::NpcDotSlot {
+                            skill_id: instance.skill_id,
+                            hp_amount: hp_per_tick,
+                            tick_count: 0,
+                            tick_limit: tick_count,
+                            caster_sid,
+                        },
+                    );
+                }
+            }
+        }
+
         // get_nearby_session_ids excludes caster, so we heal caster separately here.
         if moral == MORAL_AREA_FRIEND {
             if let Some(caster_ch) = world.get_character_info(caster_sid) {

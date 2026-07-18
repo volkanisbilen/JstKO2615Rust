@@ -811,8 +811,7 @@ fn bdw_flag_carrier_death(world: &WorldState, dead_sid: SessionId) {
 }
 
 /// Broadcast a PvP death notice to all players in the zone.
-/// Sends the native WIZ_CHAT / DEATH_NOTICE (26) payload used by v2615 for
-/// narration and minimap death coordinates, plus a general chat history line.
+/// Sends the JstKO 2615 narration/minimap payload plus a general chat line.
 pub fn send_death_notice(world: &WorldState, killer_sid: SessionId, victim_sid: SessionId) {
     let killer_name = match world.get_session_name(killer_sid) {
         Some(n) => n,

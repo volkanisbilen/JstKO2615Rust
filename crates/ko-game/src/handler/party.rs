@@ -814,6 +814,12 @@ fn handle_party_permit(
         return Ok(());
     }
 
+    // Joining a party consumes the seek request. The client may leave a stale
+    // BBS row/need-party flag behind, which otherwise makes PK bots send a new
+    // invitation on every AI pass.
+    world.remove_seeking_party(sid);
+    world.update_session(sid, |h| h.need_party = 0);
+
     // Broadcast the new member's info to the whole party
     if let Some((joiner_ch, lr)) = get_char_with_loyalty(&world, sid) {
         let info_pkt = build_party_member_info(&joiner_ch, 1, target_number_id, 0, lr);

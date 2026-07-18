@@ -2784,6 +2784,32 @@ pub(crate) fn build_death_notice(
     pkt
 }
 
+/// Build the JstKO 1098/2615 narration packet used by the hooked client.
+///
+/// This is intentionally different from the generic extended death-notice
+/// structure above. The original `CUser::SendNewDeathNotice()` sets SByte
+/// string mode and writes only viewer-relative kill type, both names and the
+/// victim coordinates:
+/// `[0xE9][0xD7][u8 kill_type][SByte killer][SByte victim][u16 x][u16 z]`.
+///
+/// kill_type: 1 = killer/victim, 2 = killer party, 3 = other observer.
+pub(crate) fn build_new_death_narration(
+    kill_type: u8,
+    killer_name: &str,
+    victim_name: &str,
+    victim_x: u16,
+    victim_z: u16,
+) -> Packet {
+    let mut pkt = Packet::new(WIZ_EXT_HOOK);
+    pkt.write_u8(EXT_SUB_DEATH_NOTICE);
+    pkt.write_u8(kill_type);
+    pkt.write_sbyte_string(killer_name);
+    pkt.write_sbyte_string(victim_name);
+    pkt.write_u16(victim_x);
+    pkt.write_u16(victim_z);
+    pkt
+}
+
 /// Build a PLAYER_RANK (0xD5) update packet — ranking badge push to client.
 /// Packet: `[0xE9][0xD5][u8 rank_type][u16 session_id][u32 kills][u32 deaths][u32 loyalty]`
 /// - `rank_type`: 0=PK Zone, 1=BDW, 2=Chaos Dungeon, etc.
@@ -4322,6 +4348,21 @@ mod tests {
         assert_eq!(r.read_sbyte_string(), Some("Victim".to_string()));
         assert_eq!(r.read_u16(), Some(500)); // victim_x
         assert_eq!(r.read_u16(), Some(600)); // victim_z
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_build_new_death_narration_matches_1098_wire_format() {
+        use ko_protocol::PacketReader;
+        let pkt = build_new_death_narration(2, "Killer", "Victim", 1054, 1082);
+        assert_eq!(pkt.opcode, WIZ_EXT_HOOK);
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u8(), Some(EXT_SUB_DEATH_NOTICE));
+        assert_eq!(r.read_u8(), Some(2));
+        assert_eq!(r.read_sbyte_string(), Some("Killer".to_string()));
+        assert_eq!(r.read_sbyte_string(), Some("Victim".to_string()));
+        assert_eq!(r.read_u16(), Some(1054));
+        assert_eq!(r.read_u16(), Some(1082));
         assert_eq!(r.remaining(), 0);
     }
 
