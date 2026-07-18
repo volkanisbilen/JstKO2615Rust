@@ -353,10 +353,20 @@ impl WorldState {
             }
         }
     }
-    /// Get the party ID for a session (from CharacterInfo).
+    /// Get the party ID for a real player or runtime bot.
+    ///
+    /// Real players cache the ID on `CharacterInfo`. Runtime bots have no
+    /// session handle, so their membership is resolved from the party roster.
     pub fn get_party_id(&self, sid: SessionId) -> Option<u16> {
-        let handle = self.sessions.get(&sid)?;
-        handle.character.as_ref()?.party_id
+        if let Some(handle) = self.sessions.get(&sid) {
+            if let Some(party_id) = handle.character.as_ref().and_then(|ch| ch.party_id) {
+                return Some(party_id);
+            }
+        }
+
+        self.parties
+            .iter()
+            .find_map(|entry| entry.value().find_slot(sid).map(|_| *entry.key()))
     }
     /// Check if a session is currently in a party.
     pub fn is_in_party(&self, sid: SessionId) -> bool {

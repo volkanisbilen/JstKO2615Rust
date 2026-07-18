@@ -1167,6 +1167,14 @@ impl WorldState {
             .map(|e| e.value().clone())
             .collect()
     }
+    /// Get all loaded farm-bot templates. GM-created PK bots use this only as
+    /// an equipment fallback when their target zone has no class template.
+    pub fn get_all_bot_templates(&self) -> Vec<BotHandlerFarmRow> {
+        self.bot_farm_data
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
     /// Get a snapshot of the bot knights ranking.
     pub fn get_bot_knights_rank(&self) -> Vec<BotKnightsRankRow> {
         self.bot_knights_rank.read().clone()

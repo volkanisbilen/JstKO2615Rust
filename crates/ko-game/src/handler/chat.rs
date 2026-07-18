@@ -459,6 +459,12 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             // Send to all party members.
             if let Some(party_id) = world.get_party_id(sid) {
                 world.send_to_party(party_id, &broadcast);
+                crate::systems::bot_ai::handle_party_chat_command(
+                    &world,
+                    party_id,
+                    sid,
+                    &message,
+                );
             }
         }
 

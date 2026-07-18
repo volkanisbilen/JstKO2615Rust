@@ -4365,6 +4365,77 @@ fn grant_type4_buff_to_target(
     }
 }
 
+/// Apply a legitimate Type-4 support skill cast by a runtime bot.
+///
+/// Runtime bots are not backed by `ClientSession`, so they cannot enter the
+/// normal client-originated MagicInstance pipeline. This adapter still uses
+/// the loaded magic/type4 rows, normal ActiveBuff storage and stat refresh;
+/// it only supplies the bot as the packet caster.
+pub(crate) fn apply_bot_type4_support(
+    world: &WorldState,
+    bot_id: u32,
+    target_sid: SessionId,
+    skill_id: u32,
+) -> bool {
+    let Some(skill) = world.get_magic(skill_id as i32) else {
+        return false;
+    };
+    let Some(type4) = world.get_magic_type4(skill_id as i32) else {
+        return false;
+    };
+    let buff_type = type4.buff_type.unwrap_or(0);
+    if buff_type > 0 && world.has_buff(target_sid, buff_type) {
+        return false;
+    }
+    if world.is_player_dead(target_sid) {
+        return false;
+    }
+
+    let duration = type4.duration.unwrap_or(0).max(0) as u16;
+    let caster_sid = bot_id as SessionId;
+    let buff = create_active_buff(skill_id, caster_sid, &type4, true);
+    world.apply_buff(target_sid, buff);
+    apply_type4_stats(
+        world,
+        target_sid,
+        &type4,
+        skill.skill.unwrap_or(0),
+        skill_id,
+    );
+    world.set_user_ability(target_sid);
+    world.send_item_move_refresh(target_sid);
+
+    let mut pkt = Packet::new(Opcode::WizMagicProcess as u8);
+    pkt.write_u8(MAGIC_EFFECTING);
+    pkt.write_u32(skill_id);
+    pkt.write_u32(bot_id);
+    pkt.write_u32(target_sid as u32);
+    let data = [
+        0,
+        1,
+        0,
+        duration as i32,
+        0,
+        type4.speed.unwrap_or(0),
+        0,
+    ];
+    for value in data {
+        pkt.write_u32(value as u32);
+    }
+
+    if let Some((pos, event_room)) = world.with_session(target_sid, |h| (h.position, h.event_room)) {
+        world.broadcast_to_region_sync(
+            pos.zone_id,
+            pos.region_x,
+            pos.region_z,
+            Arc::new(pkt),
+            None,
+            event_room,
+        );
+    }
+    true
+}
+
 /// Create an `ActiveBuff` from a `MagicType4Row`.
 pub(crate) fn create_active_buff(
     skill_id: u32,

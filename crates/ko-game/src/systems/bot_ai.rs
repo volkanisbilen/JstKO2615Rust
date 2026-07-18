@@ -67,6 +67,9 @@ const BOT_ATTACK_COOLDOWN_RANGED_MS: u64 = 3_000;
 /// Cooldown after no target found before rescanning (ms).
 const BOT_NO_TARGET_COOLDOWN_MS: u64 = 5_000;
 
+/// PK bots inspect the seeking-party board at this interval.
+const BOT_PARTY_AI_INTERVAL_MS: u64 = 10_000;
+
 /// Default movement step per tick for non-PK zones (game units).
 /// Used only in test assertions.
 #[cfg(test)]
@@ -676,6 +679,11 @@ pub fn tick_bots(world: &WorldState) {
                 tick_merchant_move(world, &bot, now_ms);
             }
             BotAiState::Farmer | BotAiState::Pk => {
+                if bot.ai_state == BotAiState::Pk
+                    && now_ms.saturating_sub(bot.last_type4_ms) >= BOT_PARTY_AI_INTERVAL_MS
+                {
+                    tick_pk_party_ai(world, &bot, now_ms);
+                }
                 tick_fighting(world, &bot, now_ms);
             }
             BotAiState::Move => {
@@ -691,6 +699,254 @@ pub fn tick_bots(world: &WorldState) {
             }
         }
     }
+}
+
+/// Join a compatible seeking party or invite a solo seeker. Party membership
+/// uses the normal server Party roster, therefore users and bots share the
+/// stock client party UI and chat channel.
+fn tick_pk_party_ai(world: &WorldState, bot: &BotInstance, now_ms: u64) {
+    world.update_bot(bot.id, |b| b.last_type4_ms = now_ms);
+
+    let Ok(bot_sid) = SessionId::try_from(bot.id) else {
+        return;
+    };
+    let candidate = world
+        .get_seeking_party_list()
+        .into_iter()
+        .find(|entry| {
+            entry.login_type != 2
+                && entry.zone as u16 == bot.zone_id
+                && entry.nation == bot.nation
+                && (entry.level - bot.level as i16).unsigned_abs() <= 15
+                && !world.has_party_invitation(entry.sid)
+        })
+        .map(|entry| (entry.sid, entry.party_id))
+        .or_else(|| {
+            // The client can also expose the seek icon through STATE_CHANGE
+            // without opening Party BBS. Treat that flag as an equivalent
+            // request so bots react to both client flows.
+            world.sessions_in_zone(bot.zone_id).into_iter().find_map(|sid| {
+                let compatible = world
+                    .with_session(sid, |h| {
+                        h.character.as_ref().is_some_and(|ch| {
+                            h.need_party == 1
+                                && ch.nation == bot.nation
+                                && (ch.level as i16 - bot.level as i16).unsigned_abs() <= 15
+                        })
+                    })
+                    .unwrap_or(false);
+                if compatible && !world.has_party_invitation(sid) {
+                    Some((sid, world.get_party_id(sid).unwrap_or(0)))
+                } else {
+                    None
+                }
+            })
+        });
+    if let Some(current_party_id) = world.get_party_id(bot_sid) {
+        let Some(party) = world.get_party(current_party_id) else {
+            return;
+        };
+        if party.is_leader(bot_sid) && !party.is_full() {
+            if let Some((seeker_sid, _)) = candidate.filter(|(_, party_id)| *party_id == 0) {
+                world.set_party_invitation(seeker_sid, current_party_id, bot_sid);
+                let mut permit = Packet::new(Opcode::WizParty as u8);
+                permit.write_u8(0x02);
+                permit.write_u32(bot.id);
+                permit.write_string(&bot.name);
+                world.send_to_session_owned(seeker_sid, permit);
+            }
+        }
+        return;
+    }
+
+    let Some((seeker_sid, seeker_party_id)) = candidate else {
+        // No real seeker: join an allied bot party or create a two-bot party.
+        let allies: Vec<BotInstance> = world
+            .get_bots_in_zone_live(bot.zone_id)
+            .into_iter()
+            .filter(|ally| {
+                ally.id != bot.id
+                    && ally.nation == bot.nation
+                    && ally.ai_state == BotAiState::Pk
+                    && ally.is_alive()
+            })
+            .collect();
+
+        for ally in &allies {
+            let Ok(ally_sid) = SessionId::try_from(ally.id) else {
+                continue;
+            };
+            if let Some(party_id) = world.get_party_id(ally_sid) {
+                if world.get_party(party_id).is_some_and(|p| !p.is_full())
+                    && world.add_party_member(party_id, bot_sid)
+                {
+                    return;
+                }
+            }
+        }
+
+        if let Some(ally) = allies
+            .iter()
+            .filter(|ally| ally.id > bot.id)
+            .find(|ally| world.get_party_id(ally.id as SessionId).is_none())
+        {
+            if let Some(party_id) = world.create_party(bot_sid) {
+                world.add_party_member(party_id, ally.id as SessionId);
+            }
+        }
+        return;
+    };
+
+    if seeker_party_id != 0 {
+        let Some(party) = world.get_party(seeker_party_id) else {
+            return;
+        };
+        if party.is_full() || !party.is_leader(seeker_sid) {
+            return;
+        }
+        if world.add_party_member(seeker_party_id, bot_sid) {
+            let pkt = crate::handler::party::build_bot_party_member_info(
+                bot,
+                1,
+                party.target_number_id,
+            );
+            world.send_to_party(seeker_party_id, &pkt);
+            send_bot_party_chat(
+                world,
+                seeker_party_id,
+                bot,
+                "Partyye katıldım, birlikte ilerleyelim.",
+            );
+        }
+        return;
+    }
+
+    let Some(party_id) = world.create_party(bot_sid) else {
+        return;
+    };
+    world.set_party_invitation(seeker_sid, party_id, bot_sid);
+    let mut permit = Packet::new(Opcode::WizParty as u8);
+    permit.write_u8(0x02); // PARTY_PERMIT
+    permit.write_u32(bot.id);
+    permit.write_string(&bot.name);
+    world.send_to_session_owned(seeker_sid, permit);
+}
+
+fn send_bot_party_chat(world: &WorldState, party_id: u16, bot: &BotInstance, message: &str) {
+    let pkt = crate::handler::chat::build_chat_packet(
+        crate::handler::chat::ChatType::Party as u8,
+        bot.nation,
+        bot.id as u16,
+        &bot.name,
+        message,
+        -1,
+        1,
+        0,
+    );
+    world.send_to_party(party_id, &pkt);
+}
+
+/// Handle compact PK-party commands sent by a real player. Returns true when
+/// the message was recognised (even if the requested class/buff was missing).
+pub fn handle_party_chat_command(
+    world: &WorldState,
+    party_id: u16,
+    requester_sid: SessionId,
+    message: &str,
+) -> bool {
+    let command = message.trim().to_ascii_lowercase();
+    if !matches!(command.as_str(), "tp" | "+" | "++" | "buf" | "buff" | "ac" | "lup" | "sw") {
+        return false;
+    }
+
+    let Some(party) = world.get_party(party_id) else {
+        return true;
+    };
+    let Some(requester_pos) = world.get_position(requester_sid) else {
+        return true;
+    };
+    let party_bots: Vec<BotInstance> = party
+        .active_members()
+        .into_iter()
+        .filter_map(|sid| world.get_bot(sid as u32))
+        .filter(|bot| bot.is_alive() && bot.zone_id == requester_pos.zone_id)
+        .collect();
+
+    if command == "tp" {
+        let Some(mage) = party_bots.iter().find(|bot| bot.is_mage()) else {
+            return true;
+        };
+        if warp_party_member_to_bot(world, requester_sid, mage) {
+            send_bot_party_chat(world, party_id, mage, "TP tamam.");
+        }
+        return true;
+    }
+
+    let (class_group, skills): (u8, &[u32]) = match command.as_str() {
+        "+" | "buf" | "buff" => (4, &[112675]),
+        "ac" => (4, &[112674]),
+        "++" => (4, &[112675, 112674]),
+        "lup" => (2, &[108735]),
+        "sw" => (2, &[108010]),
+        _ => return true,
+    };
+    let Some(caster) = party_bots
+        .iter()
+        .find(|bot| bot_class_group(bot.class) == class_group)
+    else {
+        if let Some(bot) = party_bots.first() {
+            send_bot_party_chat(world, party_id, bot, "Bu skill için gerekli class partyde yok.");
+        }
+        return true;
+    };
+
+    let nation_offset = if caster.nation == NATION_ELMORAD { 100_000 } else { 0 };
+    let mut applied = false;
+    for base_skill in skills {
+        applied |= crate::handler::magic_process::apply_bot_type4_support(
+            world,
+            caster.id,
+            requester_sid,
+            base_skill + nation_offset,
+        );
+    }
+    if applied {
+        send_bot_party_chat(world, party_id, caster, "İstenen party skilli uygulandı.");
+    } else {
+        send_bot_party_chat(world, party_id, caster, "Bu buff zaten aktif veya kullanılamıyor.");
+    }
+    true
+}
+
+fn warp_party_member_to_bot(world: &WorldState, target_sid: SessionId, mage: &BotInstance) -> bool {
+    if world.is_player_dead(target_sid) {
+        return false;
+    }
+    let Some(old_pos) = world.get_position(target_sid) else {
+        return false;
+    };
+    if old_pos.zone_id != mage.zone_id {
+        return false;
+    }
+
+    if let Some(zone) = world.get_zone(old_pos.zone_id) {
+        zone.remove_user(old_pos.region_x, old_pos.region_z, target_sid);
+    }
+    let dest_x = mage.x + 1.5;
+    let dest_z = mage.z + 1.5;
+    let new_rx = calc_region(dest_x);
+    let new_rz = calc_region(dest_z);
+    world.update_position(target_sid, mage.zone_id, dest_x, mage.y, dest_z);
+    if let Some(zone) = world.get_zone(mage.zone_id) {
+        zone.add_user(new_rx, new_rz, target_sid);
+    }
+
+    let mut pkt = Packet::new(Opcode::WizWarp as u8);
+    pkt.write_u16((dest_x * 10.0) as u16);
+    pkt.write_u16((dest_z * 10.0) as u16);
+    pkt.write_i16(-1);
+    world.send_to_session_owned(target_sid, pkt);
+    true
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -754,7 +1010,25 @@ fn tick_bot_regen(world: &WorldState, bot: &BotInstance, now_ms: u64) {
         b.mp = new_mp;
         b.last_regen_ms = now_ms;
     });
+    broadcast_bot_party_hp(world, bot.id);
     trace!(bot_id = bot.id, hp = new_hp, mp = new_mp, "bot regen tick");
+}
+
+fn broadcast_bot_party_hp(world: &WorldState, bot_id: BotId) {
+    let Some(bot) = world.get_bot(bot_id) else {
+        return;
+    };
+    let Some(party_id) = world.get_party_id(bot_id as SessionId) else {
+        return;
+    };
+    let mut pkt = Packet::new(Opcode::WizParty as u8);
+    pkt.write_u8(0x06); // PARTY_HPCHANGE
+    pkt.write_u32(bot.id);
+    pkt.write_i16(bot.max_hp);
+    pkt.write_i16(bot.hp);
+    pkt.write_i16(bot.max_mp);
+    pkt.write_i16(bot.mp);
+    world.send_to_party(party_id, &pkt);
 }
 
 /// Get zone-specific NP reward for killing a bot.
@@ -823,6 +1097,49 @@ fn process_bot_kill_reward(
     );
 }
 
+/// Complete the player-death path for a runtime bot attacker. The normal PvP
+/// handlers assume both units have ClientSessions, so bot kills need this
+/// small adapter for WIZ_DEAD, NP/rank movement and Ronark narration.
+fn process_bot_player_kill(world: &WorldState, bot: &BotInstance, victim_sid: SessionId) {
+    let Some(victim) = world.get_character_info(victim_sid) else {
+        return;
+    };
+    let Some(victim_pos) = world.get_position(victim_sid) else {
+        return;
+    };
+
+    crate::handler::dead::broadcast_death(world, victim_sid);
+    crate::handler::dead::set_who_killed_me(world, victim_sid, bot.id as SessionId);
+
+    let np_gain = get_bot_kill_np(bot.zone_id).max(0) as u32;
+    world.update_bot(bot.id, |killer| {
+        killer.loyalty = killer.loyalty.saturating_add(np_gain).min(2_100_000_000);
+        killer.loyalty_monthly = killer
+            .loyalty_monthly
+            .saturating_add(np_gain)
+            .min(2_100_000_000);
+    });
+    crate::systems::loyalty::send_loyalty_change(
+        world,
+        victim_sid,
+        -(np_gain as i32),
+        true,
+        false,
+        victim.loyalty_monthly > 0,
+    );
+
+    world.send_death_notice_to_zone(
+        bot.zone_id,
+        bot.id as SessionId,
+        victim_sid,
+        &bot.name,
+        &victim.name,
+        world.get_party_id(bot.id as SessionId),
+        victim_pos.x.max(0.0) as u16,
+        victim_pos.z.max(0.0) as u16,
+    );
+}
+
 /// Combat AI tick for Farmer/Pk bots.
 /// Drives the combat loop: find target, move toward it, attack when in range.
 /// If the bot's HP falls below 20%, it transitions to fleeing behaviour.
@@ -838,14 +1155,6 @@ fn tick_fighting(world: &WorldState, bot: &BotInstance, now_ms: u64) {
         }
     }
 
-    // Throttle: respect the class-specific attack cooldown timer.
-    //   `if ((m_sMoveRegionAttackTime - UNIXTIME2) < 1 * SECOND) return;`
-    let cooldown = get_bot_attack_cooldown(bot, Some(world));
-    if now_ms.saturating_sub(bot.last_move_ms) < cooldown {
-        world.update_bot(bot_id, |b| b.last_tick_ms = now_ms);
-        return;
-    }
-
     // Find nearest enemy in surrounding regions.
     let target = find_nearest_enemy(bot, world);
 
@@ -857,6 +1166,11 @@ fn tick_fighting(world: &WorldState, bot: &BotInstance, now_ms: u64) {
                 b.target_id = -1;
                 b.target_changed = false;
             });
+
+            // Party bots regroup around a real member before resuming patrol.
+            if move_toward_party_anchor(world, bot, now_ms) {
+                return;
+            }
 
             // Attempt waypoint patrol movement (PK zones only).
             if !tick_waypoint_patrol(world, bot, now_ms) {
@@ -947,12 +1261,50 @@ fn tick_fighting(world: &WorldState, bot: &BotInstance, now_ms: u64) {
     }
 }
 
+fn move_toward_party_anchor(world: &WorldState, bot: &BotInstance, now_ms: u64) -> bool {
+    let Some(party_id) = world.get_party_id(bot.id as SessionId) else {
+        return false;
+    };
+    let Some(party) = world.get_party(party_id) else {
+        return false;
+    };
+    let anchor = party
+        .active_members()
+        .into_iter()
+        .filter(|sid| (*sid as u32) < crate::world::BOT_ID_BASE)
+        .filter_map(|sid| world.get_position(sid))
+        .find(|pos| pos.zone_id == bot.zone_id);
+    let Some(anchor) = anchor else {
+        return false;
+    };
+    let dx = anchor.x - bot.x;
+    let dz = anchor.z - bot.z;
+    if dx * dx + dz * dz <= 15.0 * 15.0 {
+        return false;
+    }
+    let (new_x, new_y, new_z) = move_toward_target(bot, anchor.x, anchor.y, anchor.z);
+    if !is_bot_position_valid(world, bot.zone_id, new_x, new_z) {
+        return false;
+    }
+    broadcast_bot_move_ex(world, bot, new_x, new_y, new_z, 3);
+    world.update_bot(bot.id, |moving| {
+        moving.x = new_x;
+        moving.y = new_y;
+        moving.z = new_z;
+        moving.region_x = calc_region(new_x);
+        moving.region_z = calc_region(new_z);
+        moving.last_move_ms = now_ms;
+        moving.last_tick_ms = now_ms;
+    });
+    true
+}
+
 /// Move a bot along its waypoint patrol route.
 /// + `MoveProcessRonarkLandTown()` / `MoveProcessArdreamLandTown()`
 /// When a bot has no combat target, it walks along predefined waypoint routes.
 /// Each waypoint is reached by stepping toward it (using `move_toward_target`).
 /// When close enough, `move_state` advances. When the route is complete,
-/// a new random route is picked and the bot respawns
+/// a new random route is picked and the bot continues from its current point.
 /// Returns `true` if a waypoint movement was performed, `false` if the bot
 /// has no active route (non-PK zone, or `move_route == 0`).
 fn tick_waypoint_patrol(world: &WorldState, bot: &BotInstance, now_ms: u64) -> bool {
@@ -965,11 +1317,26 @@ fn tick_waypoint_patrol(world: &WorldState, bot: &BotInstance, now_ms: u64) -> b
     }
 
     // Look up the current waypoint coordinates.
-    let (wp_x, wp_z) = match bot_waypoints::get_waypoint(bot.zone_id, route, state, bot.nation) {
+    let get_waypoint = |state| {
+        if bot.zone_id == ZONE_RONARK_LAND {
+            bot_waypoints::get_bowl_waypoint(route, state, bot.nation)
+        } else {
+            bot_waypoints::get_waypoint(bot.zone_id, route, state, bot.nation)
+        }
+    };
+    let route_max = || {
+        if bot.zone_id == ZONE_RONARK_LAND {
+            bot_waypoints::bowl_waypoint_count()
+        } else {
+            bot_waypoints::route_max_waypoints(bot.zone_id, route, bot.nation)
+        }
+    };
+
+    let (wp_x, wp_z) = match get_waypoint(state) {
         Some(coords) => coords,
         None => {
             // Invalid waypoint (0,0) for this nation — skip to next.
-            let max = bot_waypoints::route_max_waypoints(bot.zone_id, route, bot.nation);
+            let max = route_max();
             if state >= max {
                 // Route complete — reset and respawn.
                 waypoint_route_complete(world, bot, now_ms);
@@ -997,7 +1364,7 @@ fn tick_waypoint_patrol(world: &WorldState, bot: &BotInstance, now_ms: u64) -> b
 
     if dist_sq <= arrival_threshold * arrival_threshold {
         // Arrived at waypoint — advance to next.
-        let max = bot_waypoints::route_max_waypoints(bot.zone_id, route, bot.nation);
+        let max = route_max();
         if state >= max {
             // Route cycle complete — pick new route, respawn.
             waypoint_route_complete(world, bot, now_ms);
@@ -1023,7 +1390,7 @@ fn tick_waypoint_patrol(world: &WorldState, bot: &BotInstance, now_ms: u64) -> b
     // Path validation: reject move if destination is outside map boundaries.
     if !is_bot_position_valid(world, bot.zone_id, new_x, new_z) {
         // Skip this waypoint and advance to next.
-        let max = bot_waypoints::route_max_waypoints(bot.zone_id, route, bot.nation);
+        let max = route_max();
         if state >= max {
             waypoint_route_complete(world, bot, now_ms);
         } else {
@@ -1074,33 +1441,12 @@ fn tick_waypoint_patrol(world: &WorldState, bot: &BotInstance, now_ms: u64) -> b
 ///   then `Regene(INOUT_IN)` respawns the bot.
 fn waypoint_route_complete(world: &WorldState, bot: &BotInstance, now_ms: u64) {
     let zone_id = bot.zone_id;
-    let old_rx = bot.region_x;
-    let old_rz = bot.region_z;
     let new_route = bot_waypoints::random_route(zone_id);
 
-    // Step 1: Broadcast INOUT_OUT to remove from current position.
-    let mut out_pkt = Packet::new(Opcode::WizUserInout as u8);
-    out_pkt.write_u8(2); // INOUT_OUT
-    out_pkt.write_u8(0);
-    out_pkt.write_u32(bot.id);
-    broadcast_to_bot_region(world, zone_id, old_rx, old_rz, &out_pkt);
-
-    // Step 2: Determine respawn position (nation start).
-    let (respawn_x, respawn_z) = get_bot_respawn_position(zone_id, bot.nation);
-    let (new_x, new_z) = if respawn_x > 0.0 || respawn_z > 0.0 {
-        (respawn_x, respawn_z)
-    } else {
-        (bot.x, bot.z)
-    };
-    let new_rx = calc_region(new_x);
-    let new_rz = calc_region(new_z);
-
-    // Step 3: Update bot — new route, new position, reset state.
+    // Keep the bot in the bowl and begin another route. Teleporting to the
+    // nation base at every completed route caused visible disappear/reappear
+    // cycles and made the patrol look stuck.
     world.update_bot(bot.id, |b| {
-        b.x = new_x;
-        b.z = new_z;
-        b.region_x = new_rx;
-        b.region_z = new_rz;
         b.move_route = new_route;
         b.move_state = if new_route > 0 { 1 } else { 0 };
         b.target_id = -1;
@@ -1109,19 +1455,13 @@ fn waypoint_route_complete(world: &WorldState, bot: &BotInstance, now_ms: u64) {
         b.last_tick_ms = now_ms;
     });
 
-    // Step 4: Broadcast INOUT_IN at new position.
-    if let Some(alive_bot) = world.get_bot(bot.id) {
-        let in_pkt = build_bot_inout_packet(&alive_bot, world, 1); // INOUT_IN
-        broadcast_to_bot_region(world, zone_id, new_rx, new_rz, &in_pkt);
-    }
-
     debug!(
         bot_id = bot.id,
         old_route = bot.move_route,
         new_route,
-        new_x,
-        new_z,
-        "bot patrol route complete — reset and respawn"
+        x = bot.x,
+        z = bot.z,
+        "bot patrol route complete — continuing from current position"
     );
 }
 
@@ -1253,8 +1593,9 @@ pub fn find_nearest_enemy(
 
 /// Calculate the bot's new position when moving toward a target.
 /// + `CBot::HandleAttack()` movement
-/// Moves the bot `speed/10.0` units toward the target, with a small
-/// random offset matching the C++ jitter: `(myrand(0,2000) - 1000) / 500`.
+/// Moves the bot `speed/10.0` units toward the target. A stable target vector
+/// is important here: re-rolling jitter every second makes the client render
+/// zig-zag corrections and appears as stuttering.
 /// Returns `(new_x, new_y, new_z)` — the bot's new position after movement.
 pub fn move_toward_target(
     bot: &BotInstance,
@@ -1262,18 +1603,8 @@ pub fn move_toward_target(
     target_y: f32,
     target_z: f32,
 ) -> (f32, f32, f32) {
-    // Add C++ style random jitter to target position.
-    //   vUser.Set(x + ((myrand(0, 2000) - 1000.0f) / 500.0f), ...);
-    let mut rng = rand::thread_rng();
-    let jitter_x: f32 = (rng.gen_range(0..=2000) as f32 - 1000.0) / 500.0;
-    let jitter_z: f32 = (rng.gen_range(0..=2000) as f32 - 1000.0) / 500.0;
-
-    let adj_target_x = target_x + jitter_x;
-    let adj_target_z = target_z + jitter_z;
-
-    // Direction vector from bot to jittered target.
-    let dx = adj_target_x - bot.x;
-    let dz = adj_target_z - bot.z;
+    let dx = target_x - bot.x;
+    let dz = target_z - bot.z;
     let distance = (dx * dx + dz * dz).sqrt();
 
     if distance < 0.001 {
@@ -1286,7 +1617,7 @@ pub fn move_toward_target(
 
     // If one step would overshoot, snap to target (C++ sRunFinish logic).
     if step >= distance {
-        return (adj_target_x, target_y, adj_target_z);
+        return (target_x, target_y, target_z);
     }
 
     // Normalize and scale.
@@ -1517,6 +1848,10 @@ fn bot_perform_attack(
         }
     }
 
+    if result == ATTACK_TARGET_DEAD {
+        process_bot_player_kill(world, bot, target_sid);
+    }
+
     // Update bot state.
     world.update_bot(bot.id, |b| {
         b.skill_cooldown[0] = now_ms;
@@ -1717,6 +2052,9 @@ fn bot_perform_aoe_attack(
         target_hp,
         primary_damage as i32,
     );
+    if result == ATTACK_TARGET_DEAD {
+        process_bot_player_kill(world, bot, primary_target);
+    }
 
     // ── Phase 3: Find and damage secondary targets ───────────────────
     let secondary_targets = find_aoe_targets(
@@ -1733,6 +2071,9 @@ fn bot_perform_aoe_attack(
         let (res, hp) = apply_damage_to_target(world, *target_sid, damage, bot.id);
         broadcast_bot_magic_effecting(world, bot, *target_sid, skill_id, damage);
         broadcast_target_hp_update(world, bot, *target_sid, res, hp, damage as i32);
+        if res == ATTACK_TARGET_DEAD {
+            process_bot_player_kill(world, bot, *target_sid);
+        }
     }
 
     // ── Phase 4: Update bot state ────────────────────────────────────
@@ -2112,6 +2453,7 @@ fn apply_damage_to_target(
             b.hp = new_hp;
             b.last_attacker_id = attacker_id as i32;
         });
+        broadcast_bot_party_hp(world, target_id as BotId);
 
         // If the bot died, trigger the full death processing (WIZ_DEAD broadcast,
         // regene timer, etc.) instead of just setting presence.
@@ -2519,6 +2861,9 @@ fn tick_merchant(world: &WorldState, bot: &BotInstance, now_ms: u64) {
 /// Builds an INOUT_OUT packet using the bot's session-band ID and broadcasts
 /// it to all players in the surrounding 3×3 region so they see the bot disappear.
 pub fn despawn_bot(world: &WorldState, id: BotId) {
+    if let Ok(bot_sid) = SessionId::try_from(id) {
+        world.cleanup_party_on_disconnect(bot_sid);
+    }
     if let Some(bot) = world.remove_bot(id) {
         debug!(
             bot_id = id,
@@ -2595,6 +2940,7 @@ fn tick_bot_self_heal(world: &WorldState, bot: &BotInstance, now_ms: u64) {
         b.hp = new_hp;
         b.last_hp_change_ms = now_ms;
     });
+    broadcast_bot_party_hp(world, bot.id);
 
     debug!(
         bot_id = bot.id,
@@ -2647,6 +2993,7 @@ pub fn bot_on_death(world: &WorldState, bot_id: BotId, now_ms: u64) {
         b.regene_at_ms = now_ms + BOT_REGENE_DELAY_MS;
         b.last_attacker_id = -1;
     });
+    broadcast_bot_party_hp(world, bot_id);
 
     let mut dead_pkt = Packet::new(Opcode::WizDead as u8);
     dead_pkt.write_u32(bot_id);
@@ -2714,7 +3061,7 @@ pub fn bot_on_death(world: &WorldState, bot_id: BotId, now_ms: u64) {
             world.send_death_notice_to_zone(
                 zone_id,
                 killer_sid,
-                SessionId::MAX, // bot has no session — no recipient will match victim_sid
+                bot_id as SessionId,
                 &world.get_session_name(killer_sid).unwrap_or_default(),
                 &bot.name,
                 killer_party_id,
@@ -2732,6 +3079,40 @@ pub fn bot_on_death(world: &WorldState, bot_id: BotId, now_ms: u64) {
                     }
                 });
             }
+        }
+    }
+
+    if is_pk_zone(zone_id) && killer_id >= 0 {
+        let np_loss = get_bot_kill_np(zone_id).max(0) as u32;
+        world.update_bot(bot_id, |victim| {
+            victim.loyalty = victim.loyalty.saturating_sub(np_loss);
+            victim.loyalty_monthly = victim.loyalty_monthly.saturating_sub(np_loss);
+        });
+    }
+
+    // Runtime bot killed runtime bot: award the killer's in-memory NP used by
+    // Today's Rank, and emit the same narration/chat path as every other PvP
+    // combination.
+    if killer_id >= crate::world::BOT_ID_BASE as i32 {
+        if let Some(killer_bot) = world.get_bot(killer_id as BotId) {
+            let np_gain = get_bot_kill_np(zone_id).max(0) as u32 + rival_bonus_np.max(0) as u32;
+            world.update_bot(killer_bot.id, |killer| {
+                killer.loyalty = killer.loyalty.saturating_add(np_gain).min(2_100_000_000);
+                killer.loyalty_monthly = killer
+                    .loyalty_monthly
+                    .saturating_add(np_gain)
+                    .min(2_100_000_000);
+            });
+            world.send_death_notice_to_zone(
+                zone_id,
+                killer_bot.id as SessionId,
+                bot_id as SessionId,
+                &killer_bot.name,
+                &bot.name,
+                world.get_party_id(killer_bot.id as SessionId),
+                bot.x.max(0.0) as u16,
+                bot.z.max(0.0) as u16,
+            );
         }
     }
 
@@ -3042,9 +3423,13 @@ pub(crate) fn write_bot_user_info(pkt: &mut Packet, bot: &BotInstance, world: &W
     pkt.write_u8(res_hp_type);
     pkt.write_u32(1); // m_bAbnormalType = ABNORMAL_NORMAL
     pkt.write_u8(0); // v2600: unknown byte after abnormal_type
-    pkt.write_u8(bot.need_party);
+    let bot_party_id = world.get_party_id(bot.id as SessionId);
+    let is_party_leader = bot_party_id
+        .and_then(|party_id| world.get_party(party_id))
+        .is_some_and(|party| party.is_leader(bot.id as SessionId));
+    pkt.write_u8(if bot_party_id.is_some() { 0 } else { bot.need_party });
     pkt.write_u8(1); // m_bAuthority = 1 (Player, not GM)
-    pkt.write_u8(0); // m_bPartyLeader = false
+    pkt.write_u8(if is_party_leader { 1 } else { 0 });
 
     // Invisibility, team, devil, direction, chicken, rank
     pkt.write_u8(0); // bInvisibilityType
@@ -3361,8 +3746,9 @@ fn gm_bot_equipment(
     class: u16,
 ) -> [(u32, i16, u8); 17] {
     let class_group = bot_class_group(class);
-    let rows = world.get_bots_in_zone(zone_id as i16);
-    let find_equipment = |same_nation: bool| {
+    let zone_rows = world.get_bots_in_zone(zone_id as i16);
+    let all_rows = world.get_all_bot_templates();
+    let find_equipment = |rows: &[ko_db::models::bot_system::BotHandlerFarmRow], same_nation: bool| {
         rows.iter()
             .filter(|row| {
                 (!same_nation || row.nation as u8 == nation)
@@ -3373,8 +3759,10 @@ fn gm_bot_equipment(
             .find(|equipment| equipment.iter().any(|(item_id, _, _)| *item_id != 0))
     };
 
-    find_equipment(true)
-        .or_else(|| find_equipment(false))
+    find_equipment(&zone_rows, true)
+        .or_else(|| find_equipment(&zone_rows, false))
+        .or_else(|| find_equipment(&all_rows, true))
+        .or_else(|| find_equipment(&all_rows, false))
         .unwrap_or([(0, 0, 0); 17])
 }
 
@@ -5112,7 +5500,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tick_fighting_respects_cooldown() {
+    fn test_tick_fighting_movement_is_independent_from_attack_cooldown() {
         let world = WorldState::new();
         let row = make_farm_row(1, "CoolBot", 72);
         let id = do_spawn(&world, &row, 72, 100.0, 100.0, 0, BotAiState::Pk);
@@ -5132,8 +5520,8 @@ mod tests {
 
         let updated = world.get_bot(id).unwrap();
         assert!(
-            (updated.x - pos_before).abs() < 0.001,
-            "bot should not move during cooldown"
+            (updated.x - pos_before).abs() > 0.001,
+            "bot patrol should keep moving while attack skill is on cooldown"
         );
     }
 
@@ -7722,9 +8110,9 @@ mod tests {
     fn test_waypoint_patrol_advances_state_on_arrival() {
         let world = WorldState::new();
 
-        // Place the bot exactly at waypoint 1 coordinates.
-        // Ronark Route 1, WP 1 Karus = (1375, 1099)
-        let mut bot = make_combat_bot(BOT_ID_BASE, "AtWaypoint", 1, 106, 71, 1375.0, 1099.0);
+        // Place the bot exactly at the first Ronark bowl waypoint.
+        let (x, z) = bot_waypoints::get_bowl_waypoint(1, 1, 1).unwrap();
+        let mut bot = make_combat_bot(BOT_ID_BASE, "AtWaypoint", 1, 106, 71, x, z);
         bot.move_route = 1;
         bot.move_state = 1;
         world.insert_bot(bot.clone());
@@ -7744,10 +8132,10 @@ mod tests {
     fn test_waypoint_patrol_route_complete_resets() {
         let world = WorldState::new();
 
-        // Place bot at last waypoint of Route 1 Karus (WP 19 = (718, 928)).
-        let mut bot = make_combat_bot(BOT_ID_BASE, "LastWP", 1, 106, 71, 718.0, 928.0);
+        // State beyond the 12-point bowl circuit completes the route.
+        let mut bot = make_combat_bot(BOT_ID_BASE, "LastWP", 1, 106, 71, 1024.0, 850.0);
         bot.move_route = 1;
-        bot.move_state = 19; // Max for Ronark Route 1 Karus
+        bot.move_state = 13;
         world.insert_bot(bot.clone());
 
         let now_ms = tick_ms();
@@ -7771,8 +8159,8 @@ mod tests {
     fn test_waypoint_patrol_elmo_uses_elmo_coords() {
         let world = WorldState::new();
 
-        // Elmo bot in Ronark Land, Route 1 WP 1 Elmo = (623, 902).
-        let mut bot = make_combat_bot(BOT_ID_BASE, "ElmoPatrol", 2, 106, 71, 623.0, 902.0);
+        let (x, z) = bot_waypoints::get_bowl_waypoint(1, 1, 2).unwrap();
+        let mut bot = make_combat_bot(BOT_ID_BASE, "ElmoPatrol", 2, 106, 71, x, z);
         bot.move_route = 1;
         bot.move_state = 1;
         world.insert_bot(bot.clone());

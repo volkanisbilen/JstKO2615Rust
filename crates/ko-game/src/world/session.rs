@@ -1444,8 +1444,9 @@ impl WorldState {
     /// - killtype 2: recipient is in the killer's party
     /// - killtype 3: bystander
     ///
-    /// Also sends a WIZ_CHAT WAR_SYSTEM_CHAT fallback for vanilla v2525 clients
-    /// that drop ext_hook (0xE9 ≥ 0xD8 dispatch range).
+    /// Also sends a normal chat-bar line for clients that drop ext_hook. It is
+    /// intentionally GENERAL_CHAT, not WAR_SYSTEM_CHAT, so it never becomes a
+    /// top-of-screen scrolling notice.
     #[allow(clippy::too_many_arguments)]
     pub fn send_death_notice_to_zone(
         &self,
@@ -1461,10 +1462,24 @@ impl WorldState {
         /// ExtSub::DeathNotice = 0xD7
         const EXT_SUB_DEATH_NOTICE: u8 = 0xD7;
 
-        // WIZ_CHAT WAR_SYSTEM_CHAT fallback for vanilla v2525 client
-        let chat_msg = format!("[PvP] {} killed {}", killer_name, victim_name);
-        let arc_chat_pkt = Arc::new(crate::systems::timed_notice::build_notice_packet(
-            8, &chat_msg,
+        let channel = if zone_id == crate::world::ZONE_RONARK_LAND {
+            "Ronark"
+        } else {
+            "PvP"
+        };
+        let chat_msg = format!(
+            "[{}] {} killed {} at ({}, {})",
+            channel, killer_name, victim_name, victim_x, victim_z
+        );
+        let arc_chat_pkt = Arc::new(crate::handler::chat::build_chat_packet(
+            crate::handler::chat::ChatType::General as u8,
+            0,
+            u16::MAX,
+            "PvP",
+            &chat_msg,
+            -1,
+            1,
+            1,
         ));
 
         if let Some(index_entry) = self.zone_session_index.get(&zone_id) {
