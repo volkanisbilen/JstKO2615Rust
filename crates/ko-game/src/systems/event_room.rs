@@ -1357,13 +1357,7 @@ pub fn teleport_users_to_event(world: &WorldState, event_type: TempleEventType) 
         };
 
         for sid in &session_ids {
-            // Get player nation for zone change packet
-            let nation = world
-                .get_character_info(*sid)
-                .map(|c| c.nation)
-                .unwrap_or(0);
-
-            send_event_zone_change(world, *sid, zone_id, nation, *room_id);
+            send_event_zone_change(world, *sid, zone_id, *room_id);
 
             // Send timer overlay packets per C++ TempleEventTeleportUsers
             world.send_to_session_arc(*sid, Arc::clone(&arc_select));
@@ -1509,16 +1503,15 @@ pub fn temple_event_create_parties(world: &WorldState, event_type: TempleEventTy
 }
 
 /// Send a zone change packet for event teleport.
-/// Coordinates (0, 0) cause the client to use default spawn for the zone.
-fn send_event_zone_change(
-    world: &WorldState,
-    sid: SessionId,
-    zone_id: u16,
-    nation: u8,
-    event_room: u8,
-) {
-    // Update server-side position (0,0,0 = use zone default spawn)
-    world.update_position(sid, zone_id, 0.0, 0.0, 0.0);
+///
+/// Event entry must use the regular server-side teleport path. Sending raw
+/// `(0, 0)` coordinates leaves modern clients below the BDW map and also
+/// skips region-grid and zone-changing bookkeeping.
+fn send_event_zone_change(world: &WorldState, sid: SessionId, zone_id: u16, event_room: u8) {
+    // Resolve (0,0) through start_position and perform the complete zone
+    // transition before switching the room filter. This preserves the old
+    // room while broadcasting INOUT_OUT from the source zone.
+    crate::handler::zone_change::server_teleport_to_zone(world, sid, zone_id, 0.0, 0.0);
 
     //   if (eventroom == 0 && GetEventRoom() > 0) m_bEventRoom = 0;
     //   else if (eventroom > 0)                    m_bEventRoom = eventroom;
@@ -1534,18 +1527,6 @@ fn send_event_zone_change(
             });
         }
     }
-
-    let mut pkt = Packet::new(Opcode::WizZoneChange as u8);
-    pkt.write_u8(3); // ZONE_CHANGE_TELEPORT
-    pkt.write_u16(zone_id);
-    pkt.write_u16(0); // unk
-    pkt.write_u16(0); // x (0 = use zone default spawn)
-    pkt.write_u16(0); // z (0 = use zone default spawn)
-    pkt.write_u16(0); // unk
-    pkt.write_u8(nation);
-    pkt.write_u16(0xFFFF);
-
-    world.send_to_session_owned(sid, pkt);
 }
 
 /// Determine the kick-out destination zone for a player leaving an event.
@@ -3030,15 +3011,49 @@ mod tests {
         let world = crate::world::WorldState::new();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         world.register_session(1, tx);
+        world.register_ingame(
+            1,
+            crate::world::CharacterInfo {
+                session_id: 1,
+                nation: 1,
+                name: "BdwSpawnTest".into(),
+                ..Default::default()
+            },
+            crate::world::Position {
+                zone_id: 21,
+                x: 816.0,
+                y: 0.0,
+                z: 532.0,
+                region_x: crate::zone::calc_region(816.0),
+                region_z: crate::zone::calc_region(532.0),
+            },
+        );
+        world.insert_start_position(ko_db::models::StartPositionRow {
+            zone_id: 84,
+            karus_x: 51,
+            karus_z: 58,
+            elmorad_x: 201,
+            elmorad_z: 207,
+            karus_gate_x: 5,
+            karus_gate_z: 5,
+            elmo_gate_x: 0,
+            elmo_gate_z: 0,
+            range_x: 0,
+            range_z: 0,
+        });
 
         assert_eq!(world.get_event_room(1), 0);
 
         // Teleport into event zone with room 3
-        send_event_zone_change(&world, 1, 84, 1, 3);
+        send_event_zone_change(&world, 1, 84, 3);
         assert_eq!(world.get_event_room(1), 3);
+        let pos = world.get_position(1).unwrap();
+        assert_eq!(pos.zone_id, 84);
+        assert_eq!((pos.x, pos.z), (51.0, 58.0));
+        assert!(world.is_zone_changing(1));
 
         // Teleport with event_room=0 should clear it
-        send_event_zone_change(&world, 1, 21, 1, 0);
+        send_event_zone_change(&world, 1, 21, 0);
         assert_eq!(world.get_event_room(1), 0);
     }
 
@@ -3050,7 +3065,7 @@ mod tests {
         world.register_session(1, tx);
 
         assert_eq!(world.get_event_room(1), 0);
-        send_event_zone_change(&world, 1, 21, 1, 0);
+        send_event_zone_change(&world, 1, 21, 0);
         assert_eq!(world.get_event_room(1), 0);
     }
 }
