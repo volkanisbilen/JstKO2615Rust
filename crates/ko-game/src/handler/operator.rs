@@ -273,9 +273,12 @@ pub async fn process_chat_command(
         "war_close" => handle_war_close(session, &args)?,
         "clear" => handle_clear(session, &args)?,
         "reload_scripts" => handle_reload_scripts(session)?,
-        "botspawn" | "farmbotspawn" | "afkbotspawn" | "pkbotspawn" => {
-            handle_bot_spawn(session, &args)?
+        "botspawn" | "farmbotspawn" => {
+            handle_bot_spawn(session, &args, crate::world::BotAiState::Farmer)?
         }
+        "afkbotspawn" => handle_bot_spawn(session, &args, crate::world::BotAiState::Afk)?,
+        "pkbotspawn" => handle_bot_spawn(session, &args, crate::world::BotAiState::Pk)?,
+        "pkbots" => handle_pk_bots(session, &args)?,
         "botkill" | "allbotkill" => handle_bot_kill(session, &args, &command)?,
         "funclass_open" => handle_funclass_open(session, &args)?,
         "funclass_close" => handle_funclass_close(session)?,
@@ -1488,6 +1491,8 @@ fn handle_help(session: &mut ClientSession) -> anyhow::Result<()> {
         "bug CharName - Rescue stuck player",
         "-- Bot/Genie --",
         "botspawn Class Level [Nation] [Count]",
+        "pkbots Zone|here CountPerNation [Level] - Spawn balanced PK bot wave",
+        "pkbots clear Zone|here - Remove GM PK bots only",
         "botkill/allbotkill - Kill bots",
         "genie CharName on/off - Toggle genie",
         "givegenietime CharName Hours",
@@ -1908,7 +1913,11 @@ fn handle_reload_scripts(session: &mut ClientSession) -> anyhow::Result<()> {
 /// - nation: 1=Karus, 2=ElMorad (default: GM's nation)
 /// - count: 1-10 (default: 1)
 /// Spawns bots at the GM's current position with random offset (C++: myrand(1,5)).
-fn handle_bot_spawn(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+fn handle_bot_spawn(
+    session: &mut ClientSession,
+    args: &[&str],
+    ai_state: crate::world::BotAiState,
+) -> anyhow::Result<()> {
     if args.len() < 2 {
         send_help(
             session,
@@ -1984,7 +1993,7 @@ fn handle_bot_spawn(session: &mut ClientSession, args: &[&str]) -> anyhow::Resul
                 class: gm_class,
                 level,
                 nation,
-                ai_state: crate::world::BotAiState::Farmer,
+                ai_state,
             },
         );
         spawned_ids.push(bot_id);
@@ -1993,21 +2002,181 @@ fn handle_bot_spawn(session: &mut ClientSession, args: &[&str]) -> anyhow::Resul
     send_help(
         session,
         &format!(
-            "Spawned {} bot(s) (class={}, lv={}, nation={}) IDs: {:?}",
-            count, gm_class, level, nation, spawned_ids
+            "Spawned {} {:?} bot(s) (class={}, lv={}, nation={}) IDs: {:?}",
+            count, ai_state, gm_class, level, nation, spawned_ids
         ),
     );
 
     info!(
-        "[{}] GM +botspawn: spawned {} bot(s) class={} lv={} nation={} at zone {} ({:.0},{:.0})",
+        "[{}] GM +botspawn: spawned {} {:?} bot(s) class={} lv={} nation={} at zone {} ({:.0},{:.0})",
         session.addr(),
         count,
+        ai_state,
         gm_class,
         level,
         nation,
         gm_pos.zone_id,
         gm_pos.x,
         gm_pos.z,
+    );
+
+    Ok(())
+}
+
+/// Maximum number of temporary GM PK bots allowed in one zone.
+const MAX_GM_PK_BOTS_PER_ZONE: usize = 50;
+/// Maximum bots spawned per nation by a single command.
+const MAX_GM_PK_BOTS_PER_NATION: u16 = 25;
+
+/// +pkbots <zone|here> <count_per_nation> [level]
+/// +pkbots clear <zone|here>
+///
+/// Spawns an equal number of Karus and El Morad PK bots at their nation start
+/// positions. Classes are distributed round-robin (warrior, rogue, mage,
+/// priest). Only zones with patrol waypoints are accepted.
+fn handle_pk_bots(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    use crate::systems::bot_ai;
+    use crate::world::{BotAiState, ZONE_ARDREAM, ZONE_RONARK_LAND};
+
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    let resolve_zone = |value: &str| -> Option<u16> {
+        if value.eq_ignore_ascii_case("here") {
+            world.get_position(sid).map(|p| p.zone_id)
+        } else {
+            value.parse::<u16>().ok()
+        }
+    };
+
+    if args.first().is_some_and(|arg| arg.eq_ignore_ascii_case("clear")) {
+        let Some(zone_arg) = args.get(1) else {
+            send_help(session, "Usage: +pkbots clear <ZoneID|here>");
+            return Ok(());
+        };
+        let Some(zone_id) = resolve_zone(zone_arg) else {
+            send_help(session, "Error: Invalid zone. Use 71, 72, or here.");
+            return Ok(());
+        };
+        if !matches!(zone_id, ZONE_RONARK_LAND | ZONE_ARDREAM) {
+            send_help(session, "Error: PK bot waves currently support Ronark Land (71) and Ardream (72).");
+            return Ok(());
+        }
+
+        let removed = bot_ai::despawn_gm_pk_bots_in_zone(&world, zone_id);
+        send_help(
+            session,
+            &format!("Removed {} temporary GM PK bot(s) from zone {}.", removed, zone_id),
+        );
+        info!(
+            "[{}] GM +pkbots clear: removed {} temporary PK bots from zone {}",
+            session.addr(),
+            removed,
+            zone_id,
+        );
+        return Ok(());
+    }
+
+    if args.len() < 2 {
+        send_help(
+            session,
+            "Usage: +pkbots <ZoneID|here> <CountPerNation 1-25> [Level]",
+        );
+        return Ok(());
+    }
+
+    let Some(zone_id) = resolve_zone(args[0]) else {
+        send_help(session, "Error: Invalid zone. Use 71, 72, or here.");
+        return Ok(());
+    };
+    if !matches!(zone_id, ZONE_RONARK_LAND | ZONE_ARDREAM) {
+        send_help(session, "Error: PK bot waves currently support Ronark Land (71) and Ardream (72).");
+        return Ok(());
+    }
+
+    let count_per_nation = match args[1].parse::<u16>() {
+        Ok(count) if (1..=MAX_GM_PK_BOTS_PER_NATION).contains(&count) => count,
+        _ => {
+            send_help(session, "Error: CountPerNation must be between 1 and 25.");
+            return Ok(());
+        }
+    };
+
+    let default_level = if zone_id == ZONE_ARDREAM { 59 } else { 83 };
+    let level = match args.get(2) {
+        Some(value) => match value.parse::<u8>() {
+            Ok(level) if (1..=83).contains(&level) => level,
+            _ => {
+                send_help(session, "Error: Level must be between 1 and 83.");
+                return Ok(());
+            }
+        },
+        None => default_level,
+    };
+    if zone_id == ZONE_ARDREAM && level > 59 {
+        send_help(session, "Error: Ardream PK bots cannot be above level 59.");
+        return Ok(());
+    }
+
+    let requested = count_per_nation as usize * 2;
+    let active = bot_ai::count_gm_pk_bots_in_zone(&world, zone_id);
+    if active + requested > MAX_GM_PK_BOTS_PER_ZONE {
+        send_help(
+            session,
+            &format!(
+                "Error: zone {} already has {} GM PK bots; maximum is {}.",
+                zone_id, active, MAX_GM_PK_BOTS_PER_ZONE
+            ),
+        );
+        return Ok(());
+    }
+
+    let Some(zone) = world.get_zone(zone_id) else {
+        send_help(session, "Error: Target zone is not loaded.");
+        return Ok(());
+    };
+
+    let mut spawned = 0usize;
+    for nation in [1u8, 2u8] {
+        for index in 0..count_per_nation {
+            let class = index % 4 + 1;
+            let (x, z) = bot_ai::get_bot_respawn_position(zone_id, nation);
+            if !zone.is_valid_position(x, z) {
+                warn!(zone_id, nation, x, z, "GM PK bot start position is invalid");
+                continue;
+            }
+
+            bot_ai::spawn_gm_bot(
+                &world,
+                bot_ai::SpawnGmBotParams {
+                    zone_id,
+                    x,
+                    y: 0.0,
+                    z,
+                    class,
+                    level,
+                    nation,
+                    ai_state: BotAiState::Pk,
+                },
+            );
+            spawned += 1;
+        }
+    }
+
+    send_help(
+        session,
+        &format!(
+            "Spawned {} PK bots in zone {} ({} requested per nation, level {}).",
+            spawned, zone_id, count_per_nation, level
+        ),
+    );
+    info!(
+        "[{}] GM +pkbots: spawned {} PK bots in zone {} (per_nation={}, level={})",
+        session.addr(),
+        spawned,
+        zone_id,
+        count_per_nation,
+        level,
     );
 
     Ok(())
