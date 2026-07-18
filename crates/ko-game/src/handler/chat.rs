@@ -196,6 +196,39 @@ pub fn build_chat_packet(
     pkt
 }
 
+/// Build the native v2615 PvP death-notice packet.
+///
+/// Unlike ordinary chat messages, `DEATH_NOTICE` has its own payload. The
+/// client uses the two unit IDs and the death coordinates to drive the PK
+/// narration and the live minimap marker.
+///
+/// Wire format (all strings are SByte strings):
+/// `[WIZ_CHAT][u8 26][u8 victim_nation][u8 notice_type]`
+/// `[u16 killer_id][killer_name][u16 victim_id][victim_name][u16 x][u16 z]`
+#[allow(clippy::too_many_arguments)]
+pub fn build_death_notice_packet(
+    victim_nation: u8,
+    notice_type: u8,
+    killer_id: u16,
+    killer_name: &str,
+    victim_id: u16,
+    victim_name: &str,
+    victim_x: u16,
+    victim_z: u16,
+) -> Packet {
+    let mut pkt = Packet::new(Opcode::WizChat as u8);
+    pkt.write_u8(ChatType::DeathNotice as u8);
+    pkt.write_u8(victim_nation);
+    pkt.write_u8(notice_type);
+    pkt.write_u16(killer_id);
+    pkt.write_sbyte_string(killer_name);
+    pkt.write_u16(victim_id);
+    pkt.write_sbyte_string(victim_name);
+    pkt.write_u16(victim_x);
+    pkt.write_u16(victim_z);
+    pkt
+}
+
 /// Build a chat packet with raw byte message content.
 /// Used for user-input chat messages to preserve client encoding (e.g. Windows-1254 Turkish).
 /// Server-generated messages should use `build_chat_packet` instead.
@@ -1382,6 +1415,33 @@ mod tests {
         pos += 1;
 
         assert_eq!(pos, d.len());
+    }
+
+    #[test]
+    fn test_build_native_death_notice_packet() {
+        let pkt = build_death_notice_packet(
+            2,
+            0,
+            10_001,
+            "KarusBot",
+            42,
+            "ElmoUser",
+            1054,
+            1082,
+        );
+        assert_eq!(pkt.opcode, Opcode::WizChat as u8);
+
+        let mut reader = PacketReader::new(&pkt.data);
+        assert_eq!(reader.read_u8(), Some(ChatType::DeathNotice as u8));
+        assert_eq!(reader.read_u8(), Some(2));
+        assert_eq!(reader.read_u8(), Some(0));
+        assert_eq!(reader.read_u16(), Some(10_001));
+        assert_eq!(reader.read_sbyte_string().as_deref(), Some("KarusBot"));
+        assert_eq!(reader.read_u16(), Some(42));
+        assert_eq!(reader.read_sbyte_string().as_deref(), Some("ElmoUser"));
+        assert_eq!(reader.read_u16(), Some(1054));
+        assert_eq!(reader.read_u16(), Some(1082));
+        assert_eq!(reader.remaining(), 0);
     }
 
     /// Test WIZ_CHAT_TARGET success response wire format.

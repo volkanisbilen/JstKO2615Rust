@@ -1066,9 +1066,40 @@ impl WorldState {
         if !(1..=2).contains(&nation) || amount == 0 {
             return;
         }
+        let zone_id = self
+            .with_session(sid, |h| h.position.zone_id)
+            .unwrap_or(0);
+        let mut loyalty_daily = amount;
+        let mut loyalty_premium_bonus = 0;
+        self.update_session(sid, |h| {
+            h.pk_loyalty_daily = h
+                .pk_loyalty_daily
+                .saturating_add(amount)
+                .min(2_100_000_000);
+            loyalty_daily = h.pk_loyalty_daily;
+            loyalty_premium_bonus = h.pk_loyalty_premium_bonus;
+        });
+
         let idx = (nation - 1) as usize;
         if let Some(mut r) = self.pk_zone_rankings[idx].get_mut(&sid) {
-            r.loyalty_daily = r.loyalty_daily.saturating_add(amount).min(2_100_000_000);
+            r.zone_id = zone_id;
+            r.loyalty_daily = loyalty_daily;
+            r.loyalty_premium_bonus = loyalty_premium_bonus;
+        } else {
+            // Zone changes do not re-run GAMESTART, so lazily register the
+            // player on their first PK gain if the rank entry is absent.
+            let other_idx = if idx == 0 { 1 } else { 0 };
+            self.pk_zone_rankings[other_idx].remove(&sid);
+            self.pk_zone_rankings[idx].insert(
+                sid,
+                PkZoneRanking {
+                    session_id: sid,
+                    zone_id,
+                    nation,
+                    loyalty_daily,
+                    loyalty_premium_bonus,
+                },
+            );
         }
     }
     /// Get sorted PK zone rankings for a nation, filtered by zone.

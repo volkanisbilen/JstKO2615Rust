@@ -811,13 +811,8 @@ fn bdw_flag_carrier_death(world: &WorldState, dead_sid: SessionId) {
 }
 
 /// Broadcast a PvP death notice to all players in the zone.
-/// Sends WIZ_EXT_HOOK (0xE9) with sub-opcode DeathNotice (0xD7) to every player
-/// in the same zone. The `killtype` field varies per recipient:
-/// - 1: the recipient IS the killer or victim (direct participants)
-/// - 2: the recipient is in the killer's party
-/// - 3: bystander (everyone else)
-/// Packet format (SByte mode):
-/// `[u8 WIZ_EXT_HOOK(0xE9)] [u8 0xD7] [u8 killtype] [string killer_name] [string victim_name] [u16 x] [u16 z]`
+/// Sends the native WIZ_CHAT / DEATH_NOTICE (26) payload used by v2615 for
+/// narration and minimap death coordinates, plus a general chat history line.
 pub fn send_death_notice(world: &WorldState, killer_sid: SessionId, victim_sid: SessionId) {
     let killer_name = match world.get_session_name(killer_sid) {
         Some(n) => n,

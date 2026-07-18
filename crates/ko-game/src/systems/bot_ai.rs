@@ -39,7 +39,10 @@ use crate::world::{
 use crate::zone::{calc_region, SessionId};
 
 /// Interval for the bot AI tick loop (milliseconds).
-const BOT_AI_TICK_MS: u64 = 1_000;
+// Four movement samples per second let the client interpolate runtime bots
+// instead of displaying one large step each second. Combat cooldowns are
+// tracked separately, so this does not increase attack/skill speed.
+const BOT_AI_TICK_MS: u64 = 250;
 
 /// Mining/fishing animation broadcast interval (ms).
 const BOT_MINING_INTERVAL_MS: u64 = 120_000; // 2 minutes
@@ -1358,8 +1361,7 @@ fn tick_waypoint_patrol(world: &WorldState, bot: &BotInstance, now_ms: u64) -> b
     // Arrival threshold: within one step distance (close enough).
     // C++ uses exact equality (`Mesafe == EnYakinMesafe`), but float rounding
     // means we use a small threshold instead.
-    let speed = get_bot_speed(bot);
-    let step = speed / 10.0;
+    let step = movement_step(bot);
     let arrival_threshold = step * 1.5;
 
     if dist_sq <= arrival_threshold * arrival_threshold {
@@ -1593,7 +1595,7 @@ pub fn find_nearest_enemy(
 
 /// Calculate the bot's new position when moving toward a target.
 /// + `CBot::HandleAttack()` movement
-/// Moves the bot `speed/10.0` units toward the target. A stable target vector
+/// Moves the bot one tick-scaled step toward the target. A stable target vector
 /// is important here: re-rolling jitter every second makes the client render
 /// zig-zag corrections and appears as stuttering.
 /// Returns `(new_x, new_y, new_z)` — the bot's new position after movement.
@@ -1611,9 +1613,7 @@ pub fn move_toward_target(
         return (bot.x, target_y, bot.z);
     }
 
-    // Step size: speed / 10.0 world units per tick.
-    let speed = get_bot_speed(bot);
-    let step = speed / 10.0;
+    let step = movement_step(bot);
 
     // If one step would overshoot, snap to target (C++ sRunFinish logic).
     if step >= distance {
@@ -2598,6 +2598,14 @@ fn get_bot_speed(bot: &BotInstance) -> f32 {
     } else {
         45.0
     }
+}
+
+/// Convert the protocol speed value into distance for the current AI cadence.
+/// At the previous 1-second cadence this was `speed / 10`; scaling by elapsed
+/// tick duration preserves the same units/second while producing smoother
+/// intermediate WIZ_MOVE packets.
+fn movement_step(bot: &BotInstance) -> f32 {
+    get_bot_speed(bot) * BOT_AI_TICK_MS as f32 / 10_000.0
 }
 
 /// Check if a zone is a PK zone (where bot PvP is allowed).
@@ -7119,32 +7127,32 @@ mod tests {
     #[test]
     fn test_move_step_size_matches_speed() {
         // Non-PK bot at (0,0,0) moving toward (100,0,0).
-        // Speed = 45.0, step = 45/10 = 4.5 units per tick.
+        // Speed = 45.0, 250ms step = 1.125 units per tick.
         let bot = make_combat_bot(BOT_ID_BASE, "StepBot", 1, 106, 21, 0.0, 0.0);
         let (new_x, _, new_z) = move_toward_target(&bot, 100.0, 0.0, 0.0);
 
         let dx = new_x;
         let dz = new_z;
         let dist = (dx * dx + dz * dz).sqrt();
-        // Step should be approximately 4.5 +/- jitter tolerance (~2 units)
+        // Step should match the tick-scaled movement distance.
         assert!(
-            (2.0..=7.0).contains(&dist),
-            "step distance should be ~4.5 (+/- jitter), got {dist}"
+            (dist - movement_step(&bot)).abs() < 0.01,
+            "step distance should match the configured cadence, got {dist}"
         );
     }
 
     #[test]
     fn test_move_step_pk_rogue_faster() {
-        // PK zone rogue: speed=90, step=9.0 per tick.
+        // PK zone rogue: speed=90, 250ms step=2.25 units per tick.
         let bot = make_combat_bot(BOT_ID_BASE, "FastRog", 1, 107, 72, 0.0, 0.0);
         assert_eq!(get_bot_speed(&bot), 90.0);
 
         let (new_x, _, new_z) = move_toward_target(&bot, 100.0, 0.0, 0.0);
         let dist = (new_x * new_x + new_z * new_z).sqrt();
-        // Step should be approximately 9.0 +/- jitter
+        // Step should match the tick-scaled PK movement distance.
         assert!(
-            (6.0..=12.0).contains(&dist),
-            "PK rogue step should be ~9.0 (+/- jitter), got {dist}"
+            (dist - movement_step(&bot)).abs() < 0.01,
+            "PK rogue step should match the configured cadence, got {dist}"
         );
     }
 
@@ -7152,10 +7160,9 @@ mod tests {
     fn test_move_toward_target_snaps_when_close() {
         // Target is closer than one step — should snap to target.
         let bot = make_combat_bot(BOT_ID_BASE, "SnapBot", 1, 106, 21, 100.0, 100.0);
-        // Target is 2 units away, step = 4.5 → overshoot → snap
-        let (new_x, _, new_z) = move_toward_target(&bot, 102.0, 0.0, 100.0);
-        // Should snap close to target (within jitter range ~2 units)
-        let dx = new_x - 102.0;
+        // Target is 1 unit away, step = 1.125 → overshoot → snap.
+        let (new_x, _, new_z) = move_toward_target(&bot, 101.0, 0.0, 100.0);
+        let dx = new_x - 101.0;
         let dz = new_z - 100.0;
         let dist = (dx * dx + dz * dz).sqrt();
         assert!(
@@ -8322,11 +8329,11 @@ mod tests {
     fn test_waypoint_patrol_rejects_invalid_position() {
         let world = WorldState::new();
         // Create a tiny zone (map_size=2, map_width=4.0) with real map data.
-        // One step (speed=67, step=6.7) from (1,1) toward (1276,1056) will land
-        // at ~(6.4, 5.3) which exceeds map_width=4.0, triggering rejection.
+        // One 250ms step from (3.5,3.5) toward (1276,1056) exceeds the
+        // map_width=4.0 boundary and triggers rejection.
         create_zone_with_map_data(&world, 71, 2);
 
-        let mut bot = make_combat_bot(BOT_ID_BASE, "OutOfBounds", 1, 106, 71, 1.0, 1.0);
+        let mut bot = make_combat_bot(BOT_ID_BASE, "OutOfBounds", 1, 106, 71, 3.5, 3.5);
         bot.move_route = 1;
         bot.move_state = 2; // WP 2 Karus = (1276, 1056) — out of bounds
         world.insert_bot(bot.clone());
@@ -8344,7 +8351,7 @@ mod tests {
         );
         // Position should remain unchanged.
         assert!(
-            (updated.x - 1.0).abs() < 0.01,
+            (updated.x - 3.5).abs() < 0.01,
             "x should not change on invalid position"
         );
     }

@@ -1436,17 +1436,13 @@ impl WorldState {
             }
         }
     }
-    /// Send a PvP death notice to all players in a zone with per-recipient killtype.
+    /// Send a native PvP death notice to all players in a zone.
     ///
     ///
-    /// Packet format: WIZ_EXT_HOOK (0xE9) + DeathNotice sub-opcode (0xD7) + SByte strings.
-    /// - killtype 1: recipient IS the killer or victim
-    /// - killtype 2: recipient is in the killer's party
-    /// - killtype 3: bystander
-    ///
-    /// Also sends a normal chat-bar line for clients that drop ext_hook. It is
-    /// intentionally GENERAL_CHAT, not WAR_SYSTEM_CHAT, so it never becomes a
-    /// top-of-screen scrolling notice.
+    /// Uses the native WIZ_CHAT/DEATH_NOTICE payload consumed by the v2615
+    /// client. This drives both PK narration and the death coordinates on the
+    /// minimap. A normal chat-bar line is also sent for readable history; it is
+    /// intentionally GENERAL_CHAT so no top-screen notice is produced.
     #[allow(clippy::too_many_arguments)]
     pub fn send_death_notice_to_zone(
         &self,
@@ -1455,13 +1451,10 @@ impl WorldState {
         victim_sid: SessionId,
         killer_name: &str,
         victim_name: &str,
-        killer_party_id: Option<u16>,
+        _killer_party_id: Option<u16>,
         victim_x: u16,
         victim_z: u16,
     ) {
-        /// ExtSub::DeathNotice = 0xD7
-        const EXT_SUB_DEATH_NOTICE: u8 = 0xD7;
-
         let channel = if zone_id == crate::world::ZONE_RONARK_LAND {
             "Ronark"
         } else {
@@ -1482,6 +1475,27 @@ impl WorldState {
             1,
         ));
 
+        let victim_nation = if (victim_sid as u32) >= crate::world::BOT_ID_BASE {
+            self.get_bot(victim_sid as crate::world::BotId)
+                .map(|bot| bot.nation)
+                .unwrap_or(0)
+        } else {
+            self.get_character_info(victim_sid)
+                .map(|character| character.nation)
+                .unwrap_or(0)
+        };
+        // DeathNoticeCoordinates = 0 in the original 2615 packets.h.
+        let arc_death_pkt = Arc::new(crate::handler::chat::build_death_notice_packet(
+            victim_nation,
+            0,
+            killer_sid,
+            killer_name,
+            victim_sid,
+            victim_name,
+            victim_x,
+            victim_z,
+        ));
+
         if let Some(index_entry) = self.zone_session_index.get(&zone_id) {
             let session_ids: Vec<SessionId> = index_entry.value().read().iter().copied().collect();
             for sid in session_ids {
@@ -1490,36 +1504,9 @@ impl WorldState {
                         continue;
                     }
 
-                    let killtype: u8 = if sid == killer_sid || sid == victim_sid {
-                        1 // direct participant
-                    } else if let Some(party_id) = killer_party_id {
-                        if handle
-                            .character
-                            .as_ref()
-                            .is_some_and(|ch| ch.party_id == Some(party_id))
-                        {
-                            2 // killer's party member
-                        } else {
-                            3 // bystander
-                        }
-                    } else {
-                        3 // bystander
-                    };
-
-                    let mut pkt = Packet::new(Opcode::EXT_HOOK_S2C);
-                    pkt.write_u8(EXT_SUB_DEATH_NOTICE);
-                    pkt.write_u8(killtype);
-                    // SByte string: u8 length prefix + bytes
-                    let kn = killer_name.as_bytes();
-                    pkt.write_u8(kn.len() as u8);
-                    pkt.data.extend_from_slice(kn);
-                    let vn = victim_name.as_bytes();
-                    pkt.write_u8(vn.len() as u8);
-                    pkt.data.extend_from_slice(vn);
-                    pkt.write_u16(victim_x);
-                    pkt.write_u16(victim_z);
-
-                    let _ = handle.tx.send(Arc::new(pkt));
+                    // The old extended packet changed a killtype per viewer.
+                    // Native v2615 DEATH_NOTICE is one shared zone packet.
+                    let _ = handle.tx.send(Arc::clone(&arc_death_pkt));
                     // Chat fallback (same for all recipients)
                     let _ = handle.tx.send(Arc::clone(&arc_chat_pkt));
                 }
