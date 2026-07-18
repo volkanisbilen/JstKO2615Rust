@@ -39,6 +39,18 @@ const NPC_CHAOTIC_GENERATOR2: u8 = 162;
 /// WIZ_ITEM_UPGRADE sub-opcode for Chaotic Generator dialog.
 const ITEM_BIFROST_REQ: u8 = 4;
 
+/// Build the Chaotic Generator dialog-open response.
+///
+/// The v2525 client reads the NPC runtime ID as a 32-bit little-endian value.
+/// Sending only u16 leaves the request context incomplete, causing the client
+/// to submit ITEM_BIFROST_PROCESS with npc_id=0.
+fn build_chaotic_generator_open(npc_nid: u32) -> Packet {
+    let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+    pkt.write_u8(ITEM_BIFROST_REQ);
+    pkt.write_u32(npc_nid);
+    pkt
+}
+
 /// NPC type: King election NPC.
 const NPC_ELECTION: u8 = 79;
 
@@ -294,12 +306,9 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
                 return Ok(());
             }
             NPC_CHAOTIC_GENERATOR | NPC_CHAOTIC_GENERATOR2 => {
-                // Chaotic Generator — open gem exchange dialog
-                // S2C: WIZ_ITEM_UPGRADE [sub=ITEM_BIFROST_REQ(4)] [npc_id:u16le]
-                // Sniffer verified: session 10, id 72521 — `5b 04 b6c2 0000`
-                let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-                pkt.write_u8(ITEM_BIFROST_REQ);
-                pkt.write_u16(npc_nid as u16);
+                // Chaotic Generator — open gem/fragment exchange dialog.
+                // S2C: WIZ_ITEM_UPGRADE [sub=ITEM_BIFROST_REQ(4)] [npc_id:u32le]
+                let pkt = build_chaotic_generator_open(npc_nid);
                 session.send_packet(&pkt).await?;
                 debug!(
                     "[{}] ClientEvent: NPC {} (CHAOTIC_GENERATOR) bifrost_req",
@@ -636,6 +645,15 @@ mod tests {
         assert_eq!(r.read_u16(), Some(1));
         assert_eq!(r.read_u32(), Some(7001));
         assert_eq!(r.remaining(), 0);
+    }
+
+    /// Chaotic Generator open response keeps the full 32-bit NPC runtime ID.
+    #[test]
+    fn test_chaotic_generator_open_response_format() {
+        let pkt = build_chaotic_generator_open(0x0000_C2B6);
+
+        assert_eq!(pkt.opcode, Opcode::WizItemUpgrade as u8);
+        assert_eq!(pkt.data, [ITEM_BIFROST_REQ, 0xB6, 0xC2, 0x00, 0x00]);
     }
 
     /// Special NPC type constants match C++ defines.
