@@ -1986,28 +1986,56 @@ async fn bifrost_piece_exchange(
         return bifrost_send_fail(session, error_code).await;
     }
 
-    // Find a slot for the reward item
+    // Verify that the reward can fit before consuming the piece. The final
+    // slot must be resolved again after consumption: when the last piece in
+    // the source stack is removed, that newly-empty slot may become the first
+    // valid destination for the reward.
+    if world.find_slot_for_item(sid, reward_item_id, 1).is_none() {
+        return bifrost_send_fail(session, error_code).await;
+    }
+
+    // Remove exactly one piece from the client-selected source slot. Capture
+    // the authoritative remaining count so it can be sent after the exchange
+    // result; the result packet alone is not sufficient to keep v2615's
+    // inventory cache synchronized after repeated exchanges.
+    let mut consumed_slot: Option<(u32, u16)> = None;
+    let consumed = world.update_inventory(sid, |inv| {
+        if actual_slot >= inv.len()
+            || inv[actual_slot].item_id != piece_item_id
+            || inv[actual_slot].count == 0
+        {
+            return false;
+        }
+
+        inv[actual_slot].count -= 1;
+        let remaining = inv[actual_slot].count;
+        let durability = inv[actual_slot].durability.max(0) as u16;
+        if remaining == 0 {
+            inv[actual_slot] = Default::default();
+        }
+        consumed_slot = Some((remaining as u32, durability));
+        true
+    });
+    if !consumed {
+        return bifrost_send_fail(session, error_code).await;
+    }
+
+    // Resolve the actual reward slot after consuming the source item. This
+    // prevents reporting a stale slot when the consumed stack became empty.
     let reward_slot = match world.find_slot_for_item(sid, reward_item_id, 1) {
         Some(s) => s,
-        None => return bifrost_send_fail(session, error_code).await,
-    };
-
-    // Remove 1 piece from inventory
-    world.update_inventory(sid, |inv| {
-        if actual_slot < inv.len() && inv[actual_slot].item_id == piece_item_id {
-            if inv[actual_slot].count > 1 {
-                inv[actual_slot].count -= 1;
-            } else {
-                inv[actual_slot] = Default::default();
-            }
-            true
-        } else {
-            false
+        None => {
+            // The pre-check succeeded and session packets are processed
+            // serially, so this is defensive rollback for unexpected state.
+            let _ = world.give_item(sid, piece_item_id, 1);
+            return bifrost_send_fail(session, error_code).await;
         }
-    });
+    };
 
     // Give reward item
     if !world.give_item(sid, reward_item_id, 1) {
+        // Do not consume a piece when reward delivery unexpectedly fails.
+        let _ = world.give_item(sid, piece_item_id, 1);
         return bifrost_send_fail(session, 0).await;
     }
 
@@ -2040,6 +2068,22 @@ async fn bifrost_piece_exchange(
     result.write_i8(src_pos);
     result.write_u8(effect_type as u8);
     session.send_packet(&result).await?;
+
+    // Send the exact remaining source count after the exchange response. This
+    // is authoritative and corrects the client's local decrement/cache state.
+    if let Some((remaining, durability)) = consumed_slot {
+        let mut count_pkt = Packet::new(Opcode::WizItemCountChange as u8);
+        count_pkt.write_u16(1); // count_type
+        count_pkt.write_u8(1); // slot_section: inventory
+        count_pkt.write_u8(src_pos as u8);
+        count_pkt.write_u32(piece_item_id);
+        count_pkt.write_u32(remaining);
+        count_pkt.write_u8(0); // bNewItem = false (consumption)
+        count_pkt.write_u16(durability);
+        count_pkt.write_u32(0); // reserved
+        count_pkt.write_u32(0); // expiration
+        world.send_to_session_owned(sid, count_pkt);
+    }
 
     // Broadcast artifact effect to region (3×3 grid)
     let mut artifact_pkt = Packet::new(Opcode::WizObjectEvent as u8);
