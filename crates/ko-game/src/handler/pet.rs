@@ -123,10 +123,15 @@ async fn handle_pet_use_skill(
         h.pet_data.as_ref().map(|p| (p.nid, p.state_change))
     });
 
-    let (pet_nid, pet_mode) = match pet_info {
+    let (pet_nid, _pet_mode) = match pet_info {
         Some(Some((nid, mode))) => (nid, mode),
         _ => return Ok(()),
     };
+
+    // A pet must be spawned before it can cast or begin a family attack.
+    if pet_nid == 0 || world.get_npc_instance(pet_nid as u32).is_none() {
+        return Ok(());
+    }
 
     let _sub_code = match r.read_u8() {
         Some(v) => v,
@@ -143,6 +148,16 @@ async fn handle_pet_use_skill(
 
     let _caster_id = r.read_u32().unwrap_or(0);
     let target_id = r.read_u32().unwrap_or(0);
+
+    // v2615 uses the full 32-bit runtime NPC ID here.  Validate the target
+    // before arming the background attack tick; player IDs and dead/missing
+    // NPCs are not valid pet attack targets.
+    if target_id < crate::npc::NPC_BAND
+        || world.get_npc_instance(target_id).is_none()
+        || world.is_npc_dead(target_id)
+    {
+        return Ok(());
+    }
 
     // Build and broadcast WIZ_MAGIC_PROCESS effecting packet from the pet's
     // perspective so the skill visual plays on all nearby clients.
@@ -177,7 +192,7 @@ async fn handle_pet_use_skill(
         if let Some(ref mut pet) = h.pet_data {
             pet.state_change = MODE_ATTACK;
             pet.attack_started = true;
-            pet.attack_target_id = target_id as i16;
+            pet.attack_target_id = target_id as i32;
         }
     });
 
@@ -1212,6 +1227,16 @@ mod tests {
     fn test_pet_use_skill_constants() {
         assert_eq!(MAGIC_EFFECTING_SUBCODE, 3);
         assert_eq!(PET_USE_SKILL, 2);
+    }
+
+    #[test]
+    fn test_v2615_pet_target_id_keeps_full_width() {
+        let target_id = 49_886u32;
+        let stored = target_id as i32;
+
+        assert!(stored >= crate::npc::NPC_BAND as i32);
+        assert_eq!(stored as u32, target_id);
+        assert!(target_id > i16::MAX as u32);
     }
 
     // ── Sprint 955: Additional coverage ──────────────────────────────
