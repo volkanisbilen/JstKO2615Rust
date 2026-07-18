@@ -921,9 +921,18 @@ fn handle_notice(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<(
 fn handle_count(session: &mut ClientSession) -> anyhow::Result<()> {
     let world = session.world().clone();
 
-    let count = world.online_count();
+    let players = world.online_count();
+    let bots = world.bot_count();
 
-    send_help(session, &format!("Online players: {}", count));
+    send_help(
+        session,
+        &format!(
+            "Online: Total={}, Players={}, Bots={}",
+            players + bots,
+            players,
+            bots
+        ),
+    );
 
     Ok(())
 }
@@ -3049,11 +3058,24 @@ fn handle_count_zone(session: &mut ClientSession) -> anyhow::Result<()> {
 
     let zone_id = world.with_session(sid, |h| h.position.zone_id).unwrap_or(0);
 
-    let (total, karus, elmorad) = world.count_players_in_zone(zone_id);
+    let (player_total, player_karus, player_elmorad) = world.count_players_in_zone(zone_id);
+    let bots = world.get_bots_in_zone_live(zone_id);
+    let bot_karus = bots.iter().filter(|bot| bot.nation == 1).count();
+    let bot_elmorad = bots.iter().filter(|bot| bot.nation == 2).count();
+    let bot_total = bot_karus + bot_elmorad;
 
     send_help(
         session,
-        &format!("Zone {zone_id}: Total={total}, Karus={karus}, Elmorad={elmorad}"),
+        &format!(
+            "Zone {zone_id}: Total={}, Players={} (K={}, E={}), Bots={} (K={}, E={})",
+            player_total + bot_total,
+            player_total,
+            player_karus,
+            player_elmorad,
+            bot_total,
+            bot_karus,
+            bot_elmorad
+        ),
     );
     Ok(())
 }
@@ -3079,9 +3101,22 @@ fn handle_count_level(session: &mut ClientSession, args: &[&str]) -> anyhow::Res
     }
 
     let world = session.world().clone();
-    let count = world.count_players_at_level(level);
+    let players = world.count_players_at_level(level);
+    let bots = world
+        .bots
+        .iter()
+        .filter(|bot| bot.in_game && bot.level == level)
+        .count();
 
-    send_help(session, &format!("Level {level}: {count} players online"));
+    send_help(
+        session,
+        &format!(
+            "Level {level}: Total={}, Players={}, Bots={}",
+            players + bots,
+            players,
+            bots
+        ),
+    );
     Ok(())
 }
 
