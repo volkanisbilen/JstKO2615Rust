@@ -448,11 +448,23 @@ fn npc_dead(
     ai: &NpcAiState,
     _tmpl: &NpcTemplate,
 ) -> Option<u64> {
+    // A zero regen time explicitly marks dynamically spawned event NPCs as
+    // non-respawning. Monster Stone monsters use this path; treating zero as
+    // the minimum delay made them come back at the same location after 250ms.
+    if !can_auto_respawn(ai.regen_time_ms) {
+        return None;
+    }
+
     // Transition to LIVE (which will restore HP and set standing)
     world.update_npc_ai(npc_id, |s| {
         s.state = NpcState::Live;
     });
     Some(ai.regen_time_ms.max(250))
+}
+
+#[inline]
+fn can_auto_respawn(regen_time_ms: u64) -> bool {
+    regen_time_ms > 0
 }
 
 /// NPC_LIVE state: Restore HP to max, reposition to spawn, transition to Standing.
@@ -3644,6 +3656,17 @@ fn send_gate_flag(
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn test_zero_regen_time_disables_auto_respawn() {
+        assert!(!can_auto_respawn(0));
+    }
+
+    #[test]
+    fn test_positive_regen_time_allows_auto_respawn() {
+        assert!(can_auto_respawn(250));
+        assert!(can_auto_respawn(30_000));
+    }
 
     #[test]
     fn test_npc_state_values_match_cpp() {
