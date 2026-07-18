@@ -539,12 +539,23 @@ pub async fn send_region_user_in_out_for_me(session: &mut ClientSession) -> anyh
         Some(sid),
         my_event_room,
     );
+    let nearby_bots: Vec<_> = world
+        .get_bots_in_zone_live(pos.zone_id)
+        .into_iter()
+        .filter(|bot| {
+            (bot.region_x as i32 - pos.region_x as i32).unsigned_abs() <= 1
+                && (bot.region_z as i32 - pos.region_z as i32).unsigned_abs() <= 1
+        })
+        .collect();
 
     let mut data = Packet::new(Opcode::WizRegionChange as u8);
     data.write_u8(1); // phase 1
-    data.write_u16(nearby.len() as u16);
+    data.write_u16((nearby.len() + nearby_bots.len()) as u16);
     for &other_id in &nearby {
         data.write_u32(other_id as u32);
+    }
+    for bot in &nearby_bots {
+        data.write_u32(bot.id);
     }
 
     // Send compressed (C++ uses SendCompressed)
