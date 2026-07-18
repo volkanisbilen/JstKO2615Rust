@@ -123,7 +123,7 @@ async fn handle_pet_use_skill(
         h.pet_data.as_ref().map(|p| (p.nid, p.state_change))
     });
 
-    let (pet_nid, _pet_mode) = match pet_info {
+    let (pet_nid, pet_mode) = match pet_info {
         Some(Some((nid, mode))) => (nid, mode),
         _ => return Ok(()),
     };
@@ -133,7 +133,7 @@ async fn handle_pet_use_skill(
         return Ok(());
     }
 
-    let _sub_code = match r.read_u8() {
+    let sub_code = match r.read_u8() {
         Some(v) => v,
         None => return Ok(()),
     };
@@ -146,8 +146,19 @@ async fn handle_pet_use_skill(
         return Ok(());
     }
 
-    let _caster_id = r.read_u32().unwrap_or(0);
+    let caster_id = r.read_u32().unwrap_or(0);
     let target_id = r.read_u32().unwrap_or(0);
+
+    debug!(
+        "[{}] WIZ_PET: PetUseSkill received sub_code={} skill_id={} caster={} target={} pet_nid={} mode={}",
+        session.addr(),
+        sub_code,
+        skill_id,
+        caster_id,
+        target_id,
+        pet_nid,
+        pet_mode
+    );
 
     // v2615 uses the full 32-bit runtime NPC ID here.  Validate the target
     // before arming the background attack tick; player IDs and dead/missing
@@ -196,6 +207,16 @@ async fn handle_pet_use_skill(
         }
     });
 
+    // The v2615 client keeps its own copy of the pet mode.  The reference
+    // server acknowledges the automatic DEFENCE -> ATTACK transition after
+    // Designated Pet Attack.  Without this packet the server attacks, but the
+    // client still considers the pet defensive and suppresses the remaining
+    // active pet skills before they ever reach WIZ_PET.
+    if pet_mode == MODE_DEFENCE {
+        let mode_pkt = build_pet_mode_change_packet(MODE_ATTACK);
+        session.send_packet(&mode_pkt).await?;
+    }
+
     // Decrease satisfaction by 10 per skill use
     pet_satisfaction_update(session, -10).await;
 
@@ -207,6 +228,17 @@ async fn handle_pet_use_skill(
         target_id
     );
     Ok(())
+}
+
+/// Build the v2615 acknowledgement that synchronizes the pet mode in the
+/// client UI with the authoritative server-side state.
+fn build_pet_mode_change_packet(mode: u8) -> Packet {
+    let mut resp = Packet::new(Opcode::WizPet as u8);
+    resp.write_u8(PET_MODE_FUNCTION);
+    resp.write_u8(NORMAL_MODE);
+    resp.write_u8(mode);
+    resp.write_u16(1); // success
+    resp
 }
 
 /// Handle ModeFunction (sub-opcode 1).
@@ -502,11 +534,7 @@ pub(crate) async fn handle_normal_mode(
             });
 
             // Send mode change confirmation
-            let mut resp = Packet::new(Opcode::WizPet as u8);
-            resp.write_u8(PET_MODE_FUNCTION);
-            resp.write_u8(NORMAL_MODE);
-            resp.write_u8(mode);
-            resp.write_u16(1); // success
+            let resp = build_pet_mode_change_packet(mode);
             session.send_packet(&resp).await?;
 
             debug!("[{}] WIZ_PET: NormalMode set to {}", session.addr(), mode);
@@ -1227,6 +1255,19 @@ mod tests {
     fn test_pet_use_skill_constants() {
         assert_eq!(MAGIC_EFFECTING_SUBCODE, 3);
         assert_eq!(PET_USE_SKILL, 2);
+    }
+
+    #[test]
+    fn test_pet_auto_attack_mode_ack_packet() {
+        let pkt = build_pet_mode_change_packet(MODE_ATTACK);
+        let mut r = PacketReader::new(&pkt.data);
+
+        assert_eq!(pkt.opcode, Opcode::WizPet as u8);
+        assert_eq!(r.read_u8(), Some(PET_MODE_FUNCTION));
+        assert_eq!(r.read_u8(), Some(NORMAL_MODE));
+        assert_eq!(r.read_u8(), Some(MODE_ATTACK));
+        assert_eq!(r.read_u16(), Some(1));
+        assert_eq!(r.remaining(), 0);
     }
 
     #[test]
