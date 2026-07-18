@@ -6090,6 +6090,9 @@ mod tests {
                                  // Nation (after name bytes)
         let nation_offset = 7 + name_len;
         assert_eq!(d[nation_offset], 1); // Karus
+        // No-clan TestVis packet must match the v2600 player GetUserInfo layout.
+        assert_eq!(d.len(), 214);
+        assert_eq!(&d[d.len() - 3..], &[0, 0, 1]);
     }
 
     #[test]
