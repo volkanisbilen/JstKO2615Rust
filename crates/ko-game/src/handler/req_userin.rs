@@ -23,6 +23,7 @@ use crate::handler::region;
 use crate::handler::region::write_user_info;
 use crate::npc::NPC_BAND;
 use crate::session::ClientSession;
+use crate::world::BOT_ID_BASE;
 use crate::zone::SessionId;
 
 /// Maximum users per response (C++ MAX_SEND_USERID).
@@ -53,7 +54,26 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             None => break,
         };
 
-        // Only handle user IDs (< NPC_BAND). Skip self.
+        // Runtime bots share the user visibility protocol even though their IDs
+        // live at/above NPC_BAND. Resolve them before applying the player guard.
+        if socket_id >= BOT_ID_BASE {
+            let bot = match world.get_bot(socket_id) {
+                Some(bot) if bot.in_game && bot.zone_id == my_zone => bot,
+                _ => continue,
+            };
+
+            result.write_u8(0); // type marker (user/bot)
+            result.write_u32(bot.id);
+            crate::systems::bot_ai::write_bot_user_info(&mut result, &bot, &world);
+            user_count += 1;
+
+            if user_count >= MAX_SEND_USERID || result.data.len() >= 60000 {
+                break;
+            }
+            continue;
+        }
+
+        // Only handle real user IDs (< NPC_BAND). Skip self.
         if socket_id >= NPC_BAND || socket_id as SessionId == my_sid {
             continue;
         }
