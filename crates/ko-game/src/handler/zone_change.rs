@@ -1292,7 +1292,7 @@ fn is_transform_allowed_zone(zone_id: u16) -> bool {
 /// This is a lightweight version of `trigger_zone_change` that works with
 /// just a session ID + WorldState (no ClientSession needed).
 pub(crate) fn server_teleport_to_zone(
-    world: &std::sync::Arc<crate::world::WorldState>,
+    world: &crate::world::WorldState,
     sid: crate::zone::SessionId,
     dest_zone: u16,
     dest_x: f32,
