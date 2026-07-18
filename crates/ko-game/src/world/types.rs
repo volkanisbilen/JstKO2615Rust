@@ -255,6 +255,12 @@ pub struct TypeCooldown {
 pub struct SessionHandle {
     /// Channel sender to the session's writer task.
     pub tx: mpsc::UnboundedSender<Arc<Packet>>,
+    /// Consecutive PK kills used by the v2615 WIZ_KILLASSIST narration UI.
+    pub pvp_serial_kill_count: u32,
+    /// Total PK kills in the current narration session.
+    pub pvp_total_kill_count: u32,
+    /// UNIX timestamp of the most recent narrated PK kill.
+    pub pvp_last_kill_time: u64,
     /// Character info for building INOUT packets (None if not in-game yet).
     pub character: Option<CharacterInfo>,
     /// Current position in the world.

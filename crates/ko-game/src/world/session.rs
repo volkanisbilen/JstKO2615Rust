@@ -82,6 +82,9 @@ impl WorldState {
             id,
             SessionHandle {
                 tx,
+                pvp_serial_kill_count: 0,
+                pvp_total_kill_count: 0,
+                pvp_last_kill_time: 0,
                 character: None,
                 position: Position::default(),
                 direction: 0,
@@ -1436,13 +1439,11 @@ impl WorldState {
             }
         }
     }
-    /// Send the hooked-client PvP narration to all players in a zone.
+    /// Send the native v2615 death notice and the killer's narration update.
     ///
-    ///
-    /// Uses the JstKO XSafe/DeathNotice payload consumed by the hooked 2615
-    /// client. This drives PK narration and its correctly positioned minimap
-    /// marker. A normal chat-bar line is also sent for readable history; it is
-    /// intentionally GENERAL_CHAT so no top-screen notice is produced.
+    /// `WIZ_CHAT/DEATH_NOTICE` is rendered as the chat-bar death line and
+    /// minimap marker. `WIZ_KILLASSIST` drives `re_killcount.uif`,
+    /// `killnameall.dxt` and `killnamebackgall.dxt`.
     #[allow(clippy::too_many_arguments)]
     pub fn send_death_notice_to_zone(
         &self,
@@ -1451,63 +1452,78 @@ impl WorldState {
         victim_sid: SessionId,
         killer_name: &str,
         victim_name: &str,
-        killer_party_id: Option<u16>,
+        _killer_party_id: Option<u16>,
         victim_x: u16,
         victim_z: u16,
     ) {
-        let channel = if zone_id == crate::world::ZONE_RONARK_LAND {
-            "Ronark"
-        } else {
-            "PvP"
-        };
-        let chat_msg = format!(
-            "[{}] {} killed {} at ({}, {})",
-            channel, killer_name, victim_name, victim_x, victim_z
-        );
-        let arc_chat_pkt = Arc::new(crate::handler::chat::build_chat_packet(
-            crate::handler::chat::ChatType::General as u8,
+        let victim_nation = self
+            .get_character_info(victim_sid)
+            .map(|ch| ch.nation)
+            .or_else(|| self.get_bot(victim_sid as u32).map(|bot| bot.nation))
+            .unwrap_or(0);
+        let death_notice = crate::handler::chat::build_death_notice_packet(
+            victim_nation,
             0,
-            u16::MAX,
-            "PvP",
-            &chat_msg,
-            -1,
-            1,
-            1,
-        ));
+            killer_sid as u16,
+            killer_name,
+            victim_sid as u16,
+            victim_name,
+            victim_x,
+            victim_z,
+        );
+        self.broadcast_to_zone(zone_id, Arc::new(death_notice), None);
 
-        if let Some(index_entry) = self.zone_session_index.get(&zone_id) {
-            let session_ids: Vec<SessionId> = index_entry.value().read().iter().copied().collect();
-            for sid in session_ids {
-                if let Some(handle) = self.sessions.get(&sid) {
-                    if handle.character.is_none() {
-                        continue;
-                    }
-
-                    // Original SendNewDeathNotice selects the presentation per
-                    // viewer: participant, killer's party, or observer.
-                    let kill_type = if sid == killer_sid || sid == victim_sid {
-                        1
-                    } else if killer_party_id.is_some()
-                        && self.get_party_id(sid) == killer_party_id
-                    {
-                        2
-                    } else {
-                        3
-                    };
-                    let narration = Arc::new(
-                        crate::handler::ext_hook::build_new_death_narration(
-                            kill_type,
-                            killer_name,
-                            victim_name,
-                            victim_x,
-                            victim_z,
-                        ),
+        // Runtime bots have no client connection. A real player killer receives
+        // the exact CUser::KA_KillUpdate payload used by the 2615 client UI.
+        if (killer_sid as u32) < crate::world::BOT_ID_BASE {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let mut narration_state = None;
+            self.update_session(killer_sid, |handle| {
+                if handle.pvp_last_kill_time > 0
+                    && now.saturating_sub(handle.pvp_last_kill_time) > 15 * 60
+                {
+                    handle.pvp_serial_kill_count = 0;
+                    handle.pvp_total_kill_count = 0;
+                }
+                handle.pvp_serial_kill_count = handle.pvp_serial_kill_count.saturating_add(1);
+                handle.pvp_total_kill_count = handle.pvp_total_kill_count.saturating_add(1);
+                handle.pvp_last_kill_time = now;
+                narration_state = Some((
+                    handle.pvp_serial_kill_count.min(12) as u8,
+                    handle.pvp_total_kill_count,
+                ));
+            });
+            if let Some((stage, total_kills)) = narration_state {
+                self.send_to_session_owned(
+                    killer_sid,
+                    crate::handler::dead::build_kill_narration_packet(killer_name, stage),
+                );
+                if total_kills % 10 == 0 {
+                    let killer_nation = self
+                        .get_character_info(killer_sid)
+                        .map(|ch| ch.nation)
+                        .unwrap_or(0);
+                    let total_packet = crate::handler::dead::build_kill_total_packet(
+                        killer_name,
+                        killer_nation,
+                        total_kills,
                     );
-                    let _ = handle.tx.send(narration);
-                    // Chat fallback (same for all recipients)
-                    let _ = handle.tx.send(Arc::clone(&arc_chat_pkt));
+                    if let Some(party_id) = self.get_party_id(killer_sid) {
+                        self.send_to_party(party_id, &total_packet);
+                    } else {
+                        self.send_to_session_owned(killer_sid, total_packet);
+                    }
                 }
             }
+        }
+
+        if (victim_sid as u32) < crate::world::BOT_ID_BASE {
+            self.update_session(victim_sid, |handle| {
+                handle.pvp_serial_kill_count = 0;
+            });
         }
     }
 

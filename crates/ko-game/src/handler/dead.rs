@@ -810,8 +810,39 @@ fn bdw_flag_carrier_death(world: &WorldState, dead_sid: SessionId) {
     }
 }
 
-/// Broadcast a PvP death notice to all players in the zone.
-/// Sends the JstKO 2615 narration/minimap payload plus a general chat line.
+/// Build the exact JstKO v2615 kill narration payload used by KA_KillUpdate.
+///
+/// Wire: `[WIZ_KILLASSIST=0xC8][kill=1][show=1][u32 1]`
+/// `[DByte killer_name][show_sound=1][u8 stage]`.
+pub fn build_kill_narration_packet(killer_name: &str, stage: u8) -> Packet {
+    let mut pkt = Packet::new(Opcode::WizKillAssist as u8);
+    pkt.write_u8(1); // kaopcode::kill
+    pkt.write_u8(1);
+    pkt.write_u32(1);
+    pkt.write_string(killer_name);
+    pkt.write_u8(1);
+    pkt.write_u8(stage.clamp(1, 12));
+    pkt
+}
+
+/// Build KA_KillUpdate's every-10-kills total/party announcement payload.
+/// Wire: `[0xC8][kill=1][type=3][u32 1][DByte name][nation][u32 total]`.
+pub fn build_kill_total_packet(
+    killer_name: &str,
+    killer_nation: u8,
+    total_kills: u32,
+) -> Packet {
+    let mut pkt = Packet::new(Opcode::WizKillAssist as u8);
+    pkt.write_u8(1); // kaopcode::kill
+    pkt.write_u8(3);
+    pkt.write_u32(1);
+    pkt.write_string(killer_name);
+    pkt.write_u8(killer_nation);
+    pkt.write_u32(total_kills);
+    pkt
+}
+
+/// Broadcast the native death notice and update the killer's narration UI.
 pub fn send_death_notice(world: &WorldState, killer_sid: SessionId, victim_sid: SessionId) {
     let killer_name = match world.get_session_name(killer_sid) {
         Some(n) => n,
@@ -1125,6 +1156,36 @@ mod tests {
 
         let mut r = PacketReader::new(&pkt.data);
         assert_eq!(r.read_u32(), Some(42));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_kill_narration_matches_ka_kill_update_wire() {
+        let pkt = build_kill_narration_packet("Wolfcstein", 40);
+        assert_eq!(pkt.opcode, Opcode::WizKillAssist as u8);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u8(), Some(1)); // kaopcode::kill
+        assert_eq!(r.read_u8(), Some(1));
+        assert_eq!(r.read_u32(), Some(1));
+        assert_eq!(r.read_string().as_deref(), Some("Wolfcstein"));
+        assert_eq!(r.read_u8(), Some(1));
+        assert_eq!(r.read_u8(), Some(12)); // Legendary cap
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_kill_total_matches_ka_kill_update_wire() {
+        let pkt = build_kill_total_packet("JOLLY_JOKER", 2, 40);
+        assert_eq!(pkt.opcode, Opcode::WizKillAssist as u8);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u8(), Some(1));
+        assert_eq!(r.read_u8(), Some(3));
+        assert_eq!(r.read_u32(), Some(1));
+        assert_eq!(r.read_string().as_deref(), Some("JOLLY_JOKER"));
+        assert_eq!(r.read_u8(), Some(2));
+        assert_eq!(r.read_u32(), Some(40));
         assert_eq!(r.remaining(), 0);
     }
 

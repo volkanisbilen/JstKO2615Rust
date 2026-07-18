@@ -199,8 +199,9 @@ pub fn build_chat_packet(
 /// Build the native v2615 PvP death-notice packet.
 ///
 /// Unlike ordinary chat messages, `DEATH_NOTICE` has its own payload. The
-/// client uses the two unit IDs and the death coordinates to drive the PK
-/// narration and the live minimap marker.
+/// client uses the two unit IDs and death coordinates to render the death line
+/// and live minimap marker. Centre-screen narration is a separate
+/// `WIZ_KILLASSIST` packet.
 ///
 /// Wire format (all strings are SByte strings):
 /// `[WIZ_CHAT][u8 26][u8 victim_nation][u8 notice_type]`
