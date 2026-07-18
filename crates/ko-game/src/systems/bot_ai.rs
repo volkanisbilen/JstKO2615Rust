@@ -3041,6 +3041,7 @@ pub(crate) fn write_bot_user_info(pkt: &mut Packet, bot: &BotInstance, world: &W
     };
     pkt.write_u8(res_hp_type);
     pkt.write_u32(1); // m_bAbnormalType = ABNORMAL_NORMAL
+    pkt.write_u8(0); // v2600: unknown byte after abnormal_type
     pkt.write_u8(bot.need_party);
     pkt.write_u8(1); // m_bAuthority = 1 (Player, not GM)
     pkt.write_u8(0); // m_bPartyLeader = false
@@ -3059,16 +3060,18 @@ pub(crate) fn write_bot_user_info(pkt: &mut Packet, bot: &BotInstance, world: &W
     pkt.write_u8(0);
 
     // Knights/personal rank flags use the same representation as players.
-    pkt.write_i8(if bot.knights_rank == 0 {
+    let kr = if bot.knights_rank == 0 {
         -1
     } else {
         bot.knights_rank as i8
-    });
-    pkt.write_i8(if bot.personal_rank == 0 {
+    };
+    let pr = if bot.personal_rank == 0 {
         -1
     } else {
         bot.personal_rank as i8
-    });
+    };
+    pkt.write_i8(if kr <= pr { kr } else { -1 });
+    pkt.write_i8(if pr <= kr { pr } else { -1 });
 
     // Equipment — 17 visual slots
     for &(item_id, dur, flag) in &bot.equip_visual {
@@ -3088,10 +3091,9 @@ pub(crate) fn write_bot_user_info(pkt: &mut Packet, bot: &BotInstance, world: &W
     pkt.write_u8(bot.reb_level);
     pkt.write_u16(bot.cover_title);
     pkt.write_u32(0); // ReturnSymbolisOK
-    pkt.write_u8(0);
-    pkt.write_u32(0); // face ID
-    pkt.write_u8(0);
-
+    pkt.write_u8(0); // padding
+    pkt.write_u8(0); // v2600 unknown
+    pkt.write_u8(1); // v2600 final marker
 }
 
 /// Calculate max HP for a bot from the coefficient table.
