@@ -3068,7 +3068,7 @@ fn handle_count_zone(session: &mut ClientSession) -> anyhow::Result<()> {
         session,
         &format!(
             "Zone {zone_id}: Total={}, Players={} (K={}, E={}), Bots={} (K={}, E={})",
-            player_total + bot_total,
+            player_total as usize + bot_total,
             player_total,
             player_karus,
             player_elmorad,
@@ -3112,7 +3112,7 @@ fn handle_count_level(session: &mut ClientSession, args: &[&str]) -> anyhow::Res
         session,
         &format!(
             "Level {level}: Total={}, Players={}, Bots={}",
-            players + bots,
+            players as usize + bots,
             players,
             bots
         ),
