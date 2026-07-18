@@ -2956,6 +2956,14 @@ fn build_bot_inout_packet(bot: &BotInstance, world: &WorldState, inout_type: u8)
     pkt.write_u8(0); // reserved
     pkt.write_u32(bot.id);
 
+    write_bot_user_info(&mut pkt, bot, world);
+    pkt
+}
+
+/// Append the GetUserInfo body for a runtime bot.
+/// Used by both WIZ_USER_INOUT and WIZ_REQ_USERIN responses.
+pub(crate) fn write_bot_user_info(pkt: &mut Packet, bot: &BotInstance, world: &WorldState) {
+
     // ── GetUserInfo body ─────────────────────────────────────────────
 
     // Name (SByte — u8 length prefix)
@@ -3050,9 +3058,17 @@ fn build_bot_inout_packet(bot: &BotInstance, world: &WorldState, inout_type: u8)
     pkt.write_u8(0);
     pkt.write_u8(0);
 
-    // Knights/personal rank — bots always unranked
-    pkt.write_i8(-1);
-    pkt.write_i8(-1);
+    // Knights/personal rank flags use the same representation as players.
+    pkt.write_i8(if bot.knights_rank == 0 {
+        -1
+    } else {
+        bot.knights_rank as i8
+    });
+    pkt.write_i8(if bot.personal_rank == 0 {
+        -1
+    } else {
+        bot.personal_rank as i8
+    });
 
     // Equipment — 17 visual slots
     for &(item_id, dur, flag) in &bot.equip_visual {
@@ -3076,7 +3092,6 @@ fn build_bot_inout_packet(bot: &BotInstance, world: &WorldState, inout_type: u8)
     pkt.write_u32(0); // face ID
     pkt.write_u8(0);
 
-    pkt
 }
 
 /// Calculate max HP for a bot from the coefficient table.
@@ -3254,11 +3269,10 @@ pub fn spawn_farm_bot(
         bot.move_state = 1;
     }
 
-    // Broadcast full INOUT_IN packet so clients can render the bot.
+    // Register first so an immediate WIZ_REQ_USERIN can resolve the bot.
     let in_pkt = build_bot_inout_packet(&bot, world, 1); // 1 = INOUT_IN
-    broadcast_to_bot_region(world, zone_id, rx, rz, &in_pkt);
-
     world.insert_bot(bot);
+    broadcast_to_bot_region(world, zone_id, rx, rz, &in_pkt);
 
     debug!(
         bot_id = id,
@@ -3323,6 +3337,39 @@ fn gm_bot_stats(class: u16) -> (u8, u8, u8, u8, u8) {
         4 | 11 | 12 => (50, 60, 60, 100, 30), // Priest: INT-focused with STA
         _ => (80, 70, 70, 60, 30),          // Default balanced
     }
+}
+
+fn bot_class_group(class: u16) -> u8 {
+    match class % 100 {
+        1 | 5 | 6 => 1,
+        2 | 7 | 8 => 2,
+        3 | 9 | 10 => 3,
+        4 | 11 | 12 => 4,
+        _ => 0,
+    }
+}
+
+/// Reuse a zone bot template's equipped/cosmetic visuals for GM-created bots.
+/// Runtime bots do not carry bag inventory, but they expose the same 17 visual
+/// slots used by normal player INOUT packets.
+fn gm_bot_equipment(
+    world: &WorldState,
+    zone_id: u16,
+    nation: u8,
+    class: u16,
+) -> [(u32, i16, u8); 17] {
+    let class_group = bot_class_group(class);
+    world
+        .get_bots_in_zone(zone_id as i16)
+        .into_iter()
+        .filter(|row| {
+            row.nation as u8 == nation
+                && bot_class_group(row.class as u16) == class_group
+                && row.str_item.as_ref().is_some_and(|items| !items.is_empty())
+        })
+        .map(|row| parse_bot_equipment(row.str_item.as_deref()))
+        .find(|equipment| equipment.iter().any(|(item_id, _, _)| *item_id != 0))
+        .unwrap_or([(0, 0, 0); 17])
 }
 
 /// Spawn a bot from GM command parameters (no DB row required).
@@ -3424,7 +3471,7 @@ pub fn spawn_gm_bot(world: &WorldState, params: SpawnGmBotParams) -> BotId {
         hiding_helmet: false,
         hiding_cospre: false,
         need_party: 1,
-        equip_visual: [(0, 0, 0); 17], // GM bots have no equipment
+        equip_visual: gm_bot_equipment(world, zone_id, nation, real_class),
         personal_rank: 0,
         knights_rank: 0,
     };
@@ -3441,11 +3488,10 @@ pub fn spawn_gm_bot(world: &WorldState, params: SpawnGmBotParams) -> BotId {
         bot.move_state = 1;
     }
 
-    // Broadcast full WIZ_USER_INOUT(INOUT_IN) with GetUserInfo.
+    // Register first so an immediate WIZ_REQ_USERIN can resolve the bot.
     let in_pkt = build_bot_inout_packet(&bot, world, 1); // 1 = INOUT_IN
-    broadcast_to_bot_region(world, zone_id, rx, rz, &in_pkt);
-
     world.insert_bot(bot);
+    broadcast_to_bot_region(world, zone_id, rx, rz, &in_pkt);
 
     debug!(
         bot_id = id,
