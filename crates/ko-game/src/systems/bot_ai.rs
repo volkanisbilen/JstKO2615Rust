@@ -2778,7 +2778,7 @@ fn broadcast_anger_gauge(
 /// - Zone 72 (Ardream):     Karus (851,136),   Elmorad (190,897), range ±5
 /// - Zone 73 (RLB):         Karus (515,104),   Elmorad (513,916), range ±5
 /// Returns `(x, z)` with random range offset applied.
-fn get_bot_respawn_position(zone_id: u16, nation: u8) -> (f32, f32) {
+pub(crate) fn get_bot_respawn_position(zone_id: u16, nation: u8) -> (f32, f32) {
     let mut rng = rand::thread_rng();
 
     let (base_x, base_z, range_x, range_z) = match zone_id {
@@ -3478,6 +3478,41 @@ pub fn despawn_bots_in_zone(world: &WorldState, zone_id: u16) -> usize {
         despawn_bot(world, id);
     }
     count
+}
+
+/// Return the number of temporary PK bots created through GM commands in a zone.
+/// Database-backed bots are deliberately excluded (`db_id != 0`).
+pub fn count_gm_pk_bots_in_zone(world: &WorldState, zone_id: u16) -> usize {
+    world
+        .bots
+        .iter()
+        .filter(|entry| is_gm_pk_bot(entry.value(), zone_id))
+        .count()
+}
+
+/// Despawn only temporary GM-created PK bots in a zone.
+///
+/// Unlike `despawn_bots_in_zone()`, this never removes persistent DB bots or
+/// GM-spawned farmer/merchant bots.
+pub fn despawn_gm_pk_bots_in_zone(world: &WorldState, zone_id: u16) -> usize {
+    let bot_ids: Vec<BotId> = world
+        .bots
+        .iter()
+        .filter(|entry| is_gm_pk_bot(entry.value(), zone_id))
+        .map(|entry| *entry.key())
+        .collect();
+
+    let count = bot_ids.len();
+    for id in bot_ids {
+        despawn_bot(world, id);
+    }
+    count
+}
+
+fn is_gm_pk_bot(bot: &BotInstance, zone_id: u16) -> bool {
+    bot.zone_id == zone_id
+        && bot.db_id == 0
+        && (bot.ai_state == BotAiState::Pk || bot.original_ai_state == BotAiState::Pk)
 }
 
 /// Despawn all bots server-wide and return the count removed.
@@ -5497,6 +5532,58 @@ mod tests {
         let removed = despawn_bots_in_zone(&world, 21);
         assert_eq!(removed, 3, "should remove 3 bots from zone 21");
         assert_eq!(world.bot_count(), 1, "1 bot should remain in zone 72");
+    }
+
+    #[test]
+    fn test_despawn_gm_pk_bots_preserves_other_bots() {
+        let world = WorldState::new();
+
+        let gm_pk_id = spawn_gm_bot(
+            &world,
+            SpawnGmBotParams {
+                zone_id: ZONE_RONARK_LAND,
+                x: 1375.0,
+                y: 0.0,
+                z: 1098.0,
+                class: 1,
+                level: 83,
+                nation: 1,
+                ai_state: BotAiState::Pk,
+            },
+        );
+        let farmer_id = spawn_gm_bot(
+            &world,
+            SpawnGmBotParams {
+                zone_id: ZONE_RONARK_LAND,
+                x: 1376.0,
+                y: 0.0,
+                z: 1098.0,
+                class: 2,
+                level: 83,
+                nation: 1,
+                ai_state: BotAiState::Farmer,
+            },
+        );
+        let db_pk_id = spawn_gm_bot(
+            &world,
+            SpawnGmBotParams {
+                zone_id: ZONE_RONARK_LAND,
+                x: 622.0,
+                y: 0.0,
+                z: 898.0,
+                class: 3,
+                level: 83,
+                nation: 2,
+                ai_state: BotAiState::Pk,
+            },
+        );
+        world.update_bot(db_pk_id, |bot| bot.db_id = 123);
+
+        assert_eq!(count_gm_pk_bots_in_zone(&world, ZONE_RONARK_LAND), 1);
+        assert_eq!(despawn_gm_pk_bots_in_zone(&world, ZONE_RONARK_LAND), 1);
+        assert!(world.get_bot(gm_pk_id).is_none());
+        assert!(world.get_bot(farmer_id).is_some());
+        assert!(world.get_bot(db_pk_id).is_some());
     }
 
     #[test]
