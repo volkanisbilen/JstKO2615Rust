@@ -3359,16 +3359,20 @@ fn gm_bot_equipment(
     class: u16,
 ) -> [(u32, i16, u8); 17] {
     let class_group = bot_class_group(class);
-    world
-        .get_bots_in_zone(zone_id as i16)
-        .into_iter()
-        .filter(|row| {
-            row.nation as u8 == nation
-                && bot_class_group(row.class as u16) == class_group
-                && row.str_item.as_ref().is_some_and(|items| !items.is_empty())
-        })
-        .map(|row| parse_bot_equipment(row.str_item.as_deref()))
-        .find(|equipment| equipment.iter().any(|(item_id, _, _)| *item_id != 0))
+    let rows = world.get_bots_in_zone(zone_id as i16);
+    let find_equipment = |same_nation: bool| {
+        rows.iter()
+            .filter(|row| {
+                (!same_nation || row.nation as u8 == nation)
+                    && bot_class_group(row.class as u16) == class_group
+                    && row.str_item.as_ref().is_some_and(|items| !items.is_empty())
+            })
+            .map(|row| parse_bot_equipment(row.str_item.as_deref()))
+            .find(|equipment| equipment.iter().any(|(item_id, _, _)| *item_id != 0))
+    };
+
+    find_equipment(true)
+        .or_else(|| find_equipment(false))
         .unwrap_or([(0, 0, 0); 17])
 }
 
