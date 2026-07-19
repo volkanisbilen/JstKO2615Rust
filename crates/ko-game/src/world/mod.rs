@@ -531,6 +531,9 @@ pub struct WorldState {
     /// event scheduling, sign-up tracking, and timer state machine.
     pub(crate) event_room_manager: EventRoomManager,
 
+    /// Manes Survival spawn configuration and runtime NPC lifecycle.
+    pub(crate) manes_survival_manager: crate::systems::manes_survival::ManesSurvivalManager,
+
     /// BDW per-room state (altar, monument counts, respawn timer).
     ///
     pub(crate) bdw_manager: parking_lot::RwLock<BdwManager>,
@@ -1038,6 +1041,7 @@ impl WorldState {
             item_right_click_exchange: DashMap::new(),
             item_right_exchange: DashMap::new(),
             event_room_manager: EventRoomManager::new(),
+            manes_survival_manager: crate::systems::manes_survival::ManesSurvivalManager::default(),
             bdw_manager: parking_lot::RwLock::new(BdwManager::default()),
             event_rewards: DashMap::new(),
             event_timer_show_list: parking_lot::RwLock::new(Vec::new()),
@@ -1275,6 +1279,7 @@ impl WorldState {
             item_right_click_exchange: DashMap::new(),
             item_right_exchange: DashMap::new(),
             event_room_manager: EventRoomManager::new(),
+            manes_survival_manager: crate::systems::manes_survival::ManesSurvivalManager::default(),
             bdw_manager: parking_lot::RwLock::new(BdwManager::default()),
             monster_stone_manager: parking_lot::RwLock::new(MonsterStoneManager::new()),
             event_rewards: DashMap::new(),
