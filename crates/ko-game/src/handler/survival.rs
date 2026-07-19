@@ -22,6 +22,8 @@ const REG_OPEN: u8 = 1;
 const REG_APPLY: u8 = 2;
 const ACTION_APPLY: u16 = 1;
 const ACTION_CANCEL: u16 = 2;
+const CATEGORY_EVENT: u8 = 2;
+const EVENT_COUNTDOWN_COMPLETE: u8 = 3;
 pub const REGISTRATION_DURATION_SECONDS: u16 = 600;
 
 pub fn build_registration_open(remaining_seconds: u16, participant_count: u16) -> Packet {
@@ -65,6 +67,26 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let mut reader = PacketReader::new(&pkt.data);
     let category = reader.read_u8().unwrap_or(0);
     let operation = reader.read_u8().unwrap_or(0);
+
+    // Verified from the 2615 client trace: when the registration timer reaches
+    // zero it sends D0 02 03. Only the first client signal performs the global
+    // transition; later signals observe the already-active manager and no-op.
+    if category == CATEGORY_EVENT && operation == EVENT_COUNTDOWN_COMPLETE {
+        let world = session.world().clone();
+        if !world.manes_survival_manager.is_active() {
+            match world.manes_survival_manager.start_registered_event(&world) {
+                Ok((monsters, participants)) => debug!(
+                    "[{}] Manes countdown completed: participants={} monsters={}",
+                    session.addr(), participants, monsters
+                ),
+                Err(error) => warn!(
+                    "[{}] Manes automatic start rejected: {error:#}",
+                    session.addr()
+                ),
+            }
+        }
+        return Ok(());
+    }
 
     if category != CATEGORY_REGISTRATION || operation != REG_APPLY {
         debug!(
