@@ -203,27 +203,32 @@ pub fn build_chat_packet(
 /// and live minimap marker. Centre-screen narration is a separate
 /// `WIZ_KILLASSIST` packet.
 ///
-/// Wire format (all strings are SByte strings):
-/// `[WIZ_CHAT][u8 26][u8 victim_nation][u8 notice_type]`
-/// `[u16 killer_id][killer_name][u16 victim_id][victim_name][u16 x][u16 z]`
+/// Wire format recovered from the v2615 client's `sub_8389A0`, case `0x1A`
+/// (all strings are SByte strings):
+/// `[WIZ_CHAT][u8 26][u8 killer_nation][u8 victim_nation]`
+/// `[u8 reserved][u8 notice_type][u32 killer_id][killer_name]`
+/// `[u32 victim_id][victim_name][u16 x][u16 z]`
 #[allow(clippy::too_many_arguments)]
 pub fn build_death_notice_packet(
+    killer_nation: u8,
     victim_nation: u8,
     notice_type: u8,
-    killer_id: u16,
+    killer_id: u32,
     killer_name: &str,
-    victim_id: u16,
+    victim_id: u32,
     victim_name: &str,
     victim_x: u16,
     victim_z: u16,
 ) -> Packet {
     let mut pkt = Packet::new(Opcode::WizChat as u8);
     pkt.write_u8(ChatType::DeathNotice as u8);
+    pkt.write_u8(killer_nation);
     pkt.write_u8(victim_nation);
+    pkt.write_u8(0); // reserved by the native v2615 death-notice contract
     pkt.write_u8(notice_type);
-    pkt.write_u16(killer_id);
+    pkt.write_u32(killer_id);
     pkt.write_sbyte_string(killer_name);
-    pkt.write_u16(victim_id);
+    pkt.write_u32(victim_id);
     pkt.write_sbyte_string(victim_name);
     pkt.write_u16(victim_x);
     pkt.write_u16(victim_z);
@@ -1421,6 +1426,7 @@ mod tests {
     #[test]
     fn test_build_native_death_notice_packet() {
         let pkt = build_death_notice_packet(
+            1,
             2,
             0,
             10_001,
@@ -1434,11 +1440,13 @@ mod tests {
 
         let mut reader = PacketReader::new(&pkt.data);
         assert_eq!(reader.read_u8(), Some(ChatType::DeathNotice as u8));
+        assert_eq!(reader.read_u8(), Some(1));
         assert_eq!(reader.read_u8(), Some(2));
         assert_eq!(reader.read_u8(), Some(0));
-        assert_eq!(reader.read_u16(), Some(10_001));
+        assert_eq!(reader.read_u8(), Some(0));
+        assert_eq!(reader.read_u32(), Some(10_001));
         assert_eq!(reader.read_sbyte_string().as_deref(), Some("KarusBot"));
-        assert_eq!(reader.read_u16(), Some(42));
+        assert_eq!(reader.read_u32(), Some(42));
         assert_eq!(reader.read_sbyte_string().as_deref(), Some("ElmoUser"));
         assert_eq!(reader.read_u16(), Some(1054));
         assert_eq!(reader.read_u16(), Some(1082));
