@@ -363,6 +363,7 @@ pub async fn process_chat_command(
         "juraidopen" => handle_temple_event_open(session, TempleEventKind::Juraid)?,
         "juraidclose" => handle_temple_event_close(session, TempleEventKind::Juraid)?,
         "manesopen" => handle_manes_survival_open(session)?,
+        "manesstart" => handle_manes_survival_start(session)?,
         "manesclose" => handle_manes_survival_close(session)?,
         "reloadranks" => {
             let world = session.world();
@@ -8884,40 +8885,69 @@ mod tests {
     }
 }
 
-/// +manesopen — spawn the verified zone-96 Manes Survival population.
+/// +manesopen — open the verified 2615 registration window without spawning monsters.
 fn handle_manes_survival_open(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    if !world.manes_survival_manager.open_registration() {
+        let state = if world.manes_survival_manager.is_active() {
+            "active"
+        } else {
+            "registration is already open"
+        };
+        send_help(session, &format!("Manes Survival {state}."));
+        return Ok(());
+    }
+
+    let open = Arc::new(crate::handler::survival::build_registration_open());
+    for sid in world.get_in_game_session_ids() {
+        world.send_to_session_arc(sid, Arc::clone(&open));
+    }
+    crate::handler::survival::broadcast_registration_status(&world, 0);
+
+    send_help(session, "Manes Survival registration opened; the Apply window was sent to online players.");
+    info!("[{}] +manesopen: registration UI opened", session.addr());
+    Ok(())
+}
+
+/// +manesstart — test-only transition from registration to the active monster phase.
+fn handle_manes_survival_start(session: &mut ClientSession) -> anyhow::Result<()> {
     let world = session.world().clone();
     match world.manes_survival_manager.start(&world) {
         Ok(0) => send_help(session, "Manes Survival is already active."),
         Ok(count) => {
             send_help(
                 session,
-                &format!("Manes Survival started in zones 57-60 with {count} monsters."),
+                &format!(
+                    "Manes Survival started with {} registered participants and {count} monsters across zones 57-60.",
+                    world.manes_survival_manager.participant_count()
+                ),
             );
             info!(
-                "[{}] +manesopen: spawned {} runtime monsters across zones 57-60",
+                "[{}] +manesstart: spawned {} runtime monsters across zones 57-60",
                 session.addr(),
                 count
             );
         }
         Err(error) => {
-            warn!("[{}] +manesopen failed: {error:#}", session.addr());
+            warn!("[{}] +manesstart failed: {error:#}", session.addr());
             send_help(session, &format!("Manes Survival could not start: {error}"));
         }
     }
     Ok(())
 }
 
-/// +manesclose — remove only runtime NPCs owned by the Manes event room.
+/// +manesclose — close registration and remove only Manes-owned runtime NPCs.
 fn handle_manes_survival_close(session: &mut ClientSession) -> anyhow::Result<()> {
     let world = session.world().clone();
-    if !world.manes_survival_manager.is_active() {
-        send_help(session, "Manes Survival is not active.");
+    if !world.manes_survival_manager.is_active()
+        && !world.manes_survival_manager.is_registration_open()
+    {
+        send_help(session, "Manes Survival is not active and registration is closed.");
         return Ok(());
     }
 
     world.manes_survival_manager.stop(&world);
-    send_help(session, "Manes Survival stopped; zone 57-60 event monsters removed.");
+    send_help(session, "Manes Survival registration/event stopped; zone 57-60 monsters removed.");
     info!("[{}] +manesclose: Manes Survival stopped", session.addr());
     Ok(())
 }
