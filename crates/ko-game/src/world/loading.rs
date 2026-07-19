@@ -18,6 +18,7 @@ use ko_db::repositories::coefficient::CoefficientRepository;
 use ko_db::repositories::daily_quest::DailyQuestRepository;
 use ko_db::repositories::draki_tower::DrakiTowerRepository;
 use ko_db::repositories::dungeon_defence::DungeonDefenceRepository;
+use ko_db::repositories::manes_survival::ManesSurvivalRepository;
 use ko_db::repositories::event_schedule::EventScheduleRepository;
 use ko_db::repositories::forgotten_temple::ForgottenTempleRepository;
 use ko_db::repositories::item::ItemRepository;
@@ -133,6 +134,9 @@ impl WorldState {
         // ─── NPC / Monster Loading ──────────────────────────────────────────────
         self.load_npcs_and_monsters(pool).await?;
 
+        // ─── Manes Survival Runtime Configuration ──────────────────────────────
+        self.load_manes_survival(pool).await?;
+
         // ─── Knights (Clan) Loading ─────────────────────────────────────────────
         self.load_knights(pool).await?;
 
@@ -182,6 +186,15 @@ impl WorldState {
         // ─── Banish of Winner Loading ─────────────────────────────────────────
         self.load_banish_of_winner(pool).await;
 
+        Ok(())
+    }
+
+    /// Load the validated zone-96 runtime spawn configuration.
+    async fn load_manes_survival(&self, pool: &DbPool) -> anyhow::Result<()> {
+        let rows = ManesSurvivalRepository::new(pool).load_spawns().await?;
+        let count = rows.len();
+        self.manes_survival_manager.set_spawns(rows)?;
+        tracing::info!(spawns = count, zone = 96, "Manes Survival configuration loaded");
         Ok(())
     }
 
