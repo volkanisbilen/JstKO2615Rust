@@ -152,6 +152,10 @@ pub fn generate_npc_loot(
     npc: &NpcInstance,
     tmpl: &NpcTemplate,
 ) -> Option<u32> {
+    if matches!(npc.zone_id, 57..=60) && (10701..=10733).contains(&npc.proto_id) {
+        return generate_manes_survival_loot(world, killer_sid, npc_id, npc);
+    }
+
     let mut rng = rand::thread_rng();
 
     // Get drop table for this NPC
@@ -385,6 +389,67 @@ pub fn generate_npc_loot(
     // for m_bAutoLoot, then call auto-loot bundle pickup (BundleSystem.cpp)
     try_auto_loot(world, killer_sid, bundle_id, npc);
 
+    Some(bundle_id)
+}
+
+/// Manes Survival has an isolated, fixed loot contract: no gold, ordinary
+/// monster table, premium, scroll, clan or global-event modifiers apply.
+fn generate_manes_survival_loot(
+    world: &WorldState,
+    killer_sid: SessionId,
+    npc_id: NpcId,
+    npc: &NpcInstance,
+) -> Option<u32> {
+    const MANES_ORB_ITEM: u32 = 978_026_000;
+
+    let chance_per_10k = match npc.proto_id {
+        10701..=10709 => 100,   // lower grade and lower bosses: 1%
+        10710..=10719 => 500,   // middle grade and middle bosses: 5%
+        10720..=10728 => 2_000, // high-grade normal monsters: 20%
+        10729..=10732 => 4_500, // high-grade bosses: 45%
+        10733 => 0,             // Dark Dragon resolves the victory reward instead
+        _ => return None,
+    };
+
+    if chance_per_10k == 0 || rand::thread_rng().gen_range(0..10_000) >= chance_per_10k {
+        return None;
+    }
+
+    let mut items: [LootItem; NPC_HAVE_ITEM_LIST] = Default::default();
+    items[0] = LootItem {
+        item_id: MANES_ORB_ITEM,
+        count: 1,
+        slot_id: 0,
+    };
+
+    let bundle_id = world.allocate_bundle_id();
+    world.add_ground_bundle(GroundBundle {
+        bundle_id,
+        items_count: 1,
+        npc_id: npc.proto_id,
+        looter: killer_sid,
+        x: npc.x,
+        z: npc.z,
+        y: npc.y,
+        zone_id: npc.zone_id,
+        drop_time: Instant::now(),
+        items,
+    });
+
+    let mut drop_pkt = Packet::new(Opcode::WizItemDrop as u8);
+    drop_pkt.write_u32(npc_id);
+    drop_pkt.write_u32(bundle_id);
+    drop_pkt.write_u8(1);
+
+    if let Some(party) = world.get_party_id(killer_sid).and_then(|id| world.get_party(id)) {
+        for member_sid in party.active_members() {
+            world.send_to_session(member_sid, &drop_pkt);
+        }
+    } else {
+        world.send_to_session_owned(killer_sid, drop_pkt);
+    }
+
+    try_auto_loot(world, killer_sid, bundle_id, npc);
     Some(bundle_id)
 }
 
