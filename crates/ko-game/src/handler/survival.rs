@@ -23,8 +23,9 @@ const REG_APPLY: u8 = 2;
 const ACTION_APPLY: u16 = 1;
 const ACTION_CANCEL: u16 = 2;
 const CATEGORY_EVENT: u8 = 2;
-const EVENT_COUNTDOWN_COMPLETE: u8 = 3;
+const EVENT_START: u8 = 1;
 pub const REGISTRATION_DURATION_SECONDS: u16 = 600;
+pub const EVENT_DURATION_SECONDS: u16 = 1_200;
 
 pub fn build_registration_open(remaining_seconds: u16, participant_count: u16) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
@@ -43,6 +44,29 @@ pub fn build_registration_result(result: i16, participant_count: u16) -> Packet 
     if result == 1 {
         pkt.write_u16(participant_count);
     }
+    pkt
+}
+
+
+/// Initialise the v2615 Manes Survival client state.
+///
+/// Verified against `sub_716A10 -> sub_7113D0`, operation 1:
+/// `D0 02 01 u8 class_group u16 seconds u16 exp u16 max_exp u8 level`.
+pub fn build_event_start(
+    class_group: u8,
+    remaining_seconds: u16,
+    survival_exp: u16,
+    survival_max_exp: u16,
+    survival_level: u8,
+) -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_EVENT);
+    pkt.write_u8(EVENT_START);
+    pkt.write_u8(class_group);
+    pkt.write_u16(remaining_seconds);
+    pkt.write_u16(survival_exp);
+    pkt.write_u16(survival_max_exp);
+    pkt.write_u8(survival_level);
     pkt
 }
 
@@ -67,26 +91,6 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let mut reader = PacketReader::new(&pkt.data);
     let category = reader.read_u8().unwrap_or(0);
     let operation = reader.read_u8().unwrap_or(0);
-
-    // Verified from the 2615 client trace: when the registration timer reaches
-    // zero it sends D0 02 03. Only the first client signal performs the global
-    // transition; later signals observe the already-active manager and no-op.
-    if category == CATEGORY_EVENT && operation == EVENT_COUNTDOWN_COMPLETE {
-        let world = session.world().clone();
-        if !world.manes_survival_manager.is_active() {
-            match world.manes_survival_manager.start_registered_event(&world) {
-                Ok((monsters, participants)) => debug!(
-                    "[{}] Manes countdown completed: participants={} monsters={}",
-                    session.addr(), participants, monsters
-                ),
-                Err(error) => warn!(
-                    "[{}] Manes automatic start rejected: {error:#}",
-                    session.addr()
-                ),
-            }
-        }
-        return Ok(());
-    }
 
     if category != CATEGORY_REGISTRATION || operation != REG_APPLY {
         debug!(
@@ -137,4 +141,19 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_start_matches_v2615_client_contract() {
+        let packet = build_event_start(3, 1_200, 0, 200, 1);
+        assert_eq!(packet.opcode, 0xD0);
+        assert_eq!(
+            packet.data,
+            vec![0x02, 0x01, 0x03, 0xB0, 0x04, 0x00, 0x00, 0xC8, 0x00, 0x01]
+        );
+    }
 }
