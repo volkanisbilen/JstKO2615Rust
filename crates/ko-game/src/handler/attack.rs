@@ -2215,8 +2215,22 @@ pub(crate) async fn handle_npc_death(
     // Iterates m_DamagedUserList and distributes XP/NP proportionally to
     // each damager's contribution. Party members' damage is consolidated
     // into one representative entry so the whole party gets proportional XP.
-    let base_exp = tmpl.exp as i64;
-    let base_loyalty = tmpl.loyalty.min(i32::MAX as u32) as i32;
+    // Manes uses its own level/EXP state initialised through WIZ_SURVIVAL.
+    // Sending the normal character WIZ_EXP_CHANGE (0x1A) here crashes the
+    // v2615 client immediately after the first event monster dies and would
+    // also mutate the persistent character level, which this event forbids.
+    let is_manes_survival_kill = world.manes_survival_manager.is_active()
+        && crate::systems::manes_survival::ZONES_MANES_SURVIVAL.contains(&npc.zone_id);
+    let base_exp = if is_manes_survival_kill {
+        0
+    } else {
+        tmpl.exp as i64
+    };
+    let base_loyalty = if is_manes_survival_kill {
+        0
+    } else {
+        tmpl.loyalty.min(i32::MAX as u32) as i32
+    };
     let npc_x = npc.x;
     let npc_z = npc.z;
 
