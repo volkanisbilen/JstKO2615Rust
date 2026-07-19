@@ -94,7 +94,12 @@ impl SmdFile {
         // 10-byte exporter header. Detect that format without changing legacy maps.
         let start = reader.stream_position()?;
         let first = read_i32(reader)?;
-        let headered = !(first > 0 && first <= 10000);
+        let candidate_unit_dist = read_f32(reader)?;
+        let headered = !(first > 0
+            && first <= 10000
+            && candidate_unit_dist.is_finite()
+            && candidate_unit_dist > 0.0
+            && candidate_unit_dist <= 100.0);
         if headered {
             if first <= 0 || first > 255 {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid SMD header"));
