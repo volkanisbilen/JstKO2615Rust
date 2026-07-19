@@ -6,6 +6,8 @@
 //! - S2C D0 01 02 u8 result/nation
 //! - S2C D0 01 03 u32 elapsed, u32 Karus count, u32 El Morad count
 
+use std::sync::Arc;
+
 use ko_protocol::{Packet, PacketReader};
 use tracing::{debug, warn};
 
@@ -44,6 +46,23 @@ pub fn build_registration_status(elapsed_seconds: u32, karus: u32, el_morad: u32
     pkt
 }
 
+pub fn broadcast_registration_status(world: &crate::world::WorldState, elapsed_seconds: u32) {
+    let mut karus = 0u32;
+    let mut el_morad = 0u32;
+    for sid in world.manes_survival_manager.participant_ids() {
+        match world.get_character_info(sid).map(|ch| ch.nation) {
+            Some(1) => karus += 1,
+            Some(2) => el_morad += 1,
+            _ => {}
+        }
+    }
+
+    let packet = Arc::new(build_registration_status(elapsed_seconds, karus, el_morad));
+    for sid in world.get_in_game_session_ids() {
+        world.send_to_session_arc(sid, Arc::clone(&packet));
+    }
+}
+
 pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
     if session.state() != SessionState::InGame {
         return Ok(());
@@ -74,6 +93,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             let nation = world.get_character_info(sid).map(|ch| ch.nation).unwrap_or(0);
             let result = if manager.register(sid) { nation } else { 0 };
             session.send_packet(&build_registration_result(result)).await?;
+            broadcast_registration_status(&world, 0);
             debug!(
                 "[{}] Manes registration apply sid={} result={} participants={}",
                 session.addr(), sid, result, manager.participant_count()
@@ -82,6 +102,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         ACTION_CANCEL => {
             manager.unregister(sid);
             session.send_packet(&build_registration_result(0)).await?;
+            broadcast_registration_status(&world, 0);
             debug!(
                 "[{}] Manes registration cancel sid={} participants={}",
                 session.addr(), sid, manager.participant_count()
