@@ -2104,7 +2104,14 @@ async fn handle_npc_attack(
     world.record_npc_damage(npc_id, attacker_sid, damage as i32);
 
     // ── Attacker weapon durability loss ──────────────────────────────
-    world.item_wore_out(attacker_sid, WORE_TYPE_ATTACK, damage as i32);
+    // Manes equips a client-side temporary SurvivalSetting loadout while the
+    // real inventory stays intact. A normal WIZ_DURATION update addresses the
+    // real item slot and is invalid for that temporary loadout.
+    let is_manes_survival_zone =
+        crate::systems::manes_survival::ZONES_MANES_SURVIVAL.contains(&npc.zone_id);
+    if !is_manes_survival_zone {
+        world.item_wore_out(attacker_sid, WORE_TYPE_ATTACK, damage as i32);
+    }
 
     // Notify NPC AI about damage (reactive aggro — C++ ChangeTarget)
     if new_hp > 0 {
