@@ -1,10 +1,13 @@
-//! Manes Survival 2615 client protocol (shared main opcode byte 0xD0).
+//! Manes Survival 2615 client protocol.
 //!
-//! Verified from the unpacked client CSurvival dispatcher:
-//! - S2C D0 01 01: open registration UI
+//! Verified from the unpacked client dispatchers:
+//! - S2C D3 01: open registration UI
+//! - S2C D3 02 u8 result/nation: registration result
+//! - S2C D3 03 u32 elapsed, u32 Karus count, u32 El Morad count: status
 //! - C2S D0 01 02 u16 action: 1 apply, 2 cancel
-//! - S2C D0 01 02 u8 result/nation
-//! - S2C D0 01 03 u32 elapsed, u32 Karus count, u32 El Morad count
+//!
+//! Opcode 0xD0 is shared with the in-event Survival gameplay dispatcher.
+//! Registration responses must use the separate 0xD3 client dispatcher.
 
 use std::sync::Arc;
 
@@ -13,7 +16,8 @@ use tracing::{debug, warn};
 
 use crate::session::{ClientSession, SessionState};
 
-const WIZ_SURVIVAL: u8 = 0xD0;
+const WIZ_SURVIVAL_GAMEPLAY: u8 = 0xD0;
+const WIZ_SURVIVAL_REGISTRATION: u8 = 0xD3;
 const CATEGORY_REGISTRATION: u8 = 1;
 const REG_OPEN: u8 = 1;
 const REG_APPLY: u8 = 2;
@@ -22,23 +26,20 @@ const ACTION_APPLY: u16 = 1;
 const ACTION_CANCEL: u16 = 2;
 
 pub fn build_registration_open() -> Packet {
-    let mut pkt = Packet::new(WIZ_SURVIVAL);
-    pkt.write_u8(CATEGORY_REGISTRATION);
+    let mut pkt = Packet::new(WIZ_SURVIVAL_REGISTRATION);
     pkt.write_u8(REG_OPEN);
     pkt
 }
 
 pub fn build_registration_result(result: u8) -> Packet {
-    let mut pkt = Packet::new(WIZ_SURVIVAL);
-    pkt.write_u8(CATEGORY_REGISTRATION);
+    let mut pkt = Packet::new(WIZ_SURVIVAL_REGISTRATION);
     pkt.write_u8(REG_APPLY);
     pkt.write_u8(result);
     pkt
 }
 
 pub fn build_registration_status(elapsed_seconds: u32, karus: u32, el_morad: u32) -> Packet {
-    let mut pkt = Packet::new(WIZ_SURVIVAL);
-    pkt.write_u8(CATEGORY_REGISTRATION);
+    let mut pkt = Packet::new(WIZ_SURVIVAL_REGISTRATION);
     pkt.write_u8(REG_STATUS);
     pkt.write_u32(elapsed_seconds);
     pkt.write_u32(karus);
@@ -67,6 +68,8 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     if session.state() != SessionState::InGame {
         return Ok(());
     }
+
+    debug_assert_eq!(pkt.opcode, WIZ_SURVIVAL_GAMEPLAY);
 
     let mut reader = PacketReader::new(&pkt.data);
     let category = reader.read_u8().unwrap_or(0);
