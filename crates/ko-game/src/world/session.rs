@@ -1456,17 +1456,23 @@ impl WorldState {
         victim_x: u16,
         victim_z: u16,
     ) {
+        let killer_nation = self
+            .get_character_info(killer_sid)
+            .map(|ch| ch.nation)
+            .or_else(|| self.get_bot(killer_sid as u32).map(|bot| bot.nation))
+            .unwrap_or(0);
         let victim_nation = self
             .get_character_info(victim_sid)
             .map(|ch| ch.nation)
             .or_else(|| self.get_bot(victim_sid as u32).map(|bot| bot.nation))
             .unwrap_or(0);
         let death_notice = crate::handler::chat::build_death_notice_packet(
+            killer_nation,
             victim_nation,
             0,
-            killer_sid as u16,
+            killer_sid as u32,
             killer_name,
-            victim_sid as u16,
+            victim_sid as u32,
             victim_name,
             victim_x,
             victim_z,
@@ -1492,14 +1498,19 @@ impl WorldState {
                 handle.pvp_total_kill_count = handle.pvp_total_kill_count.saturating_add(1);
                 handle.pvp_last_kill_time = now;
                 narration_state = Some((
-                    handle.pvp_serial_kill_count.min(12) as u8,
+                    handle.pvp_serial_kill_count.min(u16::MAX as u32) as u16,
                     handle.pvp_total_kill_count,
                 ));
             });
             if let Some((stage, total_kills)) = narration_state {
                 self.send_to_session_owned(
                     killer_sid,
-                    crate::handler::dead::build_kill_narration_packet(killer_name, stage),
+                    crate::handler::dead::build_kill_narration_packet(
+                        killer_sid as u32,
+                        killer_name,
+                        killer_nation,
+                        stage,
+                    ),
                 );
                 if total_kills % 10 == 0 {
                     let killer_nation = self
@@ -1507,9 +1518,10 @@ impl WorldState {
                         .map(|ch| ch.nation)
                         .unwrap_or(0);
                     let total_packet = crate::handler::dead::build_kill_total_packet(
+                        killer_sid as u32,
                         killer_name,
                         killer_nation,
-                        total_kills,
+                        total_kills.min(u16::MAX as u32) as u16,
                     );
                     if let Some(party_id) = self.get_party_id(killer_sid) {
                         self.send_to_party(party_id, &total_packet);
