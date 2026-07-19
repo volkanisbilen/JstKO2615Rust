@@ -362,6 +362,8 @@ pub async fn process_chat_command(
         "borderclose" => handle_temple_event_close(session, TempleEventKind::Bdw)?,
         "juraidopen" => handle_temple_event_open(session, TempleEventKind::Juraid)?,
         "juraidclose" => handle_temple_event_close(session, TempleEventKind::Juraid)?,
+        "manesopen" => handle_manes_survival_open(session)?,
+        "manesclose" => handle_manes_survival_close(session)?,
         "reloadranks" => {
             let world = session.world();
             let pool = session.pool();
@@ -1497,6 +1499,7 @@ fn handle_help(session: &mut ClientSession) -> anyhow::Result<()> {
         "changegm CharName - Grant GM authority",
         "reload_scripts - Reload quest scripts",
         "reloadranks - Reload rankings",
+        "manesopen/manesclose - Manes Survival test lifecycle",
         "bug CharName - Rescue stuck player",
         "-- Bot/Genie --",
         "botspawn Class Level [Nation] [Count]",
@@ -8879,4 +8882,42 @@ mod tests {
         // Gap between CUTOFF(5) and SUMMON(7): 1 unused opcode (6)
         assert_eq!(OPERATOR_SUMMON - OPERATOR_CUTOFF, 2);
     }
+}
+
+/// +manesopen — spawn the verified zone-96 Manes Survival population.
+fn handle_manes_survival_open(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    match world.manes_survival_manager.start(&world) {
+        Ok(0) => send_help(session, "Manes Survival is already active."),
+        Ok(count) => {
+            send_help(
+                session,
+                &format!("Manes Survival started in zone 96 with {count} monsters."),
+            );
+            info!(
+                "[{}] +manesopen: spawned {} runtime monsters in zone 96",
+                session.addr(),
+                count
+            );
+        }
+        Err(error) => {
+            warn!("[{}] +manesopen failed: {error:#}", session.addr());
+            send_help(session, &format!("Manes Survival could not start: {error}"));
+        }
+    }
+    Ok(())
+}
+
+/// +manesclose — remove only runtime NPCs owned by the Manes event room.
+fn handle_manes_survival_close(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    if !world.manes_survival_manager.is_active() {
+        send_help(session, "Manes Survival is not active.");
+        return Ok(());
+    }
+
+    world.manes_survival_manager.stop(&world);
+    send_help(session, "Manes Survival stopped; zone-96 event monsters removed.");
+    info!("[{}] +manesclose: Manes Survival stopped", session.addr());
+    Ok(())
 }
