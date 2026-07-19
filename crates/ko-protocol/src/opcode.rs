@@ -468,6 +468,8 @@ pub enum Opcode {
     WizClanpointsBattle = 0x91,
     /// Kill assist notification.
     WizKillAssist = 0xC8,
+    /// Manes Survival event protocol (client CSurvival dispatcher).
+    WizSurvival = 0xD0,
     /// Knight Royale event.
     WizKnightRoyale = 0xEF,
 
@@ -687,6 +689,7 @@ impl Opcode {
             0xD1 => Some(Self::WizClanWarehouse),
             0xD3 => Some(Self::WizRebirth),
             0xD5 => Some(Self::WizTerritory),
+            0xD0 => Some(Self::WizSurvival),
             0xD6 => Some(Self::WizWorldBoss),
             0xD7 => Some(Self::WizSeason),
             0xDB => Some(Self::WizAddMsg),
@@ -773,6 +776,7 @@ mod tests {
     fn test_opcode_roundtrip() {
         assert_eq!(Opcode::from_byte(0x01), Some(Opcode::WizLogin));
         assert_eq!(Opcode::from_byte(0x2C), Some(Opcode::WizCryption));
+        assert_eq!(Opcode::from_byte(0xD0), Some(Opcode::WizSurvival));
         assert_eq!(Opcode::from_byte(0xFF), None);
     }
 
