@@ -8898,7 +8898,14 @@ fn handle_manes_survival_open(session: &mut ClientSession) -> anyhow::Result<()>
         return Ok(());
     }
 
-    let open = Arc::new(crate::handler::survival::build_registration_open());
+    let participants = world
+        .manes_survival_manager
+        .participant_count()
+        .min(u16::MAX as usize) as u16;
+    let open = Arc::new(crate::handler::survival::build_registration_open(
+        crate::handler::survival::REGISTRATION_DURATION_SECONDS,
+        participants,
+    ));
     for sid in world.get_in_game_session_ids() {
         world.send_to_session_arc(sid, Arc::clone(&open));
     }
