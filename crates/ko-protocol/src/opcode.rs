@@ -468,8 +468,8 @@ pub enum Opcode {
     WizClanpointsBattle = 0x91,
     /// Kill assist notification.
     WizKillAssist = 0xC8,
-    /// Manes Survival event protocol (client CSurvival dispatcher).
-    WizSurvival = 0xD0,
+    /// Manes Survival shares byte 0xD0 with the v2525 guild-bank route.
+    /// Dispatch must therefore use protocol version and sub-opcode context.
     /// Knight Royale event.
     WizKnightRoyale = 0xEF,
 
@@ -689,7 +689,6 @@ impl Opcode {
             0xD1 => Some(Self::WizClanWarehouse),
             0xD3 => Some(Self::WizRebirth),
             0xD5 => Some(Self::WizTerritory),
-            0xD0 => Some(Self::WizSurvival),
             0xD6 => Some(Self::WizWorldBoss),
             0xD7 => Some(Self::WizSeason),
             0xDB => Some(Self::WizAddMsg),
