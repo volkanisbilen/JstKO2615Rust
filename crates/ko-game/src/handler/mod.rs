@@ -144,6 +144,7 @@ pub mod state_change;
 pub mod stats;
 pub mod stealth;
 pub mod story;
+pub mod survival;
 pub mod tag_change;
 pub mod target_hp;
 pub mod terrain_effects;
@@ -515,7 +516,21 @@ pub async fn dispatch(session: &mut ClientSession, packet: Packet) -> anyhow::Re
         Some(Opcode::WizDailyQuest) => daily_quest_v2525::handle(session, packet).await,
         Some(Opcode::WizEnchant) => enchant::handle(session, packet).await,
         Some(Opcode::WizAbility) => ability::handle(session, packet).await,
-        Some(Opcode::WizGuildBank) => guild_bank::handle(session, packet).await,
+        // 0xD0 is version-dependent: v2525 uses Guild Bank, while the
+        // verified 26xx client contract uses Manes Survival. Missing settings
+        // deliberately preserve the established Guild Bank behavior.
+        Some(Opcode::WizGuildBank) => {
+            let is_survival_client = session
+                .world()
+                .get_server_settings()
+                .map(|settings| settings.game_version >= 2600)
+                .unwrap_or(false);
+            if is_survival_client {
+                survival::handle(session, packet).await
+            } else {
+                guild_bank::handle(session, packet).await
+            }
+        },
         Some(Opcode::WizRebirth) => rebirth::handle(session, packet).await,
         Some(Opcode::WizWorldBoss) => world_boss::handle(session, packet).await,
         Some(Opcode::WizSeason) => season::handle(session, packet).await,
