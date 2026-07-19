@@ -174,20 +174,14 @@ impl ManesSurvivalManager {
                     "Manes Survival level-1 EXP requirement {initial_max_exp} does not fit u16"
                 )
             })?;
-            // sub_716B50 uses this 1-based value as the SurvivalSetting
-            // row selector. The client table has exactly four rows:
-            // 1=Karus male, 2=Karus female, 3=El Morad male, 4=El Morad female.
-            // Selecting by combat class corrupts the temporary model/loadout
-            // and the v2615 client closes on its first attack animation.
-            let survival_setting = match character.race {
-                1 | 2 | 3 => 1,
-                4 => 2,
-                11 | 12 => 3,
-                13 => 4,
-                race => anyhow::bail!(
-                    "registered participant {sid} has unsupported Manes race {race}"
-                ),
-            };
+            // Client reverse contract (sub_7113D0 -> sub_716B50): this
+            // 1-based value selects the complete temporary Manes loadout.
+            // Manes is a Chaos-style event: every participant must receive
+            // the same skills, clothing and weapon regardless of their normal
+            // class, nation, race or gender. Row 3 is the client-confirmed
+            // canonical loadout used by the last known-good test.
+            const UNIFORM_MANES_LOADOUT: u8 = 3;
+            let survival_setting = UNIFORM_MANES_LOADOUT;
             world.send_to_session_owned(
                 sid,
                 crate::handler::survival::build_event_start(
