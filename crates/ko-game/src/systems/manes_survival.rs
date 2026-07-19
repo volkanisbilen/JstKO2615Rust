@@ -6,10 +6,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use dashmap::DashSet;
 use ko_db::models::ManesSurvivalSpawnRow;
 use parking_lot::RwLock;
 
 use crate::world::WorldState;
+use crate::zone::SessionId;
 
 pub const ZONES_MANES_SURVIVAL: [u16; 4] = [57, 58, 59, 60];
 /// Zones 57-60 are dedicated physical instances, so their NPCs share room 0
@@ -19,12 +21,19 @@ pub const DARK_DRAGON_SID: i16 = 10733;
 
 pub struct ManesSurvivalManager {
     spawns: RwLock<Vec<ManesSurvivalSpawnRow>>,
+    registration_open: AtomicBool,
     active: AtomicBool,
+    participants: DashSet<SessionId>,
 }
 
 impl Default for ManesSurvivalManager {
     fn default() -> Self {
-        Self { spawns: RwLock::new(Vec::new()), active: AtomicBool::new(false) }
+        Self {
+            spawns: RwLock::new(Vec::new()),
+            registration_open: AtomicBool::new(false),
+            active: AtomicBool::new(false),
+            participants: DashSet::new(),
+        }
     }
 }
 
@@ -45,6 +54,28 @@ impl ManesSurvivalManager {
 
     pub fn is_active(&self) -> bool { self.active.load(Ordering::Acquire) }
 
+    pub fn is_registration_open(&self) -> bool {
+        self.registration_open.load(Ordering::Acquire)
+    }
+
+    pub fn open_registration(&self) -> bool {
+        if self.is_active() {
+            return false;
+        }
+        self.participants.clear();
+        !self.registration_open.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn register(&self, session_id: SessionId) -> bool {
+        self.is_registration_open() && self.participants.insert(session_id)
+    }
+
+    pub fn unregister(&self, session_id: SessionId) -> bool {
+        self.is_registration_open() && self.participants.remove(&session_id).is_some()
+    }
+
+    pub fn participant_count(&self) -> usize { self.participants.len() }
+
     pub fn configured_count(&self) -> usize { self.spawns.read().len() }
 
     /// Spawn the configured event population exactly once.
@@ -52,6 +83,8 @@ impl ManesSurvivalManager {
         if self.active.swap(true, Ordering::AcqRel) {
             return Ok(0);
         }
+
+        self.registration_open.store(false, Ordering::Release);
 
         let rows = self.spawns.read().clone();
         if rows.is_empty() {
@@ -130,5 +163,7 @@ impl ManesSurvivalManager {
             world.despawn_room_npcs(zone_id, MANES_EVENT_ROOM);
         }
         self.active.store(false, Ordering::Release);
+        self.registration_open.store(false, Ordering::Release);
+        self.participants.clear();
     }
 }
