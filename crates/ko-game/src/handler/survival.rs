@@ -51,9 +51,9 @@ pub fn build_registration_result(result: i16, participant_count: u16) -> Packet 
 /// Initialise the v2615 Manes Survival client state.
 ///
 /// Verified against `sub_716A10 -> sub_7113D0`, operation 1:
-/// `D0 02 01 u8 class_group u16 seconds u16 exp u16 max_exp u8 level`.
+/// `D0 02 01 u8 survival_setting u16 seconds u16 exp u16 max_exp u8 level`.
 pub fn build_event_start(
-    class_group: u8,
+    survival_setting: u8,
     remaining_seconds: u16,
     survival_exp: u16,
     survival_max_exp: u16,
@@ -62,7 +62,7 @@ pub fn build_event_start(
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_EVENT);
     pkt.write_u8(EVENT_START);
-    pkt.write_u8(class_group);
+    pkt.write_u8(survival_setting);
     pkt.write_u16(remaining_seconds);
     pkt.write_u16(survival_exp);
     pkt.write_u16(survival_max_exp);
