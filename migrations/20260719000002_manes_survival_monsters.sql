@@ -14,12 +14,13 @@ CREATE TABLE IF NOT EXISTS manes_survival_spawn (
     UNIQUE (npc_id)
 );
 
+DROP TABLE IF EXISTS _manes_template_map;
 CREATE TEMP TABLE _manes_template_map (
     new_sid SMALLINT PRIMARY KEY,
     source_sid SMALLINT NOT NULL,
     new_name TEXT NOT NULL,
     new_pid SMALLINT NOT NULL
-) ON COMMIT DROP;
+);
 
 INSERT INTO _manes_template_map (new_sid, source_sid, new_name, new_pid) VALUES
 (10701,150,'[Lower Grade] Kecoon',100),
@@ -117,3 +118,5 @@ INSERT INTO manes_survival_spawn
 (10729,3,2,480,520,4,1,150),(10730,3,2,544,520,4,1,150),
 (10731,3,2,512,488,4,1,150),(10732,3,2,512,552,4,1,150),
 (10733,4,3,512,520,0,1,0);
+
+DROP TABLE IF EXISTS _manes_template_map;
