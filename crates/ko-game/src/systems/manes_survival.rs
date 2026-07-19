@@ -131,10 +131,10 @@ impl ManesSurvivalManager {
         let mut elmorad_index = 0usize;
 
         for (zone_index, sid) in participants.iter().copied().enumerate() {
-            let nation = world
+            let character = world
                 .get_character_info(sid)
-                .ok_or_else(|| anyhow::anyhow!("registered participant {sid} is no longer online"))?
-                .nation;
+                .ok_or_else(|| anyhow::anyhow!("registered participant {sid} is no longer online"))?;
+            let nation = character.nation;
             let (start, end, nation_index) = match nation {
                 crate::world::NATION_KARUS => {
                     let index = karus_index;
@@ -163,6 +163,39 @@ impl ManesSurvivalManager {
                     "Manes Survival participant {sid} has invalid entry position in zone {zone_id}: ({x:.1}, {z:.1})"
                 );
             }
+
+            // The client keeps the registration countdown alive until this
+            // exact event-state packet initialises CSurvival. Send it before
+            // zone change so the first event NPC death cannot race ahead of
+            // client initialisation.
+            let initial_max_exp = world.get_exp_by_level(1, 0);
+            let initial_max_exp = u16::try_from(initial_max_exp).map_err(|_| {
+                anyhow::anyhow!(
+                    "Manes Survival level-1 EXP requirement {initial_max_exp} does not fit u16"
+                )
+            })?;
+            // sub_716B50 uses this 1-based value to select one of the four
+            // Survival skill/loadout lists. It is the character class group,
+            // not the physical zone instance.
+            let class_group = match character.class % 100 {
+                1 | 5 | 6 => 1,
+                2 | 7 | 8 => 2,
+                3 | 9 | 10 => 3,
+                4 | 11 | 12 => 4,
+                class => anyhow::bail!(
+                    "registered participant {sid} has unsupported Manes class {class}"
+                ),
+            };
+            world.send_to_session_owned(
+                sid,
+                crate::handler::survival::build_event_start(
+                    class_group,
+                    crate::handler::survival::EVENT_DURATION_SECONDS,
+                    0,
+                    initial_max_exp,
+                    1,
+                ),
+            );
 
             crate::handler::zone_change::server_teleport_to_zone_force(
                 world, sid, zone_id, x, z,
