@@ -51,6 +51,7 @@ pub mod level_merchant_rewards;
 mod level_up;
 pub mod lottery_event;
 pub mod magic;
+pub mod manes_survival;
 mod mining;
 pub mod monster_event;
 pub mod monster_resource;
@@ -161,6 +162,7 @@ pub use magic::{
     MagicRow, MagicType1Row, MagicType2Row, MagicType3Row, MagicType4Row, MagicType5Row,
     MagicType6Row, MagicType7Row, MagicType8Row, MagicType9Row,
 };
+pub use manes_survival::ManesSurvivalSpawnRow;
 pub use mining::MiningFishingItemRow;
 pub use monster_event::{
     MonsterBossRandomStageRow, MonsterChallengeRow, MonsterChallengeSummonRow,
