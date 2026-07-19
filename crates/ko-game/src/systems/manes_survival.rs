@@ -12,8 +12,9 @@ use parking_lot::RwLock;
 use crate::world::WorldState;
 
 pub const ZONES_MANES_SURVIVAL: [u16; 4] = [57, 58, 59, 60];
-/// Dedicated event-room marker used to isolate and clean Manes runtime NPCs.
-pub const MANES_EVENT_ROOM: u16 = 96;
+/// Zones 57-60 are dedicated physical instances, so their NPCs share room 0
+/// with players entering through the normal zone-change flow.
+pub const MANES_EVENT_ROOM: u16 = 0;
 pub const DARK_DRAGON_SID: i16 = 10733;
 
 pub struct ManesSurvivalManager {
