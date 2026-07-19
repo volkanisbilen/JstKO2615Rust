@@ -4,6 +4,41 @@
 
 BEGIN;
 
+-- Official Manes Survival client zone mapping.
+-- Zones.tbl 570/580/590/600 correspond to game-server zones 57/58/59/60.
+INSERT INTO zone_info (
+    zone_no, smd_name, zone_name, zone_type, min_level, max_level,
+    init_x, init_z, init_y
+) VALUES
+    (57, 'manes_survival.smd', 'Manes Survival I',   1, 1, 83, 512000, 512000, 0),
+    (58, 'manes_survival.smd', 'Manes Survival II',  1, 1, 83, 512000, 512000, 0),
+    (59, 'manes_survival.smd', 'Manes Survival III', 1, 1, 83, 512000, 512000, 0),
+    (60, 'manes_survival.smd', 'Manes Survival IV',  1, 1, 83, 512000, 512000, 0)
+ON CONFLICT (zone_no) DO UPDATE SET
+    smd_name = EXCLUDED.smd_name, zone_name = EXCLUDED.zone_name,
+    zone_type = EXCLUDED.zone_type, min_level = EXCLUDED.min_level,
+    max_level = EXCLUDED.max_level, init_x = EXCLUDED.init_x,
+    init_z = EXCLUDED.init_z, init_y = EXCLUDED.init_y;
+
+INSERT INTO start_position (
+    zone_id, karus_x, karus_z, elmorad_x, elmorad_z,
+    karus_gate_x, karus_gate_z, elmo_gate_x, elmo_gate_z, range_x, range_z
+) VALUES
+    (57,512,512,512,512,512,512,512,512,0,0),
+    (58,512,512,512,512,512,512,512,512,0,0),
+    (59,512,512,512,512,512,512,512,512,0,0),
+    (60,512,512,512,512,512,512,512,512,0,0)
+ON CONFLICT (zone_id) DO UPDATE SET
+    karus_x=EXCLUDED.karus_x, karus_z=EXCLUDED.karus_z,
+    elmorad_x=EXCLUDED.elmorad_x, elmorad_z=EXCLUDED.elmorad_z,
+    karus_gate_x=EXCLUDED.karus_gate_x, karus_gate_z=EXCLUDED.karus_gate_z,
+    elmo_gate_x=EXCLUDED.elmo_gate_x, elmo_gate_z=EXCLUDED.elmo_gate_z,
+    range_x=EXCLUDED.range_x, range_z=EXCLUDED.range_z;
+
+DELETE FROM zone_info
+WHERE zone_no=96 AND lower(smd_name)='manes_survival.smd';
+
+
 -- Manes Survival event items for PostgreSQL.
 -- Idempotent: safe to run repeatedly from DBeaver or psql.
 
@@ -54,7 +89,7 @@ BEGIN
 END $$;
 
 
--- Manes Survival (zone 96) monster templates and verified spawn layout.
+-- Manes Survival monster templates and verified spawn layout for official zones 57-60.
 -- New event SIDs clone existing server-side combat/AI templates; only SID/name/PID are overridden.
 
 CREATE TABLE IF NOT EXISTS manes_survival_spawn (
