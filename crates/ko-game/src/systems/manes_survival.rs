@@ -1,6 +1,7 @@
 //! Manes Survival runtime monster lifecycle.
 //!
-//! Client contract: zone 96, WIZ_SURVIVAL (0xD0). Event monsters are runtime
+//! Client contract: Zones.tbl 570/580/590/600 map to server zones 57/58/59/60;
+//! WIZ_SURVIVAL uses shared opcode byte 0xD0. Event monsters are runtime
 //! NPCs and never belong in the global npc_spawn table.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +11,7 @@ use parking_lot::RwLock;
 
 use crate::world::WorldState;
 
-pub const ZONE_MANES_SURVIVAL: u16 = 96;
+pub const ZONES_MANES_SURVIVAL: [u16; 4] = [57, 58, 59, 60];
 /// Dedicated event-room marker used to isolate and clean Manes runtime NPCs.
 pub const MANES_EVENT_ROOM: u16 = 96;
 pub const DARK_DRAGON_SID: i16 = 10733;
@@ -51,14 +52,6 @@ impl ManesSurvivalManager {
             return Ok(0);
         }
 
-        let zone = match world.get_zone(ZONE_MANES_SURVIVAL) {
-            Some(zone) => zone,
-            None => {
-                self.active.store(false, Ordering::Release);
-                anyhow::bail!("Manes Survival zone 96 is not loaded");
-            }
-        };
-
         let rows = self.spawns.read().clone();
         if rows.is_empty() {
             self.active.store(false, Ordering::Release);
@@ -66,35 +59,57 @@ impl ManesSurvivalManager {
         }
 
         let mut total = 0usize;
-        for row in &rows {
-            let x = row.spawn_x as f32;
-            let z = row.spawn_z as f32;
-            if !zone.is_valid_position(x, z) {
-                self.stop(world);
-                anyhow::bail!("Manes Survival NPC {} has out-of-map coordinates ({}, {})", row.npc_id, row.spawn_x, row.spawn_z);
+        for zone_id in ZONES_MANES_SURVIVAL {
+            let zone = match world.get_zone(zone_id) {
+                Some(zone) => zone,
+                None => {
+                    self.stop(world);
+                    anyhow::bail!("Manes Survival zone {zone_id} is not loaded");
+                }
+            };
+
+            for row in &rows {
+                let x = row.spawn_x as f32;
+                let z = row.spawn_z as f32;
+                if !zone.is_valid_position(x, z) {
+                    self.stop(world);
+                    anyhow::bail!(
+                        "Manes Survival zone {zone_id} NPC {} has out-of-map coordinates ({}, {})",
+                        row.npc_id,
+                        row.spawn_x,
+                        row.spawn_z
+                    );
+                }
+                let ids = world.spawn_event_npc_ex(
+                    row.npc_id as u16,
+                    true,
+                    zone_id,
+                    x,
+                    z,
+                    row.spawn_count as u16,
+                    MANES_EVENT_ROOM,
+                    row.boss_tier as u8,
+                );
+                if ids.len() != row.spawn_count as usize {
+                    self.stop(world);
+                    anyhow::bail!(
+                        "Manes Survival zone {zone_id} failed to spawn NPC {}: expected {}, created {}",
+                        row.npc_id,
+                        row.spawn_count,
+                        ids.len()
+                    );
+                }
+                total += ids.len();
             }
-            let ids = world.spawn_event_npc_ex(
-                row.npc_id as u16,
-                true,
-                ZONE_MANES_SURVIVAL,
-                x,
-                z,
-                row.spawn_count as u16,
-                MANES_EVENT_ROOM,
-                row.boss_tier as u8,
-            );
-            if ids.len() != row.spawn_count as usize {
-                self.stop(world);
-                anyhow::bail!("Manes Survival failed to spawn NPC {}: expected {}, created {}", row.npc_id, row.spawn_count, ids.len());
-            }
-            total += ids.len();
         }
         Ok(total)
     }
 
     /// Remove only Manes runtime NPCs; other zone-96 objects are untouched.
     pub fn stop(&self, world: &WorldState) {
-        world.despawn_room_npcs(ZONE_MANES_SURVIVAL, MANES_EVENT_ROOM);
+        for zone_id in ZONES_MANES_SURVIVAL {
+            world.despawn_room_npcs(zone_id, MANES_EVENT_ROOM);
+        }
         self.active.store(false, Ordering::Release);
     }
 }
