@@ -8919,19 +8919,20 @@ fn handle_manes_survival_open(session: &mut ClientSession) -> anyhow::Result<()>
 /// +manesstart — test-only transition from registration to the active monster phase.
 fn handle_manes_survival_start(session: &mut ClientSession) -> anyhow::Result<()> {
     let world = session.world().clone();
-    match world.manes_survival_manager.start(&world) {
-        Ok(0) => send_help(session, "Manes Survival is already active."),
-        Ok(count) => {
+    match world.manes_survival_manager.start_registered_event(&world) {
+        Ok((0, _)) => send_help(session, "Manes Survival is already active."),
+        Ok((count, participants)) => {
             send_help(
                 session,
                 &format!(
                     "Manes Survival started with {} registered participants and {count} monsters across zones 57-60.",
-                    world.manes_survival_manager.participant_count()
+                    participants
                 ),
             );
             info!(
-                "[{}] +manesstart: spawned {} runtime monsters across zones 57-60",
+                "[{}] +manesstart: placed {} participants and spawned {} runtime monsters across zones 57-60",
                 session.addr(),
+                participants,
                 count
             );
         }
