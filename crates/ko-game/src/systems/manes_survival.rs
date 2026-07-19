@@ -18,6 +18,12 @@ pub const ZONES_MANES_SURVIVAL: [u16; 4] = [57, 58, 59, 60];
 /// with players entering through the normal zone-change flow.
 pub const MANES_EVENT_ROOM: u16 = 0;
 pub const DARK_DRAGON_SID: i16 = 10733;
+pub const MIN_ACTIVE_PARTICIPANTS: usize = 1;
+
+const KARUS_ENTRY_START: (f32, f32) = (345.0, 207.0);
+const KARUS_ENTRY_END: (f32, f32) = (260.0, 581.0);
+const ELMORAD_ENTRY_START: (f32, f32) = (722.0, 644.0);
+const ELMORAD_ENTRY_END: (f32, f32) = (728.0, 219.0);
 
 pub struct ManesSurvivalManager {
     spawns: RwLock<Vec<ManesSurvivalSpawnRow>>,
@@ -80,7 +86,91 @@ impl ManesSurvivalManager {
         self.participants.iter().map(|entry| *entry.key()).collect()
     }
 
+    pub fn active_participant_ids(&self, world: &WorldState) -> Vec<SessionId> {
+        let mut ids: Vec<_> = self
+            .participant_ids()
+            .into_iter()
+            .filter(|sid| world.get_character_info(*sid).is_some())
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
     pub fn configured_count(&self) -> usize { self.spawns.read().len() }
+
+    /// Start the event and place every online registrant on the nation-specific
+    /// outer entry line. The client-confirmed registration countdown sends this
+    /// transition once it expires; the GM command uses this same path.
+    pub fn start_registered_event(&self, world: &WorldState) -> anyhow::Result<(usize, usize)> {
+        let participants = self.active_participant_ids(world);
+        if participants.len() < MIN_ACTIVE_PARTICIPANTS {
+            anyhow::bail!(
+                "Manes Survival requires at least {MIN_ACTIVE_PARTICIPANTS} active participant"
+            );
+        }
+
+        let monster_count = self.start(world)?;
+        if monster_count == 0 {
+            return Ok((0, participants.len()));
+        }
+
+        if let Err(error) = self.place_participants(world, &participants) {
+            self.stop(world);
+            return Err(error);
+        }
+
+        Ok((monster_count, participants.len()))
+    }
+
+    fn place_participants(
+        &self,
+        world: &WorldState,
+        participants: &[SessionId],
+    ) -> anyhow::Result<()> {
+        let mut karus_index = 0usize;
+        let mut elmorad_index = 0usize;
+
+        for (zone_index, sid) in participants.iter().copied().enumerate() {
+            let nation = world
+                .get_character_info(sid)
+                .ok_or_else(|| anyhow::anyhow!("registered participant {sid} is no longer online"))?
+                .nation;
+            let (start, end, nation_index) = match nation {
+                crate::world::NATION_KARUS => {
+                    let index = karus_index;
+                    karus_index += 1;
+                    (KARUS_ENTRY_START, KARUS_ENTRY_END, index)
+                }
+                crate::world::NATION_ELMORAD => {
+                    let index = elmorad_index;
+                    elmorad_index += 1;
+                    (ELMORAD_ENTRY_START, ELMORAD_ENTRY_END, index)
+                }
+                _ => anyhow::bail!("registered participant {sid} has invalid nation {nation}"),
+            };
+
+            // Golden-ratio spacing is deterministic, avoids stacked users and
+            // stays strictly between the user-supplied outer-ring endpoints.
+            let fraction = (((nation_index + 1) as f32) * 0.618_034).fract();
+            let x = start.0 + (end.0 - start.0) * fraction;
+            let z = start.1 + (end.1 - start.1) * fraction;
+            let zone_id = ZONES_MANES_SURVIVAL[zone_index % ZONES_MANES_SURVIVAL.len()];
+            let zone = world
+                .get_zone(zone_id)
+                .ok_or_else(|| anyhow::anyhow!("Manes Survival zone {zone_id} is not loaded"))?;
+            if !zone.is_valid_position(x, z) {
+                anyhow::bail!(
+                    "Manes Survival participant {sid} has invalid entry position in zone {zone_id}: ({x:.1}, {z:.1})"
+                );
+            }
+
+            crate::handler::zone_change::server_teleport_to_zone_force(
+                world, sid, zone_id, x, z,
+            );
+        }
+
+        Ok(())
+    }
 
     /// Spawn the configured event population exactly once.
     pub fn start(&self, world: &WorldState) -> anyhow::Result<usize> {
