@@ -72,7 +72,9 @@ const CELL_MAIN_SIZE: i32 = CELL_MAIN_DEVIDE * CELL_SUB_SIZE; // 16
 const WARP_INFO_SIZE: usize = 320;
 
 /// Size of the packed `_OBJECT_EVENT` struct read from the file.
-const OBJECT_EVENT_SIZE: usize = 24;
+const OBJECT_EVENT_SIZE_LEGACY: usize = 24;
+/// Packed object-event size used by the Manes map exporter.
+const OBJECT_EVENT_SIZE_HEADERED: usize = 19;
 
 impl SmdFile {
     /// Load an SMD file from disk.
@@ -87,7 +89,26 @@ impl SmdFile {
 
     /// Parse SMD from a reader.
     pub fn parse<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
-        // 1. LoadTerrain: map_size (i32) + unit_dist (f32) + heights (skip)
+        // 1. LoadTerrain. Most server SMDs start directly with map_size/unit_dist.
+        // The 2615 Manes exporter prepends two length-prefixed strings plus a
+        // 10-byte exporter header. Detect that format without changing legacy maps.
+        let start = reader.stream_position()?;
+        let first = read_i32(reader)?;
+        let headered = !(first > 0 && first <= 10000);
+        if headered {
+            if first <= 0 || first > 255 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid SMD header"));
+            }
+            reader.seek(SeekFrom::Start(start + 4 + first as u64))?;
+            let author_len = read_i32(reader)?;
+            if author_len < 0 || author_len > 255 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid SMD author header"));
+            }
+            reader.seek(SeekFrom::Current(author_len as i64 + 10))?;
+        } else {
+            reader.seek(SeekFrom::Start(start))?;
+        }
+
         let map_size = read_i32(reader)?;
         let unit_dist = read_f32(reader)?;
 
@@ -140,7 +161,12 @@ impl SmdFile {
                 "negative object event count",
             ));
         }
-        let skip = object_event_count as i64 * OBJECT_EVENT_SIZE as i64;
+        let object_event_size = if headered {
+            OBJECT_EVENT_SIZE_HEADERED
+        } else {
+            OBJECT_EVENT_SIZE_LEGACY
+        };
+        let skip = object_event_count as i64 * object_event_size as i64;
         reader.seek(SeekFrom::Current(skip))?;
 
         let pos_after_objects = reader.stream_position()?;
@@ -161,8 +187,16 @@ impl SmdFile {
         let nonzero = event_grid.iter().filter(|&&v| v != 0).count();
         tracing::debug!(grid_len, nonzero, pos_after_tiles, "tile event grid read");
 
-        // 5. LoadRegeneEvent
-        let regene_count = read_i32(reader)?;
+        // Some headered map exports end immediately after the event grid.
+        // Their NPC placement is intentionally supplied by npc_spawn instead.
+        let regene_count = match read_i32(reader) {
+            Ok(count) => count,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => 0,
+            Err(e) => return Err(e),
+        };
+        if regene_count < 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "negative regene event count"));
+        }
         let mut regene_events = Vec::with_capacity(regene_count.max(0) as usize);
         for i in 0..regene_count {
             let pos_x = read_f32(reader)?;
