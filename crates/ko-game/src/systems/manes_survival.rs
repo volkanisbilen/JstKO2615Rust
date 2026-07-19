@@ -36,7 +36,7 @@ impl ManesSurvivalManager {
         if rows.iter().filter(|r| r.npc_id == DARK_DRAGON_SID && r.boss_tier == 3).count() != 1 {
             anyhow::bail!("Manes Survival requires exactly one Dark Dragon configuration");
         }
-        if rows.iter().any(|r| r.spawn_count <= 0 || r.spawn_x < 0 || r.spawn_z < 0) {
+        if rows.iter().any(|r| r.spawn_count <= 0 || r.spawn_x < 0 || r.spawn_z < 0 || r.spawn_range < 0) {
             anyhow::bail!("Manes Survival contains invalid spawn count or coordinates");
         }
         *self.spawns.write() = rows;
@@ -70,43 +70,61 @@ impl ManesSurvivalManager {
             };
 
             for row in &rows {
-                let x = row.spawn_x as f32;
-                let z = row.spawn_z as f32;
-                if !zone.is_valid_position(x, z) {
-                    self.stop(world);
-                    anyhow::bail!(
-                        "Manes Survival zone {zone_id} NPC {} has out-of-map coordinates ({}, {})",
-                        row.npc_id,
-                        row.spawn_x,
-                        row.spawn_z
-                    );
+                let count = row.spawn_count as usize;
+                let phase = (row.npc_id.rem_euclid(360) as f32).to_radians();
+                let mut created = 0usize;
+
+                for index in 0..count {
+                    // Deterministic golden-angle scatter fills the configured local area
+                    // without stacking every monster on a diagonal line.
+                    let fraction = if count <= 1 {
+                        0.0
+                    } else {
+                        ((index + 1) as f32 / count as f32).sqrt()
+                    };
+                    let angle = phase + index as f32 * 2.399_963_1;
+                    let radius = row.spawn_range as f32 * fraction;
+                    let x = row.spawn_x as f32 + angle.cos() * radius;
+                    let z = row.spawn_z as f32 + angle.sin() * radius;
+
+                    if !zone.is_valid_position(x, z) {
+                        self.stop(world);
+                        anyhow::bail!(
+                            "Manes Survival zone {zone_id} NPC {} has out-of-map position ({x:.1}, {z:.1})",
+                            row.npc_id
+                        );
+                    }
+
+                    created += world
+                        .spawn_event_npc_ex(
+                            row.npc_id as u16,
+                            true,
+                            zone_id,
+                            x,
+                            z,
+                            1,
+                            MANES_EVENT_ROOM,
+                            row.boss_tier as u8,
+                        )
+                        .len();
                 }
-                let ids = world.spawn_event_npc_ex(
-                    row.npc_id as u16,
-                    true,
-                    zone_id,
-                    x,
-                    z,
-                    row.spawn_count as u16,
-                    MANES_EVENT_ROOM,
-                    row.boss_tier as u8,
-                );
-                if ids.len() != row.spawn_count as usize {
+
+                if created != count {
                     self.stop(world);
                     anyhow::bail!(
                         "Manes Survival zone {zone_id} failed to spawn NPC {}: expected {}, created {}",
                         row.npc_id,
-                        row.spawn_count,
-                        ids.len()
+                        count,
+                        created
                     );
                 }
-                total += ids.len();
+                total += created;
             }
         }
         Ok(total)
     }
 
-    /// Remove only Manes runtime NPCs; other zone-96 objects are untouched.
+    /// Remove only runtime NPCs owned by the four Manes physical zones.
     pub fn stop(&self, world: &WorldState) {
         for zone_id in ZONES_MANES_SURVIVAL {
             world.despawn_room_npcs(zone_id, MANES_EVENT_ROOM);
