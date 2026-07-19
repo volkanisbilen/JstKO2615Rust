@@ -174,22 +174,24 @@ impl ManesSurvivalManager {
                     "Manes Survival level-1 EXP requirement {initial_max_exp} does not fit u16"
                 )
             })?;
-            // sub_716B50 uses this 1-based value to select one of the four
-            // Survival skill/loadout lists. It is the character class group,
-            // not the physical zone instance.
-            let class_group = match character.class % 100 {
-                1 | 5 | 6 => 1,
-                2 | 7 | 8 => 2,
-                3 | 9 | 10 => 3,
-                4 | 11 | 12 => 4,
-                class => anyhow::bail!(
-                    "registered participant {sid} has unsupported Manes class {class}"
+            // sub_716B50 uses this 1-based value as the SurvivalSetting
+            // row selector. The client table has exactly four rows:
+            // 1=Karus male, 2=Karus female, 3=El Morad male, 4=El Morad female.
+            // Selecting by combat class corrupts the temporary model/loadout
+            // and the v2615 client closes on its first attack animation.
+            let survival_setting = match character.race {
+                1 | 2 | 3 => 1,
+                4 => 2,
+                11 | 12 => 3,
+                13 => 4,
+                race => anyhow::bail!(
+                    "registered participant {sid} has unsupported Manes race {race}"
                 ),
             };
             world.send_to_session_owned(
                 sid,
                 crate::handler::survival::build_event_start(
-                    class_group,
+                    survival_setting,
                     crate::handler::survival::EVENT_DURATION_SECONDS,
                     0,
                     initial_max_exp,
