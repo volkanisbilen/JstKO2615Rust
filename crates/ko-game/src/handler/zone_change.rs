@@ -1298,13 +1298,37 @@ pub(crate) fn server_teleport_to_zone(
     dest_x: f32,
     dest_z: f32,
 ) {
+    server_teleport_to_zone_impl(world, sid, dest_zone, dest_x, dest_z, false);
+}
+
+/// Event entry variant which also repositions a player already inside the
+/// destination zone. This is required for Manes participants that entered a
+/// physical instance manually before the registration countdown completed.
+pub(crate) fn server_teleport_to_zone_force(
+    world: &crate::world::WorldState,
+    sid: crate::zone::SessionId,
+    dest_zone: u16,
+    dest_x: f32,
+    dest_z: f32,
+) {
+    server_teleport_to_zone_impl(world, sid, dest_zone, dest_x, dest_z, true);
+}
+
+fn server_teleport_to_zone_impl(
+    world: &crate::world::WorldState,
+    sid: crate::zone::SessionId,
+    dest_zone: u16,
+    dest_x: f32,
+    dest_z: f32,
+    force_same_zone: bool,
+) {
     let pos = match world.get_position(sid) {
         Some(p) => p,
         None => return,
     };
 
     // Skip if already in the destination zone
-    if pos.zone_id == dest_zone {
+    if !force_same_zone && pos.zone_id == dest_zone {
         return;
     }
 
