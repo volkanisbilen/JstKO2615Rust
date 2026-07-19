@@ -812,33 +812,40 @@ fn bdw_flag_carrier_death(world: &WorldState, dead_sid: SessionId) {
 
 /// Build the exact JstKO v2615 kill narration payload used by KA_KillUpdate.
 ///
-/// Wire: `[WIZ_KILLASSIST=0xC8][kill=1][show=1][u32 1]`
-/// `[DByte killer_name][show_sound=1][u8 stage]`.
-pub fn build_kill_narration_packet(killer_name: &str, stage: u8) -> Packet {
+/// Wire recovered from the v2615 client's packet dispatcher, case `0xC8`:
+/// `[WIZ_KILLASSIST=0xC8][kill=1][type=1][u32 killer_id]`
+/// `[DByte killer_name][u8 killer_nation][u16 stage]`.
+pub fn build_kill_narration_packet(
+    killer_id: u32,
+    killer_name: &str,
+    killer_nation: u8,
+    stage: u16,
+) -> Packet {
     let mut pkt = Packet::new(Opcode::WizKillAssist as u8);
     pkt.write_u8(1); // kaopcode::kill
     pkt.write_u8(1);
-    pkt.write_u32(1);
+    pkt.write_u32(killer_id);
     pkt.write_string(killer_name);
-    pkt.write_u8(1);
-    pkt.write_u8(stage.clamp(1, 12));
+    pkt.write_u8(killer_nation);
+    pkt.write_u16(stage.max(1));
     pkt
 }
 
 /// Build KA_KillUpdate's every-10-kills total/party announcement payload.
-/// Wire: `[0xC8][kill=1][type=3][u32 1][DByte name][nation][u32 total]`.
+/// Wire: `[0xC8][kill=1][type=3][u32 killer_id][DByte name][nation][u16 total]`.
 pub fn build_kill_total_packet(
+    killer_id: u32,
     killer_name: &str,
     killer_nation: u8,
-    total_kills: u32,
+    total_kills: u16,
 ) -> Packet {
     let mut pkt = Packet::new(Opcode::WizKillAssist as u8);
     pkt.write_u8(1); // kaopcode::kill
     pkt.write_u8(3);
-    pkt.write_u32(1);
+    pkt.write_u32(killer_id);
     pkt.write_string(killer_name);
     pkt.write_u8(killer_nation);
-    pkt.write_u32(total_kills);
+    pkt.write_u16(total_kills);
     pkt
 }
 
@@ -1161,31 +1168,31 @@ mod tests {
 
     #[test]
     fn test_kill_narration_matches_ka_kill_update_wire() {
-        let pkt = build_kill_narration_packet("Wolfcstein", 40);
+        let pkt = build_kill_narration_packet(10_001, "Wolfcstein", 1, 40);
         assert_eq!(pkt.opcode, Opcode::WizKillAssist as u8);
 
         let mut r = PacketReader::new(&pkt.data);
         assert_eq!(r.read_u8(), Some(1)); // kaopcode::kill
         assert_eq!(r.read_u8(), Some(1));
-        assert_eq!(r.read_u32(), Some(1));
+        assert_eq!(r.read_u32(), Some(10_001));
         assert_eq!(r.read_string().as_deref(), Some("Wolfcstein"));
         assert_eq!(r.read_u8(), Some(1));
-        assert_eq!(r.read_u8(), Some(12)); // Legendary cap
+        assert_eq!(r.read_u16(), Some(40)); // Legendary cap
         assert_eq!(r.remaining(), 0);
     }
 
     #[test]
     fn test_kill_total_matches_ka_kill_update_wire() {
-        let pkt = build_kill_total_packet("JOLLY_JOKER", 2, 40);
+        let pkt = build_kill_total_packet(77, "JOLLY_JOKER", 2, 40);
         assert_eq!(pkt.opcode, Opcode::WizKillAssist as u8);
 
         let mut r = PacketReader::new(&pkt.data);
         assert_eq!(r.read_u8(), Some(1));
         assert_eq!(r.read_u8(), Some(3));
-        assert_eq!(r.read_u32(), Some(1));
+        assert_eq!(r.read_u32(), Some(77));
         assert_eq!(r.read_string().as_deref(), Some("JOLLY_JOKER"));
         assert_eq!(r.read_u8(), Some(2));
-        assert_eq!(r.read_u32(), Some(40));
+        assert_eq!(r.read_u16(), Some(40));
         assert_eq!(r.remaining(), 0);
     }
 
