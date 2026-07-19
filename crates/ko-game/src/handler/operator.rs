@@ -8892,10 +8892,10 @@ fn handle_manes_survival_open(session: &mut ClientSession) -> anyhow::Result<()>
         Ok(count) => {
             send_help(
                 session,
-                &format!("Manes Survival started in zone 96 with {count} monsters."),
+                &format!("Manes Survival started in zones 57-60 with {count} monsters."),
             );
             info!(
-                "[{}] +manesopen: spawned {} runtime monsters in zone 96",
+                "[{}] +manesopen: spawned {} runtime monsters across zones 57-60",
                 session.addr(),
                 count
             );
@@ -8917,7 +8917,7 @@ fn handle_manes_survival_close(session: &mut ClientSession) -> anyhow::Result<()
     }
 
     world.manes_survival_manager.stop(&world);
-    send_help(session, "Manes Survival stopped; zone-96 event monsters removed.");
+    send_help(session, "Manes Survival stopped; zone 57-60 event monsters removed.");
     info!("[{}] +manesclose: Manes Survival stopped", session.addr());
     Ok(())
 }
