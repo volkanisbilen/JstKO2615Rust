@@ -76,6 +76,10 @@ impl ManesSurvivalManager {
 
     pub fn participant_count(&self) -> usize { self.participants.len() }
 
+    pub fn participant_ids(&self) -> Vec<SessionId> {
+        self.participants.iter().map(|entry| *entry.key()).collect()
+    }
+
     pub fn configured_count(&self) -> usize { self.spawns.read().len() }
 
     /// Spawn the configured event population exactly once.
