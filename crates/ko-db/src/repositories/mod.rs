@@ -45,6 +45,7 @@ pub mod letter;
 pub mod level_up;
 pub mod lottery_event;
 pub mod magic;
+pub mod manes_survival;
 pub mod mining;
 pub mod monster_event;
 pub mod monster_resource;
