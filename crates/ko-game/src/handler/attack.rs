@@ -2228,6 +2228,37 @@ pub(crate) async fn handle_npc_death(
     // also mutate the persistent character level, which this event forbids.
     let is_manes_survival_kill = world.manes_survival_manager.is_active()
         && crate::systems::manes_survival::ZONES_MANES_SURVIVAL.contains(&npc.zone_id);
+
+    // Manes EXP is isolated from the persistent character. The v2615 client
+    // owns the temporary level/skill UI and accepts progress through
+    // D0 02 01: loadout, remaining time, current EXP, next EXP and level.
+    if is_manes_survival_kill {
+        if let Some(progress) = world
+            .manes_survival_manager
+            .award_monster_exp(killer_sid, tmpl.s_sid)
+        {
+            world.send_to_session_owned(
+                killer_sid,
+                crate::handler::survival::build_event_start(
+                    3,
+                    crate::handler::survival::EVENT_DURATION_SECONDS,
+                    progress.exp,
+                    progress.max_exp,
+                    progress.level,
+                ),
+            );
+            tracing::info!(
+                sid = killer_sid,
+                npc_sid = tmpl.s_sid,
+                survival_level = progress.level,
+                survival_exp = progress.exp,
+                survival_max_exp = progress.max_exp,
+                leveled_up = progress.leveled_up,
+                "Manes Survival progress updated"
+            );
+        }
+    }
+
     let base_exp = if is_manes_survival_kill {
         0
     } else {
