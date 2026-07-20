@@ -71,6 +71,29 @@ pub fn build_event_start(
     pkt
 }
 
+pub fn build_skill_selection(level: u8) -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_EVENT);
+    pkt.write_u8(EVENT_SKILL_SELECT);
+    pkt.write_u8(level);
+    pkt.write_u16(1);
+    pkt.write_i32(0);
+    pkt.write_u8(3);
+    write_skill_option(&mut pkt, 6101, "HP Increase 1", "Increase own HP by 100", 491345);
+    write_skill_option(&mut pkt, 6001, "Attack Damage Increase 1", "Increase attack damage", 491337);
+    write_skill_option(&mut pkt, 5901, "Reduce Attack Damage 1", "Reduce received damage", 491330);
+    pkt
+}
+
+fn write_skill_option(pkt: &mut Packet, skill_id: u16, name: &str, description: &str, icon_id: i32) {
+    pkt.write_u8(5);
+    pkt.write_u16(skill_id);
+    pkt.write_string(name);
+    pkt.write_string(description);
+    pkt.write_i16(0);
+    pkt.write_i32(icon_id);
+}
+
 pub fn broadcast_registration_status(world: &crate::world::WorldState, elapsed_seconds: u32) {
     let remaining = REGISTRATION_DURATION_SECONDS
         .saturating_sub(elapsed_seconds.min(u16::MAX as u32) as u16);
