@@ -2264,6 +2264,13 @@ pub(crate) async fn handle_npc_death(
                     progress.level,
                 ),
             );
+            if progress.leveled_up {
+                world.send_to_session_owned(
+                    killer_sid,
+                    crate::handler::survival::build_skill_selection(progress.level),
+                );
+            }
+
             tracing::info!(
                 sid = killer_sid,
                 npc_sid = tmpl.s_sid,
