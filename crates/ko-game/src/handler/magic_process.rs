@@ -1834,6 +1834,9 @@ async fn execute_type1_aoe(
             hp_pkt.write_u32(0);
             hp_pkt.write_u8(0);
             world.send_to_session_owned(caster_sid, hp_pkt);
+        if new_hp <= 0 {
+            super::attack::flush_manes_progress(world, caster_sid);
+        }
         }
     }
 
@@ -3238,6 +3241,9 @@ async fn execute_type3(
                     hp_pkt.write_u32(0);
                     hp_pkt.write_u8(0);
                     world.send_to_session_owned(caster_sid, hp_pkt);
+        if new_hp <= 0 {
+            super::attack::flush_manes_progress(world, caster_sid);
+        }
                 }
             }
         }
@@ -6178,6 +6184,9 @@ async fn apply_skill_damage_to_npc(
     hp_pkt.write_u32(0);
     hp_pkt.write_u8(0);
     world.send_to_session_owned(caster_sid, hp_pkt);
+        if new_hp <= 0 {
+            super::attack::flush_manes_progress(world, caster_sid);
+        }
 
     tracing::debug!(
         "[sid={}] MagicProcess NPC target={}: damage={}, new_hp={}/{}",
