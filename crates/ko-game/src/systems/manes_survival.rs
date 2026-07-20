@@ -55,7 +55,7 @@ pub fn required_exp_for_level(level: u8) -> u16 {
 /// They follow the supplied Manes grade ranges and let an active player reach
 /// level 30 after clearing most of one physical zone, without making the early
 /// levels grindy.
-pub fn monster_survival_exp(npc_sid: i16) -> u16 {
+pub fn monster_survival_exp(npc_sid: u16) -> u16 {
     match npc_sid {
         10701..=10705 => 80,
         10706..=10709 => 140,
@@ -161,7 +161,7 @@ impl ManesSurvivalManager {
     pub fn award_monster_exp(
         &self,
         session_id: SessionId,
-        npc_sid: i16,
+        npc_sid: u16,
     ) -> Option<ManesProgress> {
         if !self.is_active() {
             return None;
