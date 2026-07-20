@@ -2254,11 +2254,21 @@ pub(crate) async fn handle_npc_death(
             h.achieve_summary.monster_defeat_count.saturating_add(1);
     });
 
-    // v2525: Send updated kill counter to client HUD (0xA5)
-    if let Some(count) = world.with_session(killer_sid, |h| h.achieve_summary.monster_defeat_count)
-    {
-        let ach_pkt = crate::handler::achievement2::build_achievement2(count as i32);
-        world.send_to_session_owned(killer_sid, ach_pkt);
+    // v2525: Send updated kill counter to client HUD (0xA5).
+    // The Manes Survival client contract does not consume this generic
+    // achievement packet during its kill sequence. Sending it before the
+    // WIZ_MAGIC_PROCESS result makes the v2615 client terminate on the first
+    // lethal event skill. Keep the counter server-side, but suppress only its
+    // HUD packet inside zones 57-60 while the event is active.
+    let is_manes_survival_kill = world.manes_survival_manager.is_active()
+        && crate::systems::manes_survival::ZONES_MANES_SURVIVAL.contains(&npc.zone_id);
+    if !is_manes_survival_kill {
+        if let Some(count) =
+            world.with_session(killer_sid, |h| h.achieve_summary.monster_defeat_count)
+        {
+            let ach_pkt = crate::handler::achievement2::build_achievement2(count as i32);
+            world.send_to_session_owned(killer_sid, ach_pkt);
+        }
     }
 
     // ── Award XP + Loyalty (NP) — damage-weighted distribution ──
@@ -2269,9 +2279,6 @@ pub(crate) async fn handle_npc_death(
     // Sending the normal character WIZ_EXP_CHANGE (0x1A) here crashes the
     // v2615 client immediately after the first event monster dies and would
     // also mutate the persistent character level, which this event forbids.
-    let is_manes_survival_kill = world.manes_survival_manager.is_active()
-        && crate::systems::manes_survival::ZONES_MANES_SURVIVAL.contains(&npc.zone_id);
-
     // Compute Manes progress here, but do not send D0 packets from the death
     // handler. Physical/magic result packets must reach the client first.
     if is_manes_survival_kill {
