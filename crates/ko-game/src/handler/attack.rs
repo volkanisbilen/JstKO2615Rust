@@ -2157,6 +2157,10 @@ async fn handle_npc_attack(
         damage as i32,
     );
 
+    if new_hp <= 0 {
+        flush_manes_progress(&world, attacker_sid);
+    }
+
     tracing::debug!(
         "[sid={}] Attack on NPC {}: damage={}, new_hp={}/{}, result={}",
         attacker_sid,
@@ -2173,6 +2177,28 @@ async fn handle_npc_attack(
 /// generate loot, and set AI state to Dead.
 /// This is the SINGLE point of NPC death handling — called from both physical
 /// attack and magic damage paths to ensure consistent behavior.
+pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
+    let Some(progress) = world.manes_survival_manager.progress(sid) else {
+        return;
+    };
+    world.send_to_session_owned(
+        sid,
+        crate::handler::survival::build_event_start(
+            3,
+            crate::handler::survival::EVENT_DURATION_SECONDS,
+            progress.exp,
+            progress.max_exp,
+            progress.level,
+        ),
+    );
+    if progress.leveled_up {
+        world.send_to_session_owned(
+            sid,
+            crate::handler::survival::build_skill_selection(progress.level),
+        );
+    }
+}
+
 pub(crate) async fn handle_npc_death(
     world: &WorldState,
     killer_sid: SessionId,
@@ -2246,31 +2272,13 @@ pub(crate) async fn handle_npc_death(
     let is_manes_survival_kill = world.manes_survival_manager.is_active()
         && crate::systems::manes_survival::ZONES_MANES_SURVIVAL.contains(&npc.zone_id);
 
-    // Manes EXP is isolated from the persistent character. The v2615 client
-    // owns the temporary level/skill UI and accepts progress through
-    // D0 02 01: loadout, remaining time, current EXP, next EXP and level.
+    // Compute Manes progress here, but do not send D0 packets from the death
+    // handler. Physical/magic result packets must reach the client first.
     if is_manes_survival_kill {
         if let Some(progress) = world
             .manes_survival_manager
             .award_monster_exp(killer_sid, tmpl.s_sid)
         {
-            world.send_to_session_owned(
-                killer_sid,
-                crate::handler::survival::build_event_start(
-                    3,
-                    crate::handler::survival::EVENT_DURATION_SECONDS,
-                    progress.exp,
-                    progress.max_exp,
-                    progress.level,
-                ),
-            );
-            if progress.leveled_up {
-                world.send_to_session_owned(
-                    killer_sid,
-                    crate::handler::survival::build_skill_selection(progress.level),
-                );
-            }
-
             tracing::info!(
                 sid = killer_sid,
                 npc_sid = tmpl.s_sid,
