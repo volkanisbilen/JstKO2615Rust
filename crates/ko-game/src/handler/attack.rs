@@ -2090,6 +2090,23 @@ async fn handle_npc_attack(
     // ── Zone damage overrides ──────────────────────────────────────
     let damage = apply_zone_damage_override(attacker_pos.zone_id, damage);
 
+    // Manes uses an isolated level 1-30 combat curve. Normal character
+    // equipment/stats must not let a level-1 participant one-shot the outer
+    // ring. Scale the existing hit from 15% at level 1 to 87.5% at level 30.
+    let damage = if crate::systems::manes_survival::ZONES_MANES_SURVIVAL
+        .contains(&attacker_pos.zone_id)
+    {
+        let level = world
+            .manes_survival_manager
+            .progress(attacker_sid)
+            .map(|state| state.level)
+            .unwrap_or(1);
+        let scale_tenths = 150_i32 + level.saturating_sub(1) as i32 * 25;
+        ((damage as i32 * scale_tenths) / 1_000).max(1) as i16
+    } else {
+        damage
+    };
+
     // Cap damage at MAX_DAMAGE — matches player attack path
     let damage = damage.min(crate::attack_constants::MAX_DAMAGE as i16);
 
