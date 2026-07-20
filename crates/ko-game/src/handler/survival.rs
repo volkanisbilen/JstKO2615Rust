@@ -116,6 +116,19 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let category = reader.read_u8().unwrap_or(0);
     let operation = reader.read_u8().unwrap_or(0);
 
+    if category == CATEGORY_EVENT && operation == EVENT_SKILL_SELECT {
+        let sid = session.session_id();
+        let level = session
+            .world()
+            .manes_survival_manager
+            .progress(sid)
+            .map(|state| state.level)
+            .unwrap_or(1);
+        session.send_packet(&build_skill_selection(level)).await?;
+        debug!("[{}] Manes skill-selection UI sent sid={} level={}", session.addr(), sid, level);
+        return Ok(());
+    }
+
     if category != CATEGORY_REGISTRATION || operation != REG_APPLY {
         debug!(
             "[{}] WIZ_SURVIVAL unsupported C2S category={} operation={} remaining={}",
