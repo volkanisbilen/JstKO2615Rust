@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use ko_db::models::ManesSurvivalSpawnRow;
 use parking_lot::RwLock;
 
@@ -25,11 +25,55 @@ const KARUS_ENTRY_END: (f32, f32) = (260.0, 581.0);
 const ELMORAD_ENTRY_START: (f32, f32) = (722.0, 644.0);
 const ELMORAD_ENTRY_END: (f32, f32) = (728.0, 219.0);
 
+pub const MANES_MAX_LEVEL: u8 = 30;
+
+/// Medium-paced 20-minute progression. The 29 entries are the EXP required
+/// to advance from levels 1..=29. Total EXP to level 30 is 11,020.
+const MANES_LEVEL_EXP: [u16; 29] = [
+    100, 120, 140, 160, 180, 200, 220, 240, 260, 280,
+    300, 320, 340, 360, 380, 400, 420, 440, 460, 480,
+    500, 520, 540, 560, 580, 600, 620, 640, 660,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManesProgress {
+    pub level: u8,
+    pub exp: u16,
+    pub max_exp: u16,
+    pub leveled_up: bool,
+}
+
+pub fn required_exp_for_level(level: u8) -> u16 {
+    if level >= MANES_MAX_LEVEL {
+        0
+    } else {
+        MANES_LEVEL_EXP[(level.saturating_sub(1)) as usize]
+    }
+}
+
+/// EXP rewards are intentionally independent from the persistent NPC EXP.
+/// They follow the supplied Manes grade ranges and let an active player reach
+/// level 30 after clearing most of one physical zone, without making the early
+/// levels grindy.
+pub fn monster_survival_exp(npc_sid: i16) -> u16 {
+    match npc_sid {
+        10701..=10705 => 80,
+        10706..=10709 => 140,
+        10710..=10715 => 160,
+        10716..=10719 => 260,
+        10720..=10728 => 280,
+        10729..=10732 => 450,
+        10733 => 1_000,
+        _ => 0,
+    }
+}
+
 pub struct ManesSurvivalManager {
     spawns: RwLock<Vec<ManesSurvivalSpawnRow>>,
     registration_open: AtomicBool,
     active: AtomicBool,
     participants: DashSet<SessionId>,
+    progress: DashMap<SessionId, ManesProgress>,
 }
 
 impl Default for ManesSurvivalManager {
@@ -39,6 +83,7 @@ impl Default for ManesSurvivalManager {
             registration_open: AtomicBool::new(false),
             active: AtomicBool::new(false),
             participants: DashSet::new(),
+            progress: DashMap::new(),
         }
     }
 }
@@ -97,6 +142,62 @@ impl ManesSurvivalManager {
     }
 
     pub fn configured_count(&self) -> usize { self.spawns.read().len() }
+
+    pub fn progress(&self, session_id: SessionId) -> Option<ManesProgress> {
+        self.progress.get(&session_id).map(|entry| *entry.value())
+    }
+
+    pub fn reset_progress(&self, session_id: SessionId) -> ManesProgress {
+        let progress = ManesProgress {
+            level: 1,
+            exp: 0,
+            max_exp: required_exp_for_level(1),
+            leveled_up: false,
+        };
+        self.progress.insert(session_id, progress);
+        progress
+    }
+
+    pub fn award_monster_exp(
+        &self,
+        session_id: SessionId,
+        npc_sid: i16,
+    ) -> Option<ManesProgress> {
+        if !self.is_active() {
+            return None;
+        }
+        let reward = monster_survival_exp(npc_sid);
+        if reward == 0 {
+            return None;
+        }
+
+        let mut entry = self.progress.entry(session_id).or_insert(ManesProgress {
+            level: 1,
+            exp: 0,
+            max_exp: required_exp_for_level(1),
+            leveled_up: false,
+        });
+        let mut state = *entry;
+        state.leveled_up = false;
+
+        if state.level < MANES_MAX_LEVEL {
+            state.exp = state.exp.saturating_add(reward);
+            while state.level < MANES_MAX_LEVEL && state.exp >= state.max_exp {
+                state.exp -= state.max_exp;
+                state.level += 1;
+                state.leveled_up = true;
+                state.max_exp = required_exp_for_level(state.level);
+            }
+            if state.level >= MANES_MAX_LEVEL {
+                state.level = MANES_MAX_LEVEL;
+                state.exp = 0;
+                state.max_exp = 0;
+            }
+        }
+
+        *entry = state;
+        Some(state)
+    }
 
     /// Start the event and place every online registrant on the nation-specific
     /// outer entry line. The client-confirmed registration countdown sends this
@@ -168,12 +269,8 @@ impl ManesSurvivalManager {
             // exact event-state packet initialises CSurvival. Send it before
             // zone change so the first event NPC death cannot race ahead of
             // client initialisation.
-            let initial_max_exp = world.get_exp_by_level(1, 0);
-            let initial_max_exp = u16::try_from(initial_max_exp).map_err(|_| {
-                anyhow::anyhow!(
-                    "Manes Survival level-1 EXP requirement {initial_max_exp} does not fit u16"
-                )
-            })?;
+            let progress = self.reset_progress(sid);
+            let initial_max_exp = progress.max_exp;
             // Client reverse contract (sub_7113D0 -> sub_716B50): this
             // 1-based value selects the complete temporary Manes loadout.
             // Manes is a Chaos-style event: every participant must receive
@@ -288,5 +385,6 @@ impl ManesSurvivalManager {
         self.active.store(false, Ordering::Release);
         self.registration_open.store(false, Ordering::Release);
         self.participants.clear();
+        self.progress.clear();
     }
 }
