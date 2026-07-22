@@ -172,6 +172,7 @@ async fn process_single_pet_attack(world: &WorldState, pd: &crate::world::PetAtt
                 pd.target_npc_id,
                 &target_npc,
                 tmpl,
+                false,
             )
             .await;
         }
