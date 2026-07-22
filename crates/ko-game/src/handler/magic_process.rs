@@ -1820,7 +1820,7 @@ async fn execute_type1_aoe(
         if new_hp > 0 {
             world.notify_npc_damaged(npc_id, caster_sid);
         } else if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-            super::attack::handle_npc_death(world, caster_sid, npc_id, &npc, &tmpl).await;
+            super::attack::handle_npc_death(world, caster_sid, npc_id, &npc, &tmpl, false).await;
         }
 
         // Send HP bar update
@@ -3225,7 +3225,9 @@ async fn execute_type3(
                 } else {
                     // NPC died
                     if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-                        super::attack::handle_npc_death(world, caster_sid, npc_id, &npc, &tmpl)
+                        super::attack::handle_npc_death(
+                            world, caster_sid, npc_id, &npc, &tmpl, false,
+                        )
                             .await;
                     }
                 }
@@ -6046,6 +6048,8 @@ async fn apply_skill_damage_to_npc(
         None => return,
     };
 
+    let damage = super::attack::scale_manes_magic_damage(world, caster_sid, &npc, damage);
+
     // NPC type validation — certain NPCs are immune to magic skills
     {
         if tmpl.npc_type == NPC_PARTNER_TYPE && tmpl.group == 0 {
@@ -6148,7 +6152,9 @@ async fn apply_skill_damage_to_npc(
     world.record_npc_damage(npc_id, caster_sid, damage as i32);
 
     // ── Caster weapon durability loss ────────────────────────────────
-    world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, damage as i32);
+    if !super::attack::is_manes_survival_npc(&npc) {
+        world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, damage as i32);
+    }
 
     // Notify NPC AI about damage (reactive aggro — C++ ChangeTarget)
     if new_hp > 0 {
@@ -6165,7 +6171,15 @@ async fn apply_skill_damage_to_npc(
     if new_hp <= 0 {
         // NPC died — delegate to shared death handler for consistent behavior
         // (death broadcast, party XP, loot, AI state cleanup)
-        super::attack::handle_npc_death(world, caster_sid, npc_id, &npc, &tmpl).await;
+        super::attack::handle_npc_death(
+            world,
+            caster_sid,
+            npc_id,
+            &npc,
+            &tmpl,
+            super::attack::is_manes_survival_npc(&npc),
+        )
+        .await;
     }
 
     // Broadcast skill effect
@@ -6184,9 +6198,12 @@ async fn apply_skill_damage_to_npc(
     hp_pkt.write_u32(0);
     hp_pkt.write_u8(0);
     world.send_to_session_owned(caster_sid, hp_pkt);
-        if new_hp <= 0 {
-            super::attack::flush_manes_progress(world, caster_sid);
+    if new_hp <= 0 {
+        if super::attack::is_manes_survival_npc(&npc) {
+            super::attack::broadcast_npc_death(world, caster_sid, npc_id);
         }
+        super::attack::flush_manes_progress(world, caster_sid);
+    }
 
     tracing::debug!(
         "[sid={}] MagicProcess NPC target={}: damage={}, new_hp={}/{}",
