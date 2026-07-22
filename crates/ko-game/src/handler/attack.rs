@@ -2137,7 +2137,15 @@ async fn handle_npc_attack(
 
     let b_result = if new_hp <= 0 {
         // NPC died
-        handle_npc_death(&world, attacker_sid, npc_id, &npc, &tmpl).await;
+        handle_npc_death(
+            &world,
+            attacker_sid,
+            npc_id,
+            &npc,
+            &tmpl,
+            is_manes_survival_zone,
+        )
+        .await;
 
         ATTACK_TARGET_DEAD
     } else {
@@ -2158,6 +2166,9 @@ async fn handle_npc_attack(
     );
 
     if new_hp <= 0 {
+        if is_manes_survival_zone {
+            broadcast_npc_death(&world, attacker_sid, npc_id);
+        }
         flush_manes_progress(&world, attacker_sid);
     }
 
@@ -2199,14 +2210,34 @@ pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
     }
 }
 
-pub(crate) async fn handle_npc_death(
+pub(crate) fn is_manes_survival_npc(npc: &crate::npc::NpcInstance) -> bool {
+    crate::systems::manes_survival::ZONES_MANES_SURVIVAL.contains(&npc.zone_id)
+}
+
+pub(crate) fn scale_manes_magic_damage(
+    world: &WorldState,
+    caster_sid: SessionId,
+    npc: &crate::npc::NpcInstance,
+    damage: i16,
+) -> i16 {
+    if damage <= 0 || !is_manes_survival_npc(npc) {
+        return damage;
+    }
+
+    let level = world
+        .manes_survival_manager
+        .progress(caster_sid)
+        .map(|state| state.level)
+        .unwrap_or(1);
+    let scale_tenths = 150_i32 + level.saturating_sub(1) as i32 * 25;
+    ((damage as i32 * scale_tenths) / 1_000).max(1) as i16
+}
+
+pub(crate) fn broadcast_npc_death(
     world: &WorldState,
     killer_sid: SessionId,
     npc_id: NpcId,
-    npc: &crate::npc::NpcInstance,
-    tmpl: &crate::npc::NpcTemplate,
 ) {
-    // ── Broadcast NPC death ────────────────────────────────────────
     let mut death_pkt = Packet::new(Opcode::WizDead as u8);
     death_pkt.write_u32(npc_id);
 
@@ -2220,6 +2251,21 @@ pub(crate) async fn handle_npc_death(
             None,
             event_room,
         );
+    }
+}
+
+pub(crate) async fn handle_npc_death(
+    world: &WorldState,
+    killer_sid: SessionId,
+    npc_id: NpcId,
+    npc: &crate::npc::NpcInstance,
+    tmpl: &crate::npc::NpcTemplate,
+    defer_death_broadcast: bool,
+) {
+    // Manes must receive the combat result and HP=0 before WIZ_DEAD. Its
+    // physical/magic callers emit this packet after those two packets.
+    if !defer_death_broadcast {
+        broadcast_npc_death(world, killer_sid, npc_id);
     }
 
     // FerihaLog: KillingNpcInsertLog
