@@ -2205,7 +2205,12 @@ pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
     if progress.leveled_up {
         world.send_to_session_owned(
             sid,
-            crate::handler::survival::build_skill_selection(progress.level),
+            crate::handler::survival::build_skill_selection_open(),
+        );
+        tracing::info!(
+            sid,
+            survival_level = progress.level,
+            "Manes skill-selection UIF open trigger sent"
         );
     }
 }
