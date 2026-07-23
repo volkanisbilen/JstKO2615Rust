@@ -71,6 +71,19 @@ pub fn build_event_start(
     pkt
 }
 
+/// Ask the v2615 client to open the Manes level-up selection UIF.
+///
+/// The client answers this three-byte notification with the same
+/// `D0 02 03` category/operation request. Only after that request is received
+/// may the server send the populated selection model.
+pub fn build_skill_selection_open() -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_EVENT);
+    pkt.write_u8(EVENT_SKILL_SELECT);
+    pkt
+}
+
+/// Populate an already-open Manes level-up selection UIF.
 pub fn build_skill_selection(level: u8) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_EVENT);
@@ -125,7 +138,12 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             .map(|state| state.level)
             .unwrap_or(1);
         session.send_packet(&build_skill_selection(level)).await?;
-        debug!("[{}] Manes skill-selection UI sent sid={} level={}", session.addr(), sid, level);
+        debug!(
+            "[{}] Manes skill-selection options sent sid={} level={}",
+            session.addr(),
+            sid,
+            level
+        );
         return Ok(());
     }
 
@@ -192,5 +210,19 @@ mod tests {
             packet.data,
             vec![0x02, 0x01, 0x03, 0xB0, 0x04, 0x00, 0x00, 0xC8, 0x00, 0x01]
         );
+    }
+
+    #[test]
+    fn skill_selection_open_is_header_only() {
+        let packet = build_skill_selection_open();
+        assert_eq!(packet.opcode, 0xD0);
+        assert_eq!(packet.data, vec![0x02, 0x03]);
+    }
+
+    #[test]
+    fn skill_selection_options_are_not_used_as_the_open_trigger() {
+        let packet = build_skill_selection(2);
+        assert_eq!(&packet.data[..2], &[0x02, 0x03]);
+        assert!(packet.data.len() > build_skill_selection_open().data.len());
     }
 }
