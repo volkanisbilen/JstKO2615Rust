@@ -98,9 +98,11 @@ pub fn build_skill_selection(level: u8) -> Packet {
     pkt
 }
 
-fn write_skill_option(pkt: &mut Packet, skill_id: u16, name: &str, description: &str, icon_id: i32) {
+fn write_skill_option(pkt: &mut Packet, skill_id: u32, name: &str, description: &str, icon_id: i32) {
     pkt.write_u8(5);
-    pkt.write_u16(skill_id);
+    // v2615 sub_751500 reads the option identifier as a 32-bit value.
+    // Writing u16 shifts every following string/value field by two bytes.
+    pkt.write_u32(skill_id);
     pkt.write_string(name);
     pkt.write_string(description);
     pkt.write_i16(0);
@@ -224,5 +226,16 @@ mod tests {
         let packet = build_skill_selection(2);
         assert_eq!(&packet.data[..2], &[0x02, 0x03]);
         assert!(packet.data.len() > build_skill_selection_open().data.len());
+    }
+
+    #[test]
+    fn skill_selection_option_ids_are_v2615_u32_values() {
+        let packet = build_skill_selection(4);
+        // Header: category, operation, level, available point (u16),
+        // selected skill (i32), option count. First option then starts with
+        // group=5 and a little-endian u32 identifier.
+        assert_eq!(&packet.data[..10], &[0x02, 0x03, 0x04, 0x01, 0x00, 0, 0, 0, 0, 0x03]);
+        assert_eq!(&packet.data[10..15], &[0x05, 0xD5, 0x17, 0x00, 0x00]);
+        assert_eq!(packet.data.len(), 180);
     }
 }
