@@ -25,6 +25,7 @@ const ACTION_CANCEL: u16 = 2;
 const CATEGORY_EVENT: u8 = 2;
 const EVENT_START: u8 = 1;
 const EVENT_SKILL_SELECT: u8 = 3;
+const EVENT_SKILL_OPTIONS: u8 = 4;
 pub const REGISTRATION_DURATION_SECONDS: u16 = 600;
 pub const EVENT_DURATION_SECONDS: u16 = 1_200;
 
@@ -84,10 +85,14 @@ pub fn build_skill_selection_open() -> Packet {
 }
 
 /// Populate an already-open Manes level-up selection UIF.
+///
+/// Operation 3 is the open/request handshake in both directions. The populated
+/// response must use operation 4, otherwise the client routes it back through
+/// the request path and never constructs the option window.
 pub fn build_skill_selection(level: u8) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_EVENT);
-    pkt.write_u8(EVENT_SKILL_SELECT);
+    pkt.write_u8(EVENT_SKILL_OPTIONS);
     pkt.write_u8(level);
     pkt.write_u16(1);
     pkt.write_i32(0);
@@ -224,7 +229,7 @@ mod tests {
     #[test]
     fn skill_selection_options_are_not_used_as_the_open_trigger() {
         let packet = build_skill_selection(2);
-        assert_eq!(&packet.data[..2], &[0x02, 0x03]);
+        assert_eq!(&packet.data[..2], &[0x02, 0x04]);
         assert!(packet.data.len() > build_skill_selection_open().data.len());
     }
 
@@ -234,7 +239,7 @@ mod tests {
         // Header: category, operation, level, available point (u16),
         // selected skill (i32), option count. First option then starts with
         // group=5 and a little-endian u32 identifier.
-        assert_eq!(&packet.data[..10], &[0x02, 0x03, 0x04, 0x01, 0x00, 0, 0, 0, 0, 0x03]);
+        assert_eq!(&packet.data[..10], &[0x02, 0x04, 0x04, 0x01, 0x00, 0, 0, 0, 0, 0x03]);
         assert_eq!(&packet.data[10..15], &[0x05, 0xD5, 0x17, 0x00, 0x00]);
         assert_eq!(packet.data.len(), 180);
     }
