@@ -1,10 +1,12 @@
 //! Manes Survival 2615 client protocol.
 //!
 //! Byte contract verified against the unpacked client CSurvival dispatcher
-//! (sub_716A10 -> category 1 -> sub_711080):
+//! (`sub_716A10`):
 //! - S2C D0 01 01 u16 remaining_seconds u16 participant_count: open/refresh entry UI
 //! - C2S D0 01 02 u16 action: 1 apply, 2 cancel
 //! - S2C D0 01 02 i16 result [u16 participant_count when result=1]
+//! - S2C D0 06 01 u8 first_count [u16 skill_id] u8 second_count
+//!   [u16 skill_id]: load `MANES_MAGIC.tbl` rows and open the skill-choice UI
 //!
 //! The similarly shaped 0xD3 handler belongs to the Ronark-war UI and must not
 //! be used for Manes Survival registration.
@@ -24,7 +26,9 @@ const ACTION_APPLY: u16 = 1;
 const ACTION_CANCEL: u16 = 2;
 const CATEGORY_EVENT: u8 = 2;
 const EVENT_START: u8 = 1;
-const EVENT_SKILL_SELECT: u8 = 3;
+const CATEGORY_SKILL: u8 = 6;
+const SKILL_OPEN: u8 = 1;
+const SURVIVAL_SKILL_CHOICES: [u16; 3] = [6101, 6001, 5901];
 pub const REGISTRATION_DURATION_SECONDS: u16 = 600;
 pub const EVENT_DURATION_SECONDS: u16 = 1_200;
 
@@ -71,46 +75,25 @@ pub fn build_event_start(
     pkt
 }
 
-/// Emit the legacy event-operation notification.
+/// Open the v2615 Manes skill-choice window.
 ///
-/// Important: client-originated `D0 02 03` packets are also used by the
-/// Alt/ranking flow. They must not be interpreted as proof that the Manes
-/// selection UIF opened.
+/// Verified against `sub_716A10 -> sub_714AB0`, operation 1. The client reads
+/// two counted lists of `u16` MANES_MAGIC identifiers, resolves the rows via
+/// `sub_710140`, then calls `sub_5037D0 -> sub_75C520` to populate and show the
+/// choice UI. Names, descriptions, and icons are client table data and are not
+/// part of this packet.
 pub fn build_skill_selection_open() -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
-    pkt.write_u8(CATEGORY_EVENT);
-    pkt.write_u8(EVENT_SKILL_SELECT);
+    pkt.write_u8(CATEGORY_SKILL);
+    pkt.write_u8(SKILL_OPEN);
+    pkt.write_u8(SURVIVAL_SKILL_CHOICES.len() as u8);
+    for skill_id in SURVIVAL_SKILL_CHOICES {
+        pkt.write_u16(skill_id);
+    }
+    // The client contract always contains a second counted list. There are no
+    // secondary choices in this level-up offer.
+    pkt.write_u8(0);
     pkt
-}
-
-/// Build the legacy operation-3 payload.
-///
-/// Operation 4 is not a Manes response operation on the v2615 client. Sending
-/// it makes the Alt/ranking flow repeatedly issue `D0 02 03` requests and
-/// corrupts the rank window.
-pub fn build_skill_selection(level: u8) -> Packet {
-    let mut pkt = Packet::new(WIZ_SURVIVAL);
-    pkt.write_u8(CATEGORY_EVENT);
-    pkt.write_u8(EVENT_SKILL_SELECT);
-    pkt.write_u8(level);
-    pkt.write_u16(1);
-    pkt.write_i32(0);
-    pkt.write_u8(3);
-    write_skill_option(&mut pkt, 6101, "HP Increase 1", "Increase own HP by 100", 491345);
-    write_skill_option(&mut pkt, 6001, "Attack Damage Increase 1", "Increase attack damage", 491337);
-    write_skill_option(&mut pkt, 5901, "Reduce Attack Damage 1", "Reduce received damage", 491330);
-    pkt
-}
-
-fn write_skill_option(pkt: &mut Packet, skill_id: u32, name: &str, description: &str, icon_id: i32) {
-    pkt.write_u8(5);
-    // v2615 sub_751500 reads the option identifier as a 32-bit value.
-    // Writing u16 shifts every following string/value field by two bytes.
-    pkt.write_u32(skill_id);
-    pkt.write_string(name);
-    pkt.write_string(description);
-    pkt.write_i16(0);
-    pkt.write_i32(icon_id);
 }
 
 pub fn broadcast_registration_status(world: &crate::world::WorldState, elapsed_seconds: u32) {
@@ -134,24 +117,6 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let mut reader = PacketReader::new(&pkt.data);
     let category = reader.read_u8().unwrap_or(0);
     let operation = reader.read_u8().unwrap_or(0);
-
-    if category == CATEGORY_EVENT && operation == EVENT_SKILL_SELECT {
-        let sid = session.session_id();
-        let level = session
-            .world()
-            .manes_survival_manager
-            .progress(sid)
-            .map(|state| state.level)
-            .unwrap_or(1);
-        session.send_packet(&build_skill_selection(level)).await?;
-        debug!(
-            "[{}] Manes skill-selection options sent sid={} level={}",
-            session.addr(),
-            sid,
-            level
-        );
-        return Ok(());
-    }
 
     if category != CATEGORY_REGISTRATION || operation != REG_APPLY {
         debug!(
@@ -219,27 +184,12 @@ mod tests {
     }
 
     #[test]
-    fn skill_selection_open_is_header_only() {
+    fn skill_selection_open_matches_v2615_client_contract() {
         let packet = build_skill_selection_open();
         assert_eq!(packet.opcode, 0xD0);
-        assert_eq!(packet.data, vec![0x02, 0x03]);
-    }
-
-    #[test]
-    fn skill_selection_payload_preserves_operation_three() {
-        let packet = build_skill_selection(2);
-        assert_eq!(&packet.data[..2], &[0x02, 0x03]);
-        assert!(packet.data.len() > build_skill_selection_open().data.len());
-    }
-
-    #[test]
-    fn skill_selection_option_ids_are_v2615_u32_values() {
-        let packet = build_skill_selection(4);
-        // Header: category, operation, level, available point (u16),
-        // selected skill (i32), option count. First option then starts with
-        // group=5 and a little-endian u32 identifier.
-        assert_eq!(&packet.data[..10], &[0x02, 0x03, 0x04, 0x01, 0x00, 0, 0, 0, 0, 0x03]);
-        assert_eq!(&packet.data[10..15], &[0x05, 0xD5, 0x17, 0x00, 0x00]);
-        assert_eq!(packet.data.len(), 180);
+        assert_eq!(
+            packet.data,
+            vec![0x06, 0x01, 0x03, 0xD5, 0x17, 0x71, 0x17, 0x0D, 0x17, 0x00]
+        );
     }
 }
