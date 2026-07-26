@@ -38,7 +38,7 @@ const SKILL_COMPLETE: u8 = 5;
 const SKILL_RESULT_FAILURE: u8 = 0;
 const SELECTION_LIST_SKILL: u8 = 1;
 const SELECTION_LIST_POTION: u8 = 2;
-const SURVIVAL_SKILL_CHOICES: [u16; 3] = [6101, 6001, 5901];
+const SURVIVAL_SKILL_BRANCHES: [u16; 3] = [6100, 6000, 5900];
 const SURVIVAL_POTION_CHOICES: [u16; 2] = [6201, 6301];
 const POTION_PURCHASE_COUNT: u16 = 10;
 const POTION_PURCHASE_PRICE: u32 = 3_000;
@@ -97,12 +97,18 @@ pub fn build_event_start(
 /// `sub_710140`, then calls `sub_5037D0 -> sub_75C520` to populate and show the
 /// choice UI. Names, descriptions, and icons are client table data and are not
 /// part of this packet.
-pub fn build_skill_selection_open() -> Packet {
+pub fn skill_choices_for_level(survival_level: u8) -> [u16; 3] {
+    let tier = survival_level.clamp(1, crate::systems::manes_survival::MANES_MAX_LEVEL) as u16;
+    SURVIVAL_SKILL_BRANCHES.map(|branch| branch + tier)
+}
+
+pub fn build_skill_selection_open(survival_level: u8) -> Packet {
+    let skill_choices = skill_choices_for_level(survival_level);
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_SKILL);
     pkt.write_u8(SKILL_OPEN);
-    pkt.write_u8(SURVIVAL_SKILL_CHOICES.len() as u8);
-    for skill_id in SURVIVAL_SKILL_CHOICES {
+    pkt.write_u8(skill_choices.len() as u8);
+    for skill_id in skill_choices {
         pkt.write_u16(skill_id);
     }
     // The second counted list populates the small HP/MP potion selector below
@@ -176,8 +182,14 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         // The v2615 client commits the selected MANES_MAGIC row to its skill
         // bar only after receiving `D0 06 02 01 01 00`.
         if list_type == SELECTION_LIST_SKILL {
-            let valid =
-                no_trailing_data && SURVIVAL_SKILL_CHOICES.contains(&manes_magic_id);
+            let survival_level = session
+                .world()
+                .manes_survival_manager
+                .progress(session.session_id())
+                .map(|progress| progress.level)
+                .unwrap_or(1);
+            let offered_choices = skill_choices_for_level(survival_level);
+            let valid = no_trailing_data && offered_choices.contains(&manes_magic_id);
             session
                 .send_packet(&build_selection_submit_result(
                     list_type,
@@ -271,9 +283,15 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     if category == CATEGORY_SKILL && operation == SKILL_COMPLETE {
         let requested_state = reader.read_u8().unwrap_or(SKILL_RESULT_FAILURE);
         let skill_id = reader.read_u16().unwrap_or(0);
+        let survival_level = session
+            .world()
+            .manes_survival_manager
+            .progress(session.session_id())
+            .map(|progress| progress.level)
+            .unwrap_or(1);
         let valid = requested_state != SKILL_RESULT_FAILURE
             && reader.remaining() == 0
-            && SURVIVAL_SKILL_CHOICES.contains(&skill_id);
+            && skill_choices_for_level(survival_level).contains(&skill_id);
         if valid {
             session
                 .send_packet(&build_skill_selection_result(skill_id))
@@ -385,7 +403,7 @@ mod tests {
 
     #[test]
     fn skill_selection_open_matches_v2615_client_contract() {
-        let packet = build_skill_selection_open();
+        let packet = build_skill_selection_open(1);
         assert_eq!(packet.opcode, 0xD0);
         assert_eq!(
             packet.data,
@@ -394,5 +412,13 @@ mod tests {
                 0x18
             ]
         );
+    }
+
+    #[test]
+    fn skill_choices_advance_with_survival_level() {
+        assert_eq!(skill_choices_for_level(1), [6101, 6001, 5901]);
+        assert_eq!(skill_choices_for_level(2), [6102, 6002, 5902]);
+        assert_eq!(skill_choices_for_level(4), [6104, 6004, 5904]);
+        assert_eq!(skill_choices_for_level(30), [6130, 6030, 5930]);
     }
 }
