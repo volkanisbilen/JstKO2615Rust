@@ -7,6 +7,8 @@
 //! - S2C D0 01 02 i16 result [u16 participant_count when result=1]
 //! - S2C D0 06 01 u8 first_count [u16 skill_id] u8 second_count
 //!   [u16 skill_id]: load `MANES_MAGIC.tbl` rows and open the skill-choice UI
+//! - C2S D0 06 05 u8 state [u16 skill_id when state != 2]: complete selection
+//! - S2C D0 06 05 u16 skill_id: accept selection and close the choice UI
 //!
 //! The similarly shaped 0xD3 handler belongs to the Ronark-war UI and must not
 //! be used for Manes Survival registration.
@@ -29,9 +31,9 @@ const EVENT_START: u8 = 1;
 const CATEGORY_SKILL: u8 = 6;
 const SKILL_OPEN: u8 = 1;
 const SKILL_COMPLETE: u8 = 5;
-const SKILL_RESULT_SUCCESS: u8 = 1;
 const SKILL_RESULT_FAILURE: u8 = 0;
 const SURVIVAL_SKILL_CHOICES: [u16; 3] = [6101, 6001, 5901];
+const SURVIVAL_POTION_CHOICES: [u16; 2] = [6201, 6301];
 pub const REGISTRATION_DURATION_SECONDS: u16 = 600;
 pub const EVENT_DURATION_SECONDS: u16 = 1_200;
 
@@ -93,22 +95,28 @@ pub fn build_skill_selection_open() -> Packet {
     for skill_id in SURVIVAL_SKILL_CHOICES {
         pkt.write_u16(skill_id);
     }
-    // The client contract always contains a second counted list. There are no
-    // secondary choices in this level-up offer.
-    pkt.write_u8(0);
+    // The second counted list populates the small HP/MP potion selector below
+    // the main skill window. These are the first-tier Manes HP and MP potion
+    // rows from the v2615 MANES_MAGIC.tbl.
+    pkt.write_u8(SURVIVAL_POTION_CHOICES.len() as u8);
+    for potion_id in SURVIVAL_POTION_CHOICES {
+        pkt.write_u16(potion_id);
+    }
     pkt
 }
 
-/// Confirm or reject a v2615 Manes skill selection.
+/// Confirm a v2615 Manes skill selection.
 ///
-/// Verified C2S/S2C contract: `D0 06 05 u8 result u16 skill_id`. The client
-/// keeps submitting while no response arrives, so every syntactically valid
-/// request must receive exactly one result packet.
-pub fn build_skill_selection_result(result: u8, skill_id: u16) -> Packet {
+/// The request and response are deliberately asymmetric:
+/// - C2S: `D0 06 05 u8 state u16 skill_id`
+/// - S2C: `D0 06 05 u16 skill_id`
+///
+/// `sub_714AB0`, operation 5, reads the response ID immediately after the
+/// operation byte and then closes the selection UI via `sub_75C390`.
+pub fn build_skill_selection_result(skill_id: u16) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_SKILL);
     pkt.write_u8(SKILL_COMPLETE);
-    pkt.write_u8(result);
     pkt.write_u16(skill_id);
     pkt
 }
@@ -141,17 +149,10 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         let valid = requested_state != SKILL_RESULT_FAILURE
             && reader.remaining() == 0
             && SURVIVAL_SKILL_CHOICES.contains(&skill_id);
-        let result = if valid {
-            SKILL_RESULT_SUCCESS
-        } else {
-            SKILL_RESULT_FAILURE
-        };
-
-        session
-            .send_packet(&build_skill_selection_result(result, skill_id))
-            .await?;
-
         if valid {
+            session
+                .send_packet(&build_skill_selection_result(skill_id))
+                .await?;
             debug!(
                 "[{}] Manes skill selection completed sid={} skill_id={}",
                 session.addr(),
@@ -238,9 +239,9 @@ mod tests {
 
     #[test]
     fn skill_selection_result_matches_v2615_client_contract() {
-        let packet = build_skill_selection_result(1, 6101);
+        let packet = build_skill_selection_result(6101);
         assert_eq!(packet.opcode, 0xD0);
-        assert_eq!(packet.data, vec![0x06, 0x05, 0x01, 0xD5, 0x17]);
+        assert_eq!(packet.data, vec![0x06, 0x05, 0xD5, 0x17]);
     }
 
     #[test]
@@ -249,7 +250,10 @@ mod tests {
         assert_eq!(packet.opcode, 0xD0);
         assert_eq!(
             packet.data,
-            vec![0x06, 0x01, 0x03, 0xD5, 0x17, 0x71, 0x17, 0x0D, 0x17, 0x00]
+            vec![
+                0x06, 0x01, 0x03, 0xD5, 0x17, 0x71, 0x17, 0x0D, 0x17, 0x02, 0x39, 0x18, 0x9D,
+                0x18
+            ]
         );
     }
 }
