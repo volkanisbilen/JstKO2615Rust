@@ -7,6 +7,8 @@
 //! - S2C D0 01 02 i16 result [u16 participant_count when result=1]
 //! - S2C D0 06 01 u8 first_count [u16 skill_id] u8 second_count
 //!   [u16 skill_id]: load `MANES_MAGIC.tbl` rows and open the skill-choice UI
+//! - C2S D0 06 02 u8 state u16 potion_id: buy the selected Manes potion
+//! - S2C D0 06 02 u8 state i16 result: complete the purchase (`result=1`)
 //! - C2S D0 06 05 u8 state [u16 skill_id when state != 2]: complete selection
 //! - S2C D0 06 05 u16 skill_id: accept selection and close the choice UI
 //!
@@ -30,10 +32,15 @@ const CATEGORY_EVENT: u8 = 2;
 const EVENT_START: u8 = 1;
 const CATEGORY_SKILL: u8 = 6;
 const SKILL_OPEN: u8 = 1;
+const POTION_PURCHASE: u8 = 2;
 const SKILL_COMPLETE: u8 = 5;
 const SKILL_RESULT_FAILURE: u8 = 0;
 const SURVIVAL_SKILL_CHOICES: [u16; 3] = [6101, 6001, 5901];
 const SURVIVAL_POTION_CHOICES: [u16; 2] = [6201, 6301];
+const POTION_PURCHASE_COUNT: u16 = 10;
+const POTION_PURCHASE_PRICE: u32 = 3_000;
+const MANES_HP_POTION_ITEM: u32 = 978_023_000;
+const MANES_MP_POTION_ITEM: u32 = 978_024_000;
 pub const REGISTRATION_DURATION_SECONDS: u16 = 600;
 pub const EVENT_DURATION_SECONDS: u16 = 1_200;
 
@@ -121,6 +128,21 @@ pub fn build_skill_selection_result(skill_id: u16) -> Packet {
     pkt
 }
 
+/// Complete a Manes potion purchase.
+///
+/// Verified against `sub_714AB0`, operation 2. The client reads the selection
+/// state followed by a signed result code. Result 1 inserts the selected
+/// `MANES_MAGIC` row's item into the client inventory and closes the small
+/// potion selector.
+pub fn build_potion_purchase_result(state: u8, result: i16) -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_SKILL);
+    pkt.write_u8(POTION_PURCHASE);
+    pkt.write_u8(state);
+    pkt.write_u16(result as u16);
+    pkt
+}
+
 pub fn broadcast_registration_status(world: &crate::world::WorldState, elapsed_seconds: u32) {
     let remaining = REGISTRATION_DURATION_SECONDS
         .saturating_sub(elapsed_seconds.min(u16::MAX as u32) as u16);
@@ -142,6 +164,72 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let mut reader = PacketReader::new(&pkt.data);
     let category = reader.read_u8().unwrap_or(0);
     let operation = reader.read_u8().unwrap_or(0);
+
+    if category == CATEGORY_SKILL && operation == POTION_PURCHASE {
+        let requested_state = reader.read_u8().unwrap_or(SKILL_RESULT_FAILURE);
+        let potion_id = reader.read_u16().unwrap_or(0);
+        let item_id = match potion_id {
+            6201 => Some(MANES_HP_POTION_ITEM),
+            6301 => Some(MANES_MP_POTION_ITEM),
+            _ => None,
+        };
+        let sid = session.session_id();
+        let world = session.world().clone();
+        let valid_request =
+            requested_state == 1 && reader.remaining() == 0 && item_id.is_some();
+        let enough_gold = world
+            .get_character_info(sid)
+            .map(|character| character.gold >= POTION_PURCHASE_PRICE)
+            .unwrap_or(false);
+
+        if valid_request
+            && enough_gold
+            && world.check_weight(sid, item_id.unwrap(), POTION_PURCHASE_COUNT)
+            && world.gold_lose(sid, POTION_PURCHASE_PRICE)
+        {
+            let item_id = item_id.unwrap();
+            if world.give_item(sid, item_id, POTION_PURCHASE_COUNT) {
+                session
+                    .send_packet(&build_potion_purchase_result(requested_state, 1))
+                    .await?;
+                debug!(
+                    "[{}] Manes potion purchased sid={} potion_id={} item_id={} count={} price={}",
+                    session.addr(),
+                    sid,
+                    potion_id,
+                    item_id,
+                    POTION_PURCHASE_COUNT,
+                    POTION_PURCHASE_PRICE
+                );
+            } else {
+                world.gold_gain(sid, POTION_PURCHASE_PRICE);
+                session
+                    .send_packet(&build_potion_purchase_result(requested_state, 0))
+                    .await?;
+                warn!(
+                    "[{}] Manes potion purchase rolled back sid={} potion_id={} item_id={}",
+                    session.addr(),
+                    sid,
+                    potion_id,
+                    item_id
+                );
+            }
+        } else {
+            session
+                .send_packet(&build_potion_purchase_result(requested_state, 0))
+                .await?;
+            warn!(
+                "[{}] Manes potion purchase rejected sid={} state={} potion_id={} remaining={} enough_gold={}",
+                session.addr(),
+                sid,
+                requested_state,
+                potion_id,
+                reader.remaining(),
+                enough_gold
+            );
+        }
+        return Ok(());
+    }
 
     if category == CATEGORY_SKILL && operation == SKILL_COMPLETE {
         let requested_state = reader.read_u8().unwrap_or(SKILL_RESULT_FAILURE);
@@ -242,6 +330,13 @@ mod tests {
         let packet = build_skill_selection_result(6101);
         assert_eq!(packet.opcode, 0xD0);
         assert_eq!(packet.data, vec![0x06, 0x05, 0xD5, 0x17]);
+    }
+
+    #[test]
+    fn potion_purchase_result_matches_v2615_client_contract() {
+        let packet = build_potion_purchase_result(1, 1);
+        assert_eq!(packet.opcode, 0xD0);
+        assert_eq!(packet.data, vec![0x06, 0x02, 0x01, 0x01, 0x00]);
     }
 
     #[test]
