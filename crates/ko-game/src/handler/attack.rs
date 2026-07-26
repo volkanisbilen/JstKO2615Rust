@@ -2205,7 +2205,7 @@ pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
     if progress.leveled_up {
         world.send_to_session_owned(
             sid,
-            crate::handler::survival::build_skill_selection_open(),
+            crate::handler::survival::build_skill_selection_open(progress.level),
         );
         tracing::info!(
             sid,
