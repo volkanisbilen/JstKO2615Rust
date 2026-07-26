@@ -28,6 +28,9 @@ const CATEGORY_EVENT: u8 = 2;
 const EVENT_START: u8 = 1;
 const CATEGORY_SKILL: u8 = 6;
 const SKILL_OPEN: u8 = 1;
+const SKILL_COMPLETE: u8 = 5;
+const SKILL_RESULT_SUCCESS: u8 = 1;
+const SKILL_RESULT_FAILURE: u8 = 0;
 const SURVIVAL_SKILL_CHOICES: [u16; 3] = [6101, 6001, 5901];
 pub const REGISTRATION_DURATION_SECONDS: u16 = 600;
 pub const EVENT_DURATION_SECONDS: u16 = 1_200;
@@ -96,6 +99,20 @@ pub fn build_skill_selection_open() -> Packet {
     pkt
 }
 
+/// Confirm or reject a v2615 Manes skill selection.
+///
+/// Verified C2S/S2C contract: `D0 06 05 u8 result u16 skill_id`. The client
+/// keeps submitting while no response arrives, so every syntactically valid
+/// request must receive exactly one result packet.
+pub fn build_skill_selection_result(result: u8, skill_id: u16) -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_SKILL);
+    pkt.write_u8(SKILL_COMPLETE);
+    pkt.write_u8(result);
+    pkt.write_u16(skill_id);
+    pkt
+}
+
 pub fn broadcast_registration_status(world: &crate::world::WorldState, elapsed_seconds: u32) {
     let remaining = REGISTRATION_DURATION_SECONDS
         .saturating_sub(elapsed_seconds.min(u16::MAX as u32) as u16);
@@ -117,6 +134,42 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let mut reader = PacketReader::new(&pkt.data);
     let category = reader.read_u8().unwrap_or(0);
     let operation = reader.read_u8().unwrap_or(0);
+
+    if category == CATEGORY_SKILL && operation == SKILL_COMPLETE {
+        let requested_state = reader.read_u8().unwrap_or(SKILL_RESULT_FAILURE);
+        let skill_id = reader.read_u16().unwrap_or(0);
+        let valid = requested_state != SKILL_RESULT_FAILURE
+            && reader.remaining() == 0
+            && SURVIVAL_SKILL_CHOICES.contains(&skill_id);
+        let result = if valid {
+            SKILL_RESULT_SUCCESS
+        } else {
+            SKILL_RESULT_FAILURE
+        };
+
+        session
+            .send_packet(&build_skill_selection_result(result, skill_id))
+            .await?;
+
+        if valid {
+            debug!(
+                "[{}] Manes skill selection completed sid={} skill_id={}",
+                session.addr(),
+                session.session_id(),
+                skill_id
+            );
+        } else {
+            warn!(
+                "[{}] Manes skill selection rejected sid={} state={} skill_id={} remaining={}",
+                session.addr(),
+                session.session_id(),
+                requested_state,
+                skill_id,
+                reader.remaining()
+            );
+        }
+        return Ok(());
+    }
 
     if category != CATEGORY_REGISTRATION || operation != REG_APPLY {
         debug!(
@@ -181,6 +234,13 @@ mod tests {
             packet.data,
             vec![0x02, 0x01, 0x03, 0xB0, 0x04, 0x00, 0x00, 0xC8, 0x00, 0x01]
         );
+    }
+
+    #[test]
+    fn skill_selection_result_matches_v2615_client_contract() {
+        let packet = build_skill_selection_result(1, 6101);
+        assert_eq!(packet.opcode, 0xD0);
+        assert_eq!(packet.data, vec![0x06, 0x05, 0x01, 0xD5, 0x17]);
     }
 
     #[test]
