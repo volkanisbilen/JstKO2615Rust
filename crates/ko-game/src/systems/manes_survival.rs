@@ -74,6 +74,7 @@ pub struct ManesSurvivalManager {
     active: AtomicBool,
     participants: DashSet<SessionId>,
     progress: DashMap<SessionId, ManesProgress>,
+    unlocked_magic: DashMap<SessionId, DashSet<u32>>,
 }
 
 impl Default for ManesSurvivalManager {
@@ -84,6 +85,7 @@ impl Default for ManesSurvivalManager {
             active: AtomicBool::new(false),
             participants: DashSet::new(),
             progress: DashMap::new(),
+            unlocked_magic: DashMap::new(),
         }
     }
 }
@@ -147,6 +149,31 @@ impl ManesSurvivalManager {
         self.progress.get(&session_id).map(|entry| *entry.value())
     }
 
+    /// Convert a MANES_MAGIC.tbl row into the real MAGIC table identifier.
+    /// Rows 5901..5907, 6001..6008 and 6101..6108 map consecutively to
+    /// 491330..491352 in the v2615 client tables.
+    pub fn manes_magic_id(row_id: u16) -> Option<u32> {
+        match row_id {
+            5901..=5907 => Some(491_330 + u32::from(row_id - 5901)),
+            6001..=6008 => Some(491_337 + u32::from(row_id - 6001)),
+            6101..=6108 => Some(491_345 + u32::from(row_id - 6101)),
+            _ => None,
+        }
+    }
+
+    pub fn unlock_magic(&self, session_id: SessionId, row_id: u16) -> Option<u32> {
+        let magic_id = Self::manes_magic_id(row_id)?;
+        self.unlocked_magic.entry(session_id).or_default().insert(magic_id);
+        Some(magic_id)
+    }
+
+    pub fn has_unlocked_magic(&self, session_id: SessionId, magic_id: u32) -> bool {
+        self.unlocked_magic
+            .get(&session_id)
+            .map(|skills| skills.contains(&magic_id))
+            .unwrap_or(false)
+    }
+
     pub fn reset_progress(&self, session_id: SessionId) -> ManesProgress {
         let progress = ManesProgress {
             level: 1,
@@ -155,6 +182,7 @@ impl ManesSurvivalManager {
             leveled_up: false,
         };
         self.progress.insert(session_id, progress);
+        self.unlocked_magic.remove(&session_id);
         progress
     }
 
@@ -386,5 +414,6 @@ impl ManesSurvivalManager {
         self.registration_open.store(false, Ordering::Release);
         self.participants.clear();
         self.progress.clear();
+        self.unlocked_magic.clear();
     }
 }
