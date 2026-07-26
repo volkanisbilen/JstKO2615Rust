@@ -10,8 +10,9 @@
 //! - C2S D0 06 02 u8 list_type u16 manes_magic_id: submit a selection
 //!   (`list_type=1` skill, `list_type=2` potion)
 //! - S2C D0 06 02 u8 list_type i16 result: complete that selection (`result=1`)
+//! - S2C D0 06 04 u8 count [u16 skill_id]: refresh only the skill list
 //! - C2S D0 06 05 u8 state [u16 skill_id when state != 2]: complete selection
-//! - S2C D0 06 05 u16 skill_id: accept selection and close the choice UI
+//! - S2C D0 06 05 i16 result: accept selection and close the choice UI
 //!
 //! The similarly shaped 0xD3 handler belongs to the Ronark-war UI and must not
 //! be used for Manes Survival registration.
@@ -34,12 +35,12 @@ const EVENT_START: u8 = 1;
 const CATEGORY_SKILL: u8 = 6;
 const SKILL_OPEN: u8 = 1;
 const SELECTION_SUBMIT: u8 = 2;
+const SKILL_UPDATE: u8 = 4;
 const SKILL_COMPLETE: u8 = 5;
 const SKILL_RESULT_FAILURE: u8 = 0;
 const SELECTION_LIST_SKILL: u8 = 1;
 const SELECTION_LIST_POTION: u8 = 2;
-const SURVIVAL_SKILL_BRANCHES: [u16; 3] = [6100, 6000, 5900];
-const SURVIVAL_SKILL_MAX_TIER: u16 = 5;
+const SURVIVAL_SKILL_BRANCHES: [(u16, u16); 3] = [(6100, 8), (6000, 8), (5900, 7)];
 const SURVIVAL_POTION_CHOICES: [u16; 2] = [6201, 6301];
 const POTION_PURCHASE_COUNT: u16 = 10;
 const POTION_PURCHASE_PRICE: u32 = 3_000;
@@ -99,12 +100,8 @@ pub fn build_event_start(
 /// choice UI. Names, descriptions, and icons are client table data and are not
 /// part of this packet.
 pub fn skill_choices_for_level(survival_level: u8) -> [u16; 3] {
-    // MANES_MAGIC.tbl contains five upgrade rows per branch (xx01..xx05).
-    // Survival levels continue to 30, but skill progression reaches its final
-    // tier at level 5; sending xx06+ makes the client fall back visually to
-    // xx05 while the server rejects the submitted ID.
-    let tier = u16::from(survival_level.max(1)).min(SURVIVAL_SKILL_MAX_TIER);
-    SURVIVAL_SKILL_BRANCHES.map(|branch| branch + tier)
+    let tier = u16::from(survival_level.max(1));
+    SURVIVAL_SKILL_BRANCHES.map(|(branch, max_tier)| branch + tier.min(max_tier))
 }
 
 pub fn build_skill_selection_open(survival_level: u8) -> Packet {
@@ -116,34 +113,48 @@ pub fn build_skill_selection_open(survival_level: u8) -> Packet {
     for skill_id in skill_choices {
         pkt.write_u16(skill_id);
     }
-    // The potion selector is required on the first level-up only. Re-sending
-    // it on every later level rebuilds the client's temporary HP/MP slots and
-    // makes already purchased potions disappear from the event quick bar even
-    // though the real inventory stacks still exist.
-    if survival_level <= 2 {
-        pkt.write_u8(SURVIVAL_POTION_CHOICES.len() as u8);
-        for potion_id in SURVIVAL_POTION_CHOICES {
-            pkt.write_u16(potion_id);
-        }
-    } else {
-        pkt.write_u8(0);
+    pkt.write_u8(SURVIVAL_POTION_CHOICES.len() as u8);
+    for potion_id in SURVIVAL_POTION_CHOICES {
+        pkt.write_u16(potion_id);
     }
     pkt
 }
 
+/// Refresh only the level-dependent Manes skill choices.
+///
+/// The unpacked v2615 client routes operation 4 to the skill-list updater.
+/// Unlike operation 1, it does not rebuild the potion selector or clear the
+/// temporary HP/MP quick slots.
+pub fn build_skill_selection_update(survival_level: u8) -> Packet {
+    let skill_choices = skill_choices_for_level(survival_level);
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_SKILL);
+    pkt.write_u8(SKILL_UPDATE);
+    pkt.write_u8(skill_choices.len() as u8);
+    for skill_id in skill_choices {
+        pkt.write_u16(skill_id);
+    }
+    pkt
+}
+
+pub fn build_skill_selection_for_level(survival_level: u8) -> Packet {
+    if survival_level <= 2 {
+        build_skill_selection_open(survival_level)
+    } else {
+        build_skill_selection_update(survival_level)
+    }
+}
+
 /// Confirm a v2615 Manes skill selection.
 ///
-/// The request and response are deliberately asymmetric:
-/// - C2S: `D0 06 05 u8 state u16 skill_id`
-/// - S2C: `D0 06 05 u16 skill_id`
-///
-/// `sub_714AB0`, operation 5, reads the response ID immediately after the
-/// operation byte and then closes the selection UI via `sub_75C390`.
-pub fn build_skill_selection_result(skill_id: u16) -> Packet {
+/// `sub_714AB0`, operation 5, reads a signed 16-bit result code. Returning a
+/// MANES_MAGIC row ID here is interpreted as an error and leaves Complete in a
+/// retry loop.
+pub fn build_skill_selection_result(result: i16) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_SKILL);
     pkt.write_u8(SKILL_COMPLETE);
-    pkt.write_u16(skill_id);
+    pkt.write_u16(result as u16);
     pkt
 }
 
@@ -207,14 +218,8 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                 ))
                 .await?;
             if valid {
-                // Operation 2 commits the selected MANES_MAGIC row; operation
-                // 5 activates it and closes the choice UI. The v2615 client
-                // does not send a separate 06/05 request in this flow.
-                session
-                    .send_packet(&build_skill_selection_result(manes_magic_id))
-                    .await?;
                 debug!(
-                    "[{}] Manes skill list selection accepted and activated sid={} manes_magic_id={}",
+                    "[{}] Manes skill list selection accepted sid={} manes_magic_id={}",
                     session.addr(),
                     session.session_id(),
                     manes_magic_id
@@ -310,7 +315,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             && skill_choices_for_level(survival_level).contains(&skill_id);
         if valid {
             session
-                .send_packet(&build_skill_selection_result(skill_id))
+                .send_packet(&build_skill_selection_result(1))
                 .await?;
             debug!(
                 "[{}] Manes skill selection completed sid={} skill_id={}",
@@ -398,9 +403,9 @@ mod tests {
 
     #[test]
     fn skill_selection_result_matches_v2615_client_contract() {
-        let packet = build_skill_selection_result(6101);
+        let packet = build_skill_selection_result(1);
         assert_eq!(packet.opcode, 0xD0);
-        assert_eq!(packet.data, vec![0x06, 0x05, 0xD5, 0x17]);
+        assert_eq!(packet.data, vec![0x06, 0x05, 0x01, 0x00]);
     }
 
     #[test]
@@ -431,11 +436,11 @@ mod tests {
     }
 
     #[test]
-    fn later_skill_selection_does_not_reset_potion_slots() {
-        let packet = build_skill_selection_open(3);
+    fn later_skill_selection_uses_update_operation() {
+        let packet = build_skill_selection_for_level(3);
         assert_eq!(
             packet.data,
-            vec![0x06, 0x01, 0x03, 0xD7, 0x17, 0x73, 0x17, 0x0F, 0x17, 0x00]
+            vec![0x06, 0x04, 0x03, 0xD7, 0x17, 0x73, 0x17, 0x0F, 0x17]
         );
     }
 
@@ -445,7 +450,8 @@ mod tests {
         assert_eq!(skill_choices_for_level(2), [6102, 6002, 5902]);
         assert_eq!(skill_choices_for_level(4), [6104, 6004, 5904]);
         assert_eq!(skill_choices_for_level(5), [6105, 6005, 5905]);
-        assert_eq!(skill_choices_for_level(6), [6105, 6005, 5905]);
-        assert_eq!(skill_choices_for_level(30), [6105, 6005, 5905]);
+        assert_eq!(skill_choices_for_level(7), [6107, 6007, 5907]);
+        assert_eq!(skill_choices_for_level(8), [6108, 6008, 5907]);
+        assert_eq!(skill_choices_for_level(30), [6108, 6008, 5907]);
     }
 }
