@@ -39,6 +39,7 @@ const SKILL_RESULT_FAILURE: u8 = 0;
 const SELECTION_LIST_SKILL: u8 = 1;
 const SELECTION_LIST_POTION: u8 = 2;
 const SURVIVAL_SKILL_BRANCHES: [u16; 3] = [6100, 6000, 5900];
+const SURVIVAL_SKILL_MAX_TIER: u16 = 5;
 const SURVIVAL_POTION_CHOICES: [u16; 2] = [6201, 6301];
 const POTION_PURCHASE_COUNT: u16 = 10;
 const POTION_PURCHASE_PRICE: u32 = 3_000;
@@ -98,7 +99,11 @@ pub fn build_event_start(
 /// choice UI. Names, descriptions, and icons are client table data and are not
 /// part of this packet.
 pub fn skill_choices_for_level(survival_level: u8) -> [u16; 3] {
-    let tier = survival_level.clamp(1, crate::systems::manes_survival::MANES_MAX_LEVEL) as u16;
+    // MANES_MAGIC.tbl contains five upgrade rows per branch (xx01..xx05).
+    // Survival levels continue to 30, but skill progression reaches its final
+    // tier at level 5; sending xx06+ makes the client fall back visually to
+    // xx05 while the server rejects the submitted ID.
+    let tier = u16::from(survival_level.max(1)).min(SURVIVAL_SKILL_MAX_TIER);
     SURVIVAL_SKILL_BRANCHES.map(|branch| branch + tier)
 }
 
@@ -111,12 +116,17 @@ pub fn build_skill_selection_open(survival_level: u8) -> Packet {
     for skill_id in skill_choices {
         pkt.write_u16(skill_id);
     }
-    // The second counted list populates the small HP/MP potion selector below
-    // the main skill window. These are the first-tier Manes HP and MP potion
-    // rows from the v2615 MANES_MAGIC.tbl.
-    pkt.write_u8(SURVIVAL_POTION_CHOICES.len() as u8);
-    for potion_id in SURVIVAL_POTION_CHOICES {
-        pkt.write_u16(potion_id);
+    // The potion selector is required on the first level-up only. Re-sending
+    // it on every later level rebuilds the client's temporary HP/MP slots and
+    // makes already purchased potions disappear from the event quick bar even
+    // though the real inventory stacks still exist.
+    if survival_level <= 2 {
+        pkt.write_u8(SURVIVAL_POTION_CHOICES.len() as u8);
+        for potion_id in SURVIVAL_POTION_CHOICES {
+            pkt.write_u16(potion_id);
+        }
+    } else {
+        pkt.write_u8(0);
     }
     pkt
 }
@@ -197,8 +207,14 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                 ))
                 .await?;
             if valid {
+                // Operation 2 commits the selected MANES_MAGIC row; operation
+                // 5 activates it and closes the choice UI. The v2615 client
+                // does not send a separate 06/05 request in this flow.
+                session
+                    .send_packet(&build_skill_selection_result(manes_magic_id))
+                    .await?;
                 debug!(
-                    "[{}] Manes skill list selection accepted sid={} manes_magic_id={}",
+                    "[{}] Manes skill list selection accepted and activated sid={} manes_magic_id={}",
                     session.addr(),
                     session.session_id(),
                     manes_magic_id
@@ -415,10 +431,21 @@ mod tests {
     }
 
     #[test]
+    fn later_skill_selection_does_not_reset_potion_slots() {
+        let packet = build_skill_selection_open(3);
+        assert_eq!(
+            packet.data,
+            vec![0x06, 0x01, 0x03, 0xD7, 0x17, 0x73, 0x17, 0x0F, 0x17, 0x00]
+        );
+    }
+
+    #[test]
     fn skill_choices_advance_with_survival_level() {
         assert_eq!(skill_choices_for_level(1), [6101, 6001, 5901]);
         assert_eq!(skill_choices_for_level(2), [6102, 6002, 5902]);
         assert_eq!(skill_choices_for_level(4), [6104, 6004, 5904]);
-        assert_eq!(skill_choices_for_level(30), [6130, 6030, 5930]);
+        assert_eq!(skill_choices_for_level(5), [6105, 6005, 5905]);
+        assert_eq!(skill_choices_for_level(6), [6105, 6005, 5905]);
+        assert_eq!(skill_choices_for_level(30), [6105, 6005, 5905]);
     }
 }
