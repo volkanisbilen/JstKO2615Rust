@@ -218,11 +218,17 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                 ))
                 .await?;
             if valid {
+                let magic_id = session
+                    .world()
+                    .manes_survival_manager
+                    .unlock_magic(session.session_id(), manes_magic_id)
+                    .expect("validated MANES_MAGIC row must map to MAGIC");
                 debug!(
-                    "[{}] Manes skill list selection accepted sid={} manes_magic_id={}",
+                    "[{}] Manes skill list selection accepted sid={} manes_magic_id={} magic_id={}",
                     session.addr(),
                     session.session_id(),
-                    manes_magic_id
+                    manes_magic_id,
+                    magic_id
                 );
             } else {
                 warn!(
