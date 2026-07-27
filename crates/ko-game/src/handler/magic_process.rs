@@ -531,7 +531,14 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     {
         let s_skill = skill.skill.unwrap_or(0);
         let iclass = s_skill / 10;
-        if s_skill != 0 && iclass != 0 && !check_skill_class(iclass, caster.class) {
+        let is_unlocked_manes_magic = world
+            .manes_survival_manager
+            .has_unlocked_magic(sid, skill_id);
+        if s_skill != 0
+            && iclass != 0
+            && !check_skill_class(iclass, caster.class)
+            && !is_unlocked_manes_magic
+        {
             let fail_pkt = instance.build_fail_packet();
             world.send_to_session_owned(sid, fail_pkt);
             return Ok(());
