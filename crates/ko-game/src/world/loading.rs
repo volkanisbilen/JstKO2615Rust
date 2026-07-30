@@ -135,7 +135,13 @@ impl WorldState {
         self.load_npcs_and_monsters(pool).await?;
 
         // ─── Manes Survival Runtime Configuration ──────────────────────────────
-        self.load_manes_survival(pool).await?;
+        if let Err(e) = self.load_manes_survival(pool).await {
+            tracing::warn!(
+                zone = 96,
+                error = %e,
+                "Manes Survival configuration failed to load; continuing without it"
+            );
+        }
 
         // ─── Knights (Clan) Loading ─────────────────────────────────────────────
         self.load_knights(pool).await?;
