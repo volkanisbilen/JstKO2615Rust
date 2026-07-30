@@ -1754,6 +1754,10 @@ async fn execute_type1_aoe(
     }
 
     // ── AOE NPC targets (event_room filtered) ────────────────────────
+    // Defer Manes level/vitals packets until the single AOE MAGIC_EFFECTING
+    // result has completed. Sending them inside the per-target loop interleaves
+    // WIZ_LEVEL_CHANGE/HP/MP with one unfinished area-skill transaction.
+    let mut manes_progress_changed = false;
     let nearby_npcs = world.get_nearby_npc_ids(
         caster_pos.zone_id,
         caster_pos.region_x,
@@ -1841,9 +1845,9 @@ async fn execute_type1_aoe(
             hp_pkt.write_u32(0);
             hp_pkt.write_u8(0);
             world.send_to_session_owned(caster_sid, hp_pkt);
-        if new_hp <= 0 {
-            super::attack::flush_manes_progress(world, caster_sid);
-        }
+            if new_hp <= 0 && super::attack::is_manes_survival_npc(&npc) {
+                manes_progress_changed = true;
+            }
         }
     }
 
@@ -1854,9 +1858,15 @@ async fn execute_type1_aoe(
         0
     };
 
-    // Broadcast effect packet once for the AOE
+    // Broadcast the one effect packet that completes the AOE transaction.
     let pkt = instance.build_packet(MAGIC_EFFECTING);
     broadcast_to_caster_region(world, caster_sid, &pkt);
+
+    // All killed targets have already contributed to the authoritative Manes
+    // progress. Synchronize the resulting level/vitals once, after 0x31.
+    if manes_progress_changed {
+        super::attack::flush_manes_progress(world, caster_sid);
+    }
 
     true
 }
@@ -3173,6 +3183,9 @@ async fn execute_type3(
         // ── AOE NPC damage ──────────────────────────────────────────
         // includes NPCs in AOE targeting. We iterate nearby NPCs and apply damage.
         // (only player-to-player), so only MORAL_AREA_ENEMY hits NPCs.
+        // Manes progress is accumulated per kill but emitted only after the
+        // single area MAGIC_EFFECTING result below.
+        let mut manes_progress_changed = false;
         if moral == MORAL_AREA_ENEMY {
             let nearby_npcs = world.get_nearby_npc_ids(
                 caster_pos.zone_id,
@@ -3250,16 +3263,20 @@ async fn execute_type3(
                     hp_pkt.write_u32(0);
                     hp_pkt.write_u8(0);
                     world.send_to_session_owned(caster_sid, hp_pkt);
-        if new_hp <= 0 {
-            super::attack::flush_manes_progress(world, caster_sid);
-        }
+                    if new_hp <= 0 && super::attack::is_manes_survival_npc(&npc) {
+                        manes_progress_changed = true;
+                    }
                 }
             }
         }
 
-        // Broadcast the effect to region
+        // Complete the AOE transaction before sending any Manes level/vitals
+        // packets. This keeps multi-target results contiguous for the v2615 client.
         let pkt = instance.build_packet(MAGIC_EFFECTING);
         broadcast_to_caster_region(world, caster_sid, &pkt);
+        if manes_progress_changed {
+            super::attack::flush_manes_progress(world, caster_sid);
+        }
         return true;
     }
 
