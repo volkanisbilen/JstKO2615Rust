@@ -1396,6 +1396,9 @@ async fn npc_fighting(
         }
     }
 
+    final_damage = world
+        .manes_survival_manager
+        .reduce_incoming_damage(target_id, final_damage);
     let new_hp = (target.hp - final_damage).max(0);
     world.update_character_hp(target_id, new_hp);
 
@@ -3240,6 +3243,9 @@ async fn npc_apply_magic_effect(
         }
     }
 
+    final_damage = world
+        .manes_survival_manager
+        .reduce_incoming_damage(target_sid, final_damage);
     let new_hp = (target.hp - final_damage).max(0);
     world.update_character_hp(target_sid, new_hp);
 

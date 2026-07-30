@@ -35,17 +35,10 @@ const EVENT_START: u8 = 1;
 const CATEGORY_SKILL: u8 = 6;
 const SKILL_OPEN: u8 = 1;
 const SELECTION_SUBMIT: u8 = 2;
-const SKILL_UPDATE: u8 = 4;
 const SKILL_COMPLETE: u8 = 5;
 const SKILL_RESULT_FAILURE: u8 = 0;
 const SELECTION_LIST_SKILL: u8 = 1;
 const SELECTION_LIST_POTION: u8 = 2;
-const SURVIVAL_SKILL_BRANCHES: [(u16, u16); 3] = [(6100, 8), (6000, 8), (5900, 7)];
-const SURVIVAL_POTION_CHOICES: [u16; 2] = [6201, 6301];
-const POTION_PURCHASE_COUNT: u16 = 10;
-const POTION_PURCHASE_PRICE: u32 = 3_000;
-const MANES_HP_POTION_ITEM: u32 = 978_023_000;
-const MANES_MP_POTION_ITEM: u32 = 978_024_000;
 pub const REGISTRATION_DURATION_SECONDS: u16 = 600;
 pub const EVENT_DURATION_SECONDS: u16 = 1_200;
 
@@ -99,50 +92,22 @@ pub fn build_event_start(
 /// `sub_710140`, then calls `sub_5037D0 -> sub_75C520` to populate and show the
 /// choice UI. Names, descriptions, and icons are client table data and are not
 /// part of this packet.
-pub fn skill_choices_for_level(survival_level: u8) -> [u16; 3] {
-    let tier = u16::from(survival_level.max(1));
-    SURVIVAL_SKILL_BRANCHES.map(|(branch, max_tier)| branch + tier.min(max_tier))
-}
-
-pub fn build_skill_selection_open(survival_level: u8) -> Packet {
-    let skill_choices = skill_choices_for_level(survival_level);
+pub fn build_skill_selection_open(
+    skill_choices: &[u16],
+    potion_choices: &[u16],
+) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_SKILL);
     pkt.write_u8(SKILL_OPEN);
     pkt.write_u8(skill_choices.len() as u8);
     for skill_id in skill_choices {
-        pkt.write_u16(skill_id);
+        pkt.write_u16(*skill_id);
     }
-    pkt.write_u8(SURVIVAL_POTION_CHOICES.len() as u8);
-    for potion_id in SURVIVAL_POTION_CHOICES {
-        pkt.write_u16(potion_id);
-    }
-    pkt
-}
-
-/// Refresh only the level-dependent Manes skill choices.
-///
-/// The unpacked v2615 client routes operation 4 to the skill-list updater.
-/// Unlike operation 1, it does not rebuild the potion selector or clear the
-/// temporary HP/MP quick slots.
-pub fn build_skill_selection_update(survival_level: u8) -> Packet {
-    let skill_choices = skill_choices_for_level(survival_level);
-    let mut pkt = Packet::new(WIZ_SURVIVAL);
-    pkt.write_u8(CATEGORY_SKILL);
-    pkt.write_u8(SKILL_UPDATE);
-    pkt.write_u8(skill_choices.len() as u8);
-    for skill_id in skill_choices {
-        pkt.write_u16(skill_id);
+    pkt.write_u8(potion_choices.len() as u8);
+    for potion_id in potion_choices {
+        pkt.write_u16(*potion_id);
     }
     pkt
-}
-
-pub fn build_skill_selection_for_level(survival_level: u8) -> Packet {
-    if survival_level <= 2 {
-        build_skill_selection_open(survival_level)
-    } else {
-        build_skill_selection_update(survival_level)
-    }
 }
 
 /// Confirm a v2615 Manes skill selection.
@@ -203,14 +168,11 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         // The v2615 client commits the selected MANES_MAGIC row to its skill
         // bar only after receiving `D0 06 02 01 01 00`.
         if list_type == SELECTION_LIST_SKILL {
-            let survival_level = session
-                .world()
-                .manes_survival_manager
-                .progress(session.session_id())
-                .map(|progress| progress.level)
-                .unwrap_or(1);
-            let offered_choices = skill_choices_for_level(survival_level);
-            let valid = no_trailing_data && offered_choices.contains(&manes_magic_id);
+            let valid = no_trailing_data
+                && session
+                    .world()
+                    .manes_survival_manager
+                    .offered_skill(session.session_id(), manes_magic_id);
             session
                 .send_packet(&build_selection_submit_result(
                     list_type,
@@ -243,28 +205,29 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             return Ok(());
         }
 
-        let item_id = match manes_magic_id {
-            6201 => Some(MANES_HP_POTION_ITEM),
-            6301 => Some(MANES_MP_POTION_ITEM),
-            _ => None,
-        };
         let sid = session.session_id();
         let world = session.world().clone();
+        let purchase = world
+            .manes_survival_manager
+            .potion_purchase(manes_magic_id);
         let valid_request = list_type == SELECTION_LIST_POTION
             && no_trailing_data
-            && item_id.is_some();
+            && world
+                .manes_survival_manager
+                .offered_potion(sid, manes_magic_id)
+            && purchase.is_some();
+        let (item_id, item_count, price) = purchase.unwrap_or_default();
         let enough_gold = world
             .get_character_info(sid)
-            .map(|character| character.gold >= POTION_PURCHASE_PRICE)
+            .map(|character| character.gold >= price)
             .unwrap_or(false);
 
         if valid_request
             && enough_gold
-            && world.check_weight(sid, item_id.unwrap(), POTION_PURCHASE_COUNT)
-            && world.gold_lose(sid, POTION_PURCHASE_PRICE)
+            && world.check_weight(sid, item_id, item_count)
+            && world.gold_lose(sid, price)
         {
-            let item_id = item_id.unwrap();
-            if world.give_item(sid, item_id, POTION_PURCHASE_COUNT) {
+            if world.give_item(sid, item_id, item_count) {
                 session
                     .send_packet(&build_selection_submit_result(list_type, 1))
                     .await?;
@@ -274,11 +237,11 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                     sid,
                     manes_magic_id,
                     item_id,
-                    POTION_PURCHASE_COUNT,
-                    POTION_PURCHASE_PRICE
+                    item_count,
+                    price
                 );
             } else {
-                world.gold_gain(sid, POTION_PURCHASE_PRICE);
+                world.gold_gain(sid, price);
                 session
                     .send_packet(&build_selection_submit_result(list_type, 0))
                     .await?;
@@ -310,15 +273,12 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     if category == CATEGORY_SKILL && operation == SKILL_COMPLETE {
         let requested_state = reader.read_u8().unwrap_or(SKILL_RESULT_FAILURE);
         let skill_id = reader.read_u16().unwrap_or(0);
-        let survival_level = session
-            .world()
-            .manes_survival_manager
-            .progress(session.session_id())
-            .map(|progress| progress.level)
-            .unwrap_or(1);
         let valid = requested_state != SKILL_RESULT_FAILURE
             && reader.remaining() == 0
-            && skill_choices_for_level(survival_level).contains(&skill_id);
+            && session
+                .world()
+                .manes_survival_manager
+                .offered_skill(session.session_id(), skill_id);
         if valid {
             session
                 .send_packet(&build_skill_selection_result(1))
@@ -430,34 +390,21 @@ mod tests {
 
     #[test]
     fn skill_selection_open_matches_v2615_client_contract() {
-        let packet = build_skill_selection_open(1);
+        let packet = build_skill_selection_open(&[301, 401, 5901], &[6201, 6501]);
         assert_eq!(packet.opcode, 0xD0);
         assert_eq!(
             packet.data,
             vec![
-                0x06, 0x01, 0x03, 0xD5, 0x17, 0x71, 0x17, 0x0D, 0x17, 0x02, 0x39, 0x18, 0x9D,
-                0x18
+                0x06, 0x01, 0x03, 0x2D, 0x01, 0x91, 0x01, 0x0D, 0x17, 0x02, 0x39, 0x18, 0x65,
+                0x19
             ]
         );
     }
 
     #[test]
-    fn later_skill_selection_uses_update_operation() {
-        let packet = build_skill_selection_for_level(3);
-        assert_eq!(
-            packet.data,
-            vec![0x06, 0x04, 0x03, 0xD7, 0x17, 0x73, 0x17, 0x0F, 0x17]
-        );
-    }
-
-    #[test]
-    fn skill_choices_advance_with_survival_level() {
-        assert_eq!(skill_choices_for_level(1), [6101, 6001, 5901]);
-        assert_eq!(skill_choices_for_level(2), [6102, 6002, 5902]);
-        assert_eq!(skill_choices_for_level(4), [6104, 6004, 5904]);
-        assert_eq!(skill_choices_for_level(5), [6105, 6005, 5905]);
-        assert_eq!(skill_choices_for_level(7), [6107, 6007, 5907]);
-        assert_eq!(skill_choices_for_level(8), [6108, 6008, 5907]);
-        assert_eq!(skill_choices_for_level(30), [6108, 6008, 5907]);
+    fn every_level_open_contains_skill_and_potion_lists() {
+        let packet = build_skill_selection_open(&[302, 401, 6001], &[6401, 6701]);
+        assert_eq!(packet.data[0..3], [0x06, 0x01, 0x03]);
+        assert_eq!(packet.data[9], 0x02);
     }
 }
