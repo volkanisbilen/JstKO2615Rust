@@ -605,14 +605,11 @@ impl ManesSurvivalManager {
             world.despawn_room_npcs(zone_id, MANES_EVENT_ROOM);
         }
 
-        // Clean the live inventory before participant state is discarded.
-        // Offline users are covered by filtered save + login sanitisation.
-        let participant_ids: Vec<SessionId> = self
-            .participants
-            .iter()
-            .map(|entry| *entry.key())
-            .collect();
-        for session_id in participant_ids {
+        // Clean every live inventory before event state is discarded. A player
+        // may already have left the Manes zone or been removed from participants,
+        // but temporary HP/MP potions must still disappear immediately. Offline
+        // users remain covered by filtered save and login sanitisation.
+        for session_id in world.collect_session_ids() {
             self.cleanup_temporary_items_for_session(world, session_id);
         }
 
