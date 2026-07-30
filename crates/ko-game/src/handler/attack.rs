@@ -2104,7 +2104,8 @@ async fn handle_npc_attack(
             .progress(attacker_sid)
             .map(|state| state.level)
             .unwrap_or(1);
-        let scale_tenths = 150_i32 + level.saturating_sub(1) as i32 * 25;
+        let scale_tenths =
+            i32::from(crate::systems::manes_survival::attack_scale_per_mille(level));
         let scaled = ((damage as i32 * scale_tenths) / 1_000).max(1);
         let bonus = world
             .manes_survival_manager
@@ -2288,6 +2289,10 @@ pub(crate) fn sync_manes_vitals_and_level(
         sid,
         crate::systems::regen::build_mp_change_packet(max_mp, current_mp),
     );
+    // WIZ_LEVEL_CHANGE does not carry attack power. Refresh the verified
+    // WIZ_ITEM_MOVE stat contract as well so the ALT/character stat display
+    // advances with the same level scale used by server-side damage.
+    world.send_item_move_refresh(sid);
 
     tracing::info!(
         sid,
