@@ -162,7 +162,7 @@ pub use magic::{
     MagicRow, MagicType1Row, MagicType2Row, MagicType3Row, MagicType4Row, MagicType5Row,
     MagicType6Row, MagicType7Row, MagicType8Row, MagicType9Row,
 };
-pub use manes_survival::ManesSurvivalSpawnRow;
+pub use manes_survival::{ManesSurvivalMagicRow, ManesSurvivalSpawnRow};
 pub use mining::MiningFishingItemRow;
 pub use monster_event::{
     MonsterBossRandomStageRow, MonsterChallengeRow, MonsterChallengeSummonRow,
