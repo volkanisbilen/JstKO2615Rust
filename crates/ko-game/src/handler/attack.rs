@@ -2234,11 +2234,30 @@ pub(crate) fn sync_manes_vitals_and_level(
     let (max_hp, max_mp) =
         crate::systems::manes_survival::vitals_for_level(progress.level, hp_bonus);
 
+    // A progress refresh runs after every kill and again after a skill choice.
+    // Only a real max-vital transition (level-up or an HP bonus unlock) should
+    // refill the bars. Re-sending the same level/EXP state must preserve spent
+    // HP/MP; otherwise every kill and choice acts like an unintended full heal.
+    let Some(before_sync) = world.get_character_info(sid) else {
+        return;
+    };
+    let refill_vitals = before_sync.max_hp != max_hp || before_sync.max_mp != max_mp;
+    let current_hp = if refill_vitals {
+        max_hp
+    } else {
+        before_sync.hp.clamp(0, max_hp)
+    };
+    let current_mp = if refill_vitals {
+        max_mp
+    } else {
+        before_sync.mp.clamp(0, max_mp)
+    };
+
     world.update_character_stats(sid, |character| {
         character.max_hp = max_hp;
-        character.hp = max_hp;
+        character.hp = current_hp;
         character.max_mp = max_mp;
-        character.mp = max_mp;
+        character.mp = current_mp;
     });
 
     let Some(character) = world.get_character_info(sid) else {
@@ -2254,20 +2273,20 @@ pub(crate) fn sync_manes_vitals_and_level(
     level_packet.write_i64(i64::from(progress.max_exp));
     level_packet.write_i64(i64::from(progress.exp));
     level_packet.write_i16(max_hp);
-    level_packet.write_i16(max_hp);
+    level_packet.write_i16(current_hp);
     level_packet.write_i16(max_mp);
-    level_packet.write_i16(max_mp);
+    level_packet.write_i16(current_mp);
     level_packet.write_u32(equipped.max_weight);
     level_packet.write_u32(equipped.item_weight);
     world.send_to_session_owned(sid, level_packet);
 
     world.send_to_session_owned(
         sid,
-        crate::systems::regen::build_hp_change_packet(max_hp, max_hp),
+        crate::systems::regen::build_hp_change_packet(max_hp, current_hp),
     );
     world.send_to_session_owned(
         sid,
-        crate::systems::regen::build_mp_change_packet(max_mp, max_mp),
+        crate::systems::regen::build_mp_change_packet(max_mp, current_mp),
     );
 
     tracing::info!(
@@ -2277,7 +2296,10 @@ pub(crate) fn sync_manes_vitals_and_level(
         survival_max_exp = progress.max_exp,
         survival_score = crate::systems::manes_survival::score_for_level(progress.level),
         max_hp,
+        current_hp,
         max_mp,
+        current_mp,
+        refill_vitals,
         "Manes Survival vitals and HUD synchronized"
     );
 }
