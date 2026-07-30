@@ -327,7 +327,24 @@ impl WorldState {
         let total_ac =
             ((stats.total_ac as i32 * snap.ac_pct / 100) + snap.ac_amount - snap.ac_sour).max(0)
                 as u16;
-        let total_hit = (stats.total_hit as u32 * snap.attack_amount as u32 / 100) as u16;
+        let mut total_hit =
+            (stats.total_hit as u32 * snap.attack_amount as u32 / 100) as u16;
+        if let Some(position) = self.get_position(sid) {
+            if crate::systems::manes_survival::ZONES_MANES_SURVIVAL
+                .contains(&position.zone_id)
+            {
+                if let Some(progress) = self.manes_survival_manager.progress(sid) {
+                    total_hit = (u32::from(total_hit)
+                        * u32::from(
+                            crate::systems::manes_survival::attack_scale_per_mille(
+                                progress.level,
+                            ),
+                        )
+                        / 1_000)
+                        .clamp(1, u32::from(u16::MAX)) as u16;
+                }
+            }
+        }
 
         let res_bonus = stats.resistance_bonus as i32;
         let compute_res =
