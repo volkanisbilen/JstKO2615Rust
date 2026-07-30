@@ -226,6 +226,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                         session.world(),
                         session.session_id(),
                         progress,
+                        false,
                     );
                 }
                 debug!(
