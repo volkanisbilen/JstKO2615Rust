@@ -1337,9 +1337,6 @@ fn handle_player_attack(
         }
     }
 
-    damage = world
-        .manes_survival_manager
-        .reduce_incoming_damage(target_sid, damage);
     let new_hp = (target.hp - damage).max(0);
     world.update_character_hp(target_sid, new_hp);
 
@@ -2105,12 +2102,7 @@ async fn handle_npc_attack(
             .map(|state| state.level)
             .unwrap_or(1);
         let scale_tenths = 150_i32 + level.saturating_sub(1) as i32 * 25;
-        let scaled = ((damage as i32 * scale_tenths) / 1_000).max(1);
-        let bonus = world
-            .manes_survival_manager
-            .combat_bonuses(attacker_sid)
-            .attack_pct as i32;
-        (scaled * (100 + bonus) / 100).clamp(1, i16::MAX as i32) as i16
+        ((damage as i32 * scale_tenths) / 1_000).max(1) as i16
     } else {
         damage
     };
@@ -2211,13 +2203,9 @@ pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
         ),
     );
     if progress.leveled_up {
-        let offer = world.manes_survival_manager.create_offer(sid);
         world.send_to_session_owned(
             sid,
-            crate::handler::survival::build_skill_selection_open(
-                &offer.skills,
-                &offer.potions,
-            ),
+            crate::handler::survival::build_skill_selection_for_level(progress.level),
         );
         tracing::info!(
             sid,
@@ -2247,12 +2235,7 @@ pub(crate) fn scale_manes_magic_damage(
         .map(|state| state.level)
         .unwrap_or(1);
     let scale_tenths = 150_i32 + level.saturating_sub(1) as i32 * 25;
-    let scaled = ((damage as i32 * scale_tenths) / 1_000).max(1);
-    let bonus = world
-        .manes_survival_manager
-        .combat_bonuses(caster_sid)
-        .attack_pct as i32;
-    (scaled * (100 + bonus) / 100).clamp(1, i16::MAX as i32) as i16
+    ((damage as i32 * scale_tenths) / 1_000).max(1) as i16
 }
 
 pub(crate) fn broadcast_npc_death(

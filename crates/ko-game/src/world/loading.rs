@@ -191,19 +191,10 @@ impl WorldState {
 
     /// Load the validated zone-96 runtime spawn configuration.
     async fn load_manes_survival(&self, pool: &DbPool) -> anyhow::Result<()> {
-        let repository = ManesSurvivalRepository::new(pool);
-        let rows = repository.load_spawns().await?;
+        let rows = ManesSurvivalRepository::new(pool).load_spawns().await?;
         let count = rows.len();
         self.manes_survival_manager.set_spawns(rows)?;
-        let magic = repository.load_magic().await?;
-        let magic_count = magic.len();
-        self.manes_survival_manager.set_magic(magic)?;
-        tracing::info!(
-            spawns = count,
-            magic_rows = magic_count,
-            zone = 96,
-            "Manes Survival configuration loaded"
-        );
+        tracing::info!(spawns = count, zone = 96, "Manes Survival configuration loaded");
         Ok(())
     }
 

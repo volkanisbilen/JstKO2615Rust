@@ -7,8 +7,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dashmap::{DashMap, DashSet};
-use ko_db::models::{ManesSurvivalMagicRow, ManesSurvivalSpawnRow};
-use rand::seq::SliceRandom;
+use ko_db::models::ManesSurvivalSpawnRow;
 use parking_lot::RwLock;
 
 use crate::world::WorldState;
@@ -44,19 +43,6 @@ pub struct ManesProgress {
     pub leveled_up: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ManesOffer {
-    pub skills: Vec<u16>,
-    pub potions: Vec<u16>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ManesCombatBonuses {
-    pub hp: i16,
-    pub attack_pct: i16,
-    pub reduction_pct: i16,
-}
-
 pub fn required_exp_for_level(level: u8) -> u16 {
     if level >= MANES_MAX_LEVEL {
         0
@@ -84,28 +70,22 @@ pub fn monster_survival_exp(npc_sid: u16) -> u16 {
 
 pub struct ManesSurvivalManager {
     spawns: RwLock<Vec<ManesSurvivalSpawnRow>>,
-    magic: RwLock<Vec<ManesSurvivalMagicRow>>,
     registration_open: AtomicBool,
     active: AtomicBool,
     participants: DashSet<SessionId>,
     progress: DashMap<SessionId, ManesProgress>,
     unlocked_magic: DashMap<SessionId, DashSet<u32>>,
-    selected_rows: DashMap<SessionId, DashMap<u16, u16>>,
-    offers: DashMap<SessionId, ManesOffer>,
 }
 
 impl Default for ManesSurvivalManager {
     fn default() -> Self {
         Self {
             spawns: RwLock::new(Vec::new()),
-            magic: RwLock::new(Vec::new()),
             registration_open: AtomicBool::new(false),
             active: AtomicBool::new(false),
             participants: DashSet::new(),
             progress: DashMap::new(),
             unlocked_magic: DashMap::new(),
-            selected_rows: DashMap::new(),
-            offers: DashMap::new(),
         }
     }
 }
@@ -122,25 +102,6 @@ impl ManesSurvivalManager {
             anyhow::bail!("Manes Survival contains invalid spawn count or coordinates");
         }
         *self.spawns.write() = rows;
-        Ok(())
-    }
-
-    pub fn set_magic(&self, rows: Vec<ManesSurvivalMagicRow>) -> anyhow::Result<()> {
-        if rows.len() != 154 {
-            anyhow::bail!(
-                "Manes Survival requires all 154 MANES_MAGIC rows; loaded {}",
-                rows.len()
-            );
-        }
-        if rows.iter().any(|row| {
-            row.selection_id <= 0
-                || row.selection_id > u16::MAX as i64
-                || row.magic_id <= 0
-                || row.magic_id > u32::MAX as i64
-        }) {
-            anyhow::bail!("Manes Survival contains an invalid MANES_MAGIC identifier");
-        }
-        *self.magic.write() = rows;
         Ok(())
     }
 
@@ -188,114 +149,22 @@ impl ManesSurvivalManager {
         self.progress.get(&session_id).map(|entry| *entry.value())
     }
 
-    fn row(&self, selection_id: u16) -> Option<ManesSurvivalMagicRow> {
-        self.magic
-            .read()
-            .iter()
-            .find(|row| row.selection_id == i64::from(selection_id))
-            .cloned()
+    /// Convert a MANES_MAGIC.tbl row into the real MAGIC table identifier.
+    /// Rows 5901..5907, 6001..6008 and 6101..6108 map consecutively to
+    /// 491330..491352 in the v2615 client tables.
+    pub fn manes_magic_id(row_id: u16) -> Option<u32> {
+        match row_id {
+            5901..=5907 => Some(491_330 + u32::from(row_id - 5901)),
+            6001..=6008 => Some(491_337 + u32::from(row_id - 6001)),
+            6101..=6108 => Some(491_345 + u32::from(row_id - 6101)),
+            _ => None,
+        }
     }
 
     pub fn unlock_magic(&self, session_id: SessionId, row_id: u16) -> Option<u32> {
-        let row = self.row(row_id)?;
-        if !(1..=5).contains(&row.kind) {
-            return None;
-        }
-        let magic_id = row.magic_id as u32;
-        let branch = row_id / 100;
-        let selected = self.selected_rows.entry(session_id).or_default();
-        if let Some(previous) = selected.insert(branch, row_id) {
-            if let Some(previous_row) = self.row(previous) {
-                if let Some(skills) = self.unlocked_magic.get(&session_id) {
-                    skills.remove(&(previous_row.magic_id as u32));
-                }
-            }
-        }
-        self.unlocked_magic
-            .entry(session_id)
-            .or_default()
-            .insert(magic_id);
+        let magic_id = Self::manes_magic_id(row_id)?;
+        self.unlocked_magic.entry(session_id).or_default().insert(magic_id);
         Some(magic_id)
-    }
-
-    pub fn create_offer(&self, session_id: SessionId) -> ManesOffer {
-        let selected = self.selected_rows.get(&session_id);
-        let rows = self.magic.read();
-        let mut skills: Vec<u16> = rows
-            .iter()
-            .filter_map(|row| {
-                if !(1..=5).contains(&row.kind) {
-                    return None;
-                }
-                let id = u16::try_from(row.selection_id).ok()?;
-                let branch = id / 100;
-                let tier = id % 100;
-                let owned = selected
-                    .as_ref()
-                    .and_then(|branches| branches.get(&branch).map(|value| *value));
-                match owned {
-                    Some(current) if tier == current % 100 + 1 => Some(id),
-                    None if tier == 1 => Some(id),
-                    _ => None,
-                }
-            })
-            .collect();
-        let mut potions: Vec<u16> = rows
-            .iter()
-            .filter(|row| row.kind == 100)
-            .filter_map(|row| u16::try_from(row.selection_id).ok())
-            .collect();
-        let mut rng = rand::thread_rng();
-        skills.shuffle(&mut rng);
-        potions.shuffle(&mut rng);
-        skills.truncate(3);
-        potions.truncate(2);
-        let offer = ManesOffer { skills, potions };
-        self.offers.insert(session_id, offer.clone());
-        offer
-    }
-
-    pub fn offered_skill(&self, session_id: SessionId, selection_id: u16) -> bool {
-        self.offers
-            .get(&session_id)
-            .map(|offer| offer.skills.contains(&selection_id))
-            .unwrap_or(false)
-    }
-
-    pub fn offered_potion(&self, session_id: SessionId, selection_id: u16) -> bool {
-        self.offers
-            .get(&session_id)
-            .map(|offer| offer.potions.contains(&selection_id))
-            .unwrap_or(false)
-    }
-
-    pub fn potion_purchase(&self, selection_id: u16) -> Option<(u32, u16, u32)> {
-        let row = self.row(selection_id)?;
-        (row.kind == 100).then_some((
-            row.item_id as u32,
-            row.item_count as u16,
-            row.price as u32,
-        ))
-    }
-
-    pub fn combat_bonuses(&self, session_id: SessionId) -> ManesCombatBonuses {
-        let Some(selected) = self.selected_rows.get(&session_id) else {
-            return ManesCombatBonuses::default();
-        };
-        selected
-            .iter()
-            .filter_map(|entry| self.row(*entry.value()))
-            .fold(ManesCombatBonuses::default(), |mut bonuses, row| {
-                bonuses.hp = bonuses.hp.max(row.hp_bonus);
-                bonuses.attack_pct = bonuses.attack_pct.max(row.attack_bonus_pct);
-                bonuses.reduction_pct = bonuses.reduction_pct.max(row.reduction_pct);
-                bonuses
-            })
-    }
-
-    pub fn reduce_incoming_damage(&self, session_id: SessionId, damage: i16) -> i16 {
-        let reduction = self.combat_bonuses(session_id).reduction_pct.clamp(0, 100) as i32;
-        (damage as i32 * (100 - reduction) / 100).clamp(0, i16::MAX as i32) as i16
     }
 
     pub fn has_unlocked_magic(&self, session_id: SessionId, magic_id: u32) -> bool {
@@ -314,8 +183,6 @@ impl ManesSurvivalManager {
         };
         self.progress.insert(session_id, progress);
         self.unlocked_magic.remove(&session_id);
-        self.selected_rows.remove(&session_id);
-        self.offers.remove(&session_id);
         progress
     }
 
@@ -548,7 +415,5 @@ impl ManesSurvivalManager {
         self.participants.clear();
         self.progress.clear();
         self.unlocked_magic.clear();
-        self.selected_rows.clear();
-        self.offers.clear();
     }
 }
