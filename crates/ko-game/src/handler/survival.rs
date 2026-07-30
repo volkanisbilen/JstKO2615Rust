@@ -93,17 +93,44 @@ pub fn build_event_start(
 /// `sub_710140`, then calls `sub_5037D0 -> sub_75C520` to populate and show the
 /// choice UI. Names, descriptions, and icons are client table data and are not
 /// part of this packet.
-/// Return the score and one-based rank displayed by ALT / My Score.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManesRankEntry {
+    pub nation: u8,
+    pub class: u16,
+    pub clan_name: String,
+    pub character_name: String,
+    pub level: u16,
+    pub score: u32,
+}
+
+/// Build the v2615 ALT / My Score response.
 ///
-/// Operation 3 contains two consecutive 16-bit fields. Treating them as one
-/// u32 made the client decode the score as the first field and rank as zero,
-/// so it rejected the panel update.
-pub fn build_event_score(score: u16, rank: u16) -> Packet {
+/// Verified against the unpacked client:
+/// `sub_716A10 -> sub_7113D0`, category 2 operation 3, delegates to
+/// `CUISurvivalRank::sub_751500`. The client consumes:
+///
+/// `u8 result, u16 my_rank, u32 my_score, u8 count`
+///
+/// followed by at most 20 rows:
+///
+/// `u8 nation, u16 class, string clan_name, string character_name,
+///  u16 survival_level, u32 score`.
+pub fn build_event_score(my_score: u32, my_rank: u16, entries: &[ManesRankEntry]) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_EVENT);
     pkt.write_u8(EVENT_SCORE);
-    pkt.write_u16(score);
-    pkt.write_u16(rank);
+    pkt.write_u8(1);
+    pkt.write_u16(my_rank);
+    pkt.write_u32(my_score);
+    pkt.write_u8(entries.len().min(20) as u8);
+    for entry in entries.iter().take(20) {
+        pkt.write_u8(entry.nation);
+        pkt.write_u16(entry.class);
+        pkt.write_string(&entry.clan_name);
+        pkt.write_string(&entry.character_name);
+        pkt.write_u16(entry.level);
+        pkt.write_u32(entry.score);
+    }
     pkt
 }
 
@@ -175,25 +202,69 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let operation = reader.read_u8().unwrap_or(0);
 
     if category == CATEGORY_EVENT && operation == EVENT_SCORE {
-        let level = session
-            .world()
-            .manes_survival_manager
-            .progress(session.session_id())
-            .map(|progress| progress.level)
-            .unwrap_or(1);
-        let score = crate::systems::manes_survival::score_for_level(level);
-        let rank = session
-            .world()
-            .manes_survival_manager
-            .rank_for_session(session.session_id());
-        session.send_packet(&build_event_score(score, rank)).await?;
+        let world = session.world();
+        let manager = &world.manes_survival_manager;
+        let mut ranked: Vec<_> = manager
+            .participant_ids()
+            .into_iter()
+            .filter_map(|sid| {
+                let progress = manager.progress(sid)?;
+                let character = world.get_character_info(sid)?;
+                let score = u32::from(crate::systems::manes_survival::score_for_level(
+                    progress.level,
+                ));
+                let clan_name = world
+                    .get_knights(character.knights_id)
+                    .map(|clan| clan.name)
+                    .unwrap_or_default();
+                Some((
+                    sid,
+                    progress.level,
+                    score,
+                    ManesRankEntry {
+                        nation: character.nation,
+                        class: character.class,
+                        clan_name,
+                        character_name: character.name.clone(),
+                        level: u16::from(progress.level),
+                        score,
+                    },
+                ))
+            })
+            .collect();
+        ranked.sort_by(|left, right| {
+            right
+                .2
+                .cmp(&left.2)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+
+        let rank = ranked
+            .iter()
+            .position(|entry| entry.0 == session.session_id())
+            .map(|index| u16::try_from(index + 1).unwrap_or(u16::MAX))
+            .unwrap_or(0);
+        let score = ranked
+            .iter()
+            .find(|entry| entry.0 == session.session_id())
+            .map(|entry| entry.2)
+            .unwrap_or(0);
+        let entries: Vec<_> = ranked
+            .into_iter()
+            .take(20)
+            .map(|entry| entry.3)
+            .collect();
+        session
+            .send_packet(&build_event_score(score, rank, &entries))
+            .await?;
         debug!(
-            "[{}] Manes My Score requested sid={} level={} score={} rank={}",
+            "[{}] Manes My Score requested sid={} score={} rank={} entries={}",
             session.addr(),
             session.session_id(),
-            level,
             score,
-            rank
+            rank,
+            entries.len()
         );
         return Ok(());
     }
@@ -425,11 +496,26 @@ mod tests {
 
     #[test]
     fn event_score_matches_alt_my_score_contract() {
-        let packet = build_event_score(180, 1);
+        let packet = build_event_score(
+            180,
+            1,
+            &[ManesRankEntry {
+                nation: 2,
+                class: 205,
+                clan_name: "JstKO".to_string(),
+                character_name: "JstVK".to_string(),
+                level: 10,
+                score: 180,
+            }],
+        );
         assert_eq!(packet.opcode, 0xD0);
         assert_eq!(
             packet.data,
-            vec![0x02, 0x03, 0xB4, 0x00, 0x01, 0x00]
+            vec![
+                0x02, 0x03, 0x01, 0x01, 0x00, 0xB4, 0x00, 0x00, 0x00, 0x01, 0x02, 0xCD,
+                0x00, 0x05, 0x00, b'J', b's', b't', b'K', b'O', 0x05, 0x00, b'J', b's',
+                b't', b'V', b'K', 0x0A, 0x00, 0xB4, 0x00, 0x00, 0x00,
+            ]
         );
     }
 
