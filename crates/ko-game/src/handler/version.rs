@@ -27,9 +27,9 @@ use crate::session::{ClientSession, SessionState};
 
 /// Fallback version if server_settings is not loaded yet.
 ///
-/// The verified v2599 executable rejects 2602 as an outdated-version mismatch.
+/// For the current 26xx client test, we use 2602.
 /// LoginServer version should also come from server_settings.game_version.
-pub const DEFAULT_SERVER_VERSION: u16 = 2599;
+pub const DEFAULT_SERVER_VERSION: u16 = 2602;
 
 /// Resolve the game version from DB: server_settings.game_version.
 fn resolve_version(session: &ClientSession) -> u16 {
@@ -52,11 +52,11 @@ fn get_version_mode() -> u8 {
 }
 
 /// Return the wire version used by the selected test mode.
-fn mode_wire_version(mode: u8, _db_version: u16) -> u16 {
+fn mode_wire_version(mode: u8, db_version: u16) -> u16 {
     match mode {
         0 | 1 | 4 | 6 => 2599,
         2 | 3 | 5 | 7 => 2602,
-        _ => 2599,
+        _ => db_version,
     }
 }
 
@@ -71,12 +71,12 @@ fn mode_description(mode: u8) -> &'static str {
         5 => "[2602][10][key][00]",
         6 => "[01][2599][10][key] no trailer",
         7 => "[01][2602][10][key] no trailer",
-        _ => "[01][2599][10][key][00] verified fallback",
+        _ => "[01][db_version][10][key][00] fallback",
     }
 }
 
 /// Build 0x2B version response payload according to KO_VERSION_MODE.
-fn build_version_response_payload(mode: u8, _db_version: u16, key: &[u8; 16]) -> Packet {
+fn build_version_response_payload(mode: u8, db_version: u16, key: &[u8; 16]) -> Packet {
     let mut response = Packet::new(Opcode::WizVersionCheck as u8);
 
     match mode {
@@ -148,12 +148,10 @@ fn build_version_response_payload(mode: u8, _db_version: u16, key: &[u8; 16]) ->
             response.write_bytes(key);
         }
 
-        // Verified fallback: [01][2599][10][key][00].
-        // Do not trust a drifted DB patch version for the game executable
-        // handshake; 2602 is a patch/files value, not this client's wire version.
+        // Fallback: [01][db_version][10][key][00]
         _ => {
             response.write_u8(1);
-            response.write_u16(2599);
+            response.write_u16(db_version);
             response.write_u8(16);
             response.write_bytes(key);
             response.write_u8(0);
@@ -218,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_default_server_version() {
-        assert_eq!(DEFAULT_SERVER_VERSION, 2599);
+        assert_eq!(DEFAULT_SERVER_VERSION, 2602);
     }
 
     #[test]
@@ -234,7 +232,7 @@ mod tests {
         assert_eq!(mode_wire_version(2, 2599), 2602);
         assert_eq!(mode_wire_version(3, 2599), 2602);
         assert_eq!(mode_wire_version(7, 2599), 2602);
-        assert_eq!(mode_wire_version(99, 2602), 2599);
+        assert_eq!(mode_wire_version(99, 2602), 2602);
     }
 
     #[test]
