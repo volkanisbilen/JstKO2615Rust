@@ -94,11 +94,14 @@ pub fn build_event_start(
 /// choice UI. Names, descriptions, and icons are client table data and are not
 /// part of this packet.
 /// Return the score displayed by the ALT / My Score panel.
-pub fn build_event_score(score: u16) -> Packet {
+///
+/// The v2615 client reads this value as a 32-bit integer. Sending only a u16
+/// leaves the score operation packet short, so the panel ignores the response.
+pub fn build_event_score(score: u32) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_EVENT);
     pkt.write_u8(EVENT_SCORE);
-    pkt.write_u16(score);
+    pkt.write_u32(score);
     pkt
 }
 
@@ -176,7 +179,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             .progress(session.session_id())
             .map(|progress| progress.level)
             .unwrap_or(1);
-        let score = u16::from(level.saturating_sub(1)).saturating_mul(20);
+        let score = u32::from(level.saturating_sub(1)).saturating_mul(20);
         session.send_packet(&build_event_score(score)).await?;
         debug!(
             "[{}] Manes My Score requested sid={} level={} score={}",
@@ -363,10 +366,13 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             let registered = manager.register(sid);
             let participants = manager.participant_count().min(u16::MAX as usize) as u16;
             let result = if registered { 1 } else { -1 };
+            // Refresh the participant count first. The apply result must be
+            // the final registration packet seen by this client; otherwise
+            // REG_OPEN immediately resets the button from Cancel to Apply.
+            broadcast_registration_status(&world, 0);
             session
                 .send_packet(&build_registration_result(result, participants))
                 .await?;
-            broadcast_registration_status(&world, 0);
             debug!(
                 "[{}] Manes registration apply sid={} result={} participants={}",
                 session.addr(), sid, result, manager.participant_count()
@@ -375,10 +381,12 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         ACTION_CANCEL => {
             manager.unregister(sid);
             let participants = manager.participant_count().min(u16::MAX as usize) as u16;
+            // As with apply, leave the action result last so the client keeps
+            // the correct Apply/Cancel button state after the count refresh.
+            broadcast_registration_status(&world, 0);
             session
                 .send_packet(&build_registration_result(2, participants))
                 .await?;
-            broadcast_registration_status(&world, 0);
             debug!(
                 "[{}] Manes registration cancel sid={} participants={}",
                 session.addr(), sid, manager.participant_count()
@@ -411,7 +419,10 @@ mod tests {
     fn event_score_matches_alt_my_score_contract() {
         let packet = build_event_score(180);
         assert_eq!(packet.opcode, 0xD0);
-        assert_eq!(packet.data, vec![0x02, 0x03, 0xB4, 0x00]);
+        assert_eq!(
+            packet.data,
+            vec![0x02, 0x03, 0xB4, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]
