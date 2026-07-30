@@ -65,6 +65,22 @@ pub fn required_exp_for_level(level: u8) -> u16 {
     }
 }
 
+/// Reference-client Manes vitals.
+///
+/// Confirmed from the supplied gameplay capture:
+/// level 10 => 10060 HP / 2000 MP, level 13 => 13060 HP / 2600 MP.
+pub fn vitals_for_level(level: u8, hp_bonus: i16) -> (i16, i16) {
+    let level = level.clamp(1, MANES_MAX_LEVEL);
+    let max_hp = (i32::from(level) * 1_000 + 60 + i32::from(hp_bonus.max(0)))
+        .clamp(1, i16::MAX as i32) as i16;
+    let max_mp = (i32::from(level) * 200).clamp(1, i16::MAX as i32) as i16;
+    (max_hp, max_mp)
+}
+
+pub fn score_for_level(level: u8) -> u16 {
+    u16::from(level.saturating_sub(1)) * 20
+}
+
 /// EXP rewards are intentionally independent from the persistent NPC EXP.
 /// They follow the supplied Manes grade ranges and let an active player reach
 /// level 30 after clearing most of one physical zone, without making the early
@@ -450,6 +466,7 @@ impl ManesSurvivalManager {
                     1,
                 ),
             );
+            crate::handler::attack::sync_manes_vitals_and_level(world, sid, progress);
 
             crate::handler::zone_change::server_teleport_to_zone_force(
                 world, sid, zone_id, x, z,
@@ -550,5 +567,25 @@ impl ManesSurvivalManager {
         self.unlocked_magic.clear();
         self.selected_rows.clear();
         self.offers.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_vitals_match_supplied_gameplay_capture() {
+        assert_eq!(vitals_for_level(1, 0), (1_060, 200));
+        assert_eq!(vitals_for_level(10, 0), (10_060, 2_000));
+        assert_eq!(vitals_for_level(13, 0), (13_060, 2_600));
+        assert_eq!(vitals_for_level(13, 500), (13_560, 2_600));
+    }
+
+    #[test]
+    fn reference_score_matches_supplied_gameplay_capture() {
+        assert_eq!(score_for_level(1), 0);
+        assert_eq!(score_for_level(10), 180);
+        assert_eq!(score_for_level(13), 240);
     }
 }
