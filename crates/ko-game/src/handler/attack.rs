@@ -2229,19 +2229,19 @@ pub(crate) fn sync_manes_vitals_and_level(
     world: &WorldState,
     sid: SessionId,
     progress: crate::systems::manes_survival::ManesProgress,
+    refill_vitals: bool,
 ) {
-    let hp_bonus = world.manes_survival_manager.combat_bonuses(sid).hp.max(0);
+    // Manes vitals are fixed by event level. Skill-row HP bonuses must not
+    // inflate the +1000 HP / +200 MP progression contract.
     let (max_hp, max_mp) =
-        crate::systems::manes_survival::vitals_for_level(progress.level, hp_bonus);
+        crate::systems::manes_survival::vitals_for_level(progress.level, 0);
 
-    // A progress refresh runs after every kill and again after a skill choice.
-    // Only a real max-vital transition (level-up or an HP bonus unlock) should
-    // refill the bars. Re-sending the same level/EXP state must preserve spent
-    // HP/MP; otherwise every kill and choice acts like an unintended full heal.
+    // Callers explicitly identify a real level transition. Skill selection and
+    // ordinary HUD refreshes preserve spent HP/MP even if another stat
+    // recalculation happened between packets.
     let Some(before_sync) = world.get_character_info(sid) else {
         return;
     };
-    let refill_vitals = before_sync.max_hp != max_hp || before_sync.max_mp != max_mp;
     let current_hp = if refill_vitals {
         max_hp
     } else {
