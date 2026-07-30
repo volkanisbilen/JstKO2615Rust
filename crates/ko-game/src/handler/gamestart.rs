@@ -1082,6 +1082,17 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
             };
         }
     }
+    let removed_manes_items = world
+        .manes_survival_manager
+        .remove_temporary_items(&mut inventory);
+    if removed_manes_items > 0 {
+        tracing::warn!(
+            "[{}] Removed {} persisted Manes-only item slot(s) before normal inventory init for {}",
+            session.addr(),
+            removed_manes_items,
+            char_id
+        );
+    }
     world.set_inventory(session.session_id(), inventory);
 
     // 3b1. Remove expired items from inventory/warehouse/VIP warehouse on login.

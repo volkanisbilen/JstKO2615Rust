@@ -694,7 +694,7 @@ async fn save_all_characters(world: &WorldState, pool: &DbPool) {
         // ── 8. Inventory save (fire-and-forget) ──────────────────────────
         // Provides crash protection — without this, inventory changes between
         // periodic saves would be lost on an unclean server shutdown.
-        let inventory = world.get_inventory(sid);
+        let inventory = world.get_persistent_inventory(sid);
         if !inventory.is_empty() {
             let pool_c = pool.clone();
             let name_c = char_name.clone();
@@ -922,7 +922,7 @@ pub async fn save_single_character_sync(
     }
 
     // 3. Inventory (batch — 77 slots in 1 query)
-    let inventory = world.get_inventory(sid);
+    let inventory = world.get_persistent_inventory(sid);
     if !inventory.is_empty() {
         let params: Vec<SaveItemParams> = inventory
             .iter()

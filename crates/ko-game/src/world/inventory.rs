@@ -71,6 +71,24 @@ impl WorldState {
             .map(|h| h.inventory.clone())
             .unwrap_or_default()
     }
+
+    /// Return the inventory state that is safe to persist for a normal
+    /// character. Manes consumables live only for the event session and must
+    /// never leak into `user_items`.
+    pub fn get_persistent_inventory(&self, id: SessionId) -> Vec<UserItemSlot> {
+        let mut inventory = self.get_inventory(id);
+        let removed = self
+            .manes_survival_manager
+            .remove_temporary_items(&mut inventory);
+        if removed > 0 {
+            tracing::info!(
+                "Inventory persistence removed {} temporary Manes item slot(s) for sid={}",
+                removed,
+                id
+            );
+        }
+        inventory
+    }
     /// Get a single inventory slot for a session.
     pub fn get_inventory_slot(&self, id: SessionId, slot: usize) -> Option<UserItemSlot> {
         self.sessions

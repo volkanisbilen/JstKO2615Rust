@@ -510,7 +510,7 @@ impl ClientSession {
 
             // ── 1b. Bulk save inventory items ──────────────────────────────
             if !char_id.is_empty() {
-                let inventory = self.world.get_inventory(sid);
+                let inventory = self.world.get_persistent_inventory(sid);
                 let non_empty: Vec<(usize, u32)> = inventory.iter().enumerate()
                     .filter(|(_, i)| i.item_id != 0)
                     .map(|(s, i)| (s, i.item_id))

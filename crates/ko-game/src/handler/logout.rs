@@ -156,7 +156,7 @@ pub async fn handle(session: &mut ClientSession, _pkt: Packet) -> anyhow::Result
     // IMPORTANT: This save MUST complete before the player can re-select the
     // character, otherwise the re-login load may see stale/empty DB data.
     if !char_id.is_empty() {
-        let inventory = world.get_inventory(sid);
+        let inventory = world.get_persistent_inventory(sid);
         if !inventory.is_empty() {
             let non_empty_count = inventory.iter().filter(|s| s.item_id != 0).count();
             debug!(

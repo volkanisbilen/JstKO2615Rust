@@ -12,6 +12,7 @@ use rand::seq::SliceRandom;
 use parking_lot::RwLock;
 
 use crate::world::WorldState;
+use crate::world::UserItemSlot;
 use crate::zone::SessionId;
 
 pub const ZONES_MANES_SURVIVAL: [u16; 4] = [57, 58, 59, 60];
@@ -292,6 +293,31 @@ impl ManesSurvivalManager {
             row.item_count as u16,
             row.price as u32,
         ))
+    }
+
+    /// Remove Manes-only consumables from an inventory copy before it is
+    /// exposed as a normal character inventory or persisted to `user_items`.
+    ///
+    /// Potion rows are temporary event state. Persisting them makes the next
+    /// normal login feed Manes item IDs through the regular inventory/cospre
+    /// layout, which the v2615 client cannot safely render.
+    pub fn remove_temporary_items(&self, inventory: &mut [UserItemSlot]) -> usize {
+        let item_ids: std::collections::HashSet<u32> = self
+            .magic
+            .read()
+            .iter()
+            .filter(|row| row.kind == 100 && row.item_id > 0)
+            .filter_map(|row| u32::try_from(row.item_id).ok())
+            .collect();
+
+        let mut removed = 0;
+        for slot in inventory {
+            if slot.item_id != 0 && item_ids.contains(&slot.item_id) {
+                *slot = UserItemSlot::default();
+                removed += 1;
+            }
+        }
+        removed
     }
 
     pub fn combat_bonuses(&self, session_id: SessionId) -> ManesCombatBonuses {
