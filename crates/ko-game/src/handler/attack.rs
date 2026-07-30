@@ -2200,11 +2200,12 @@ pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
     let Some(progress) = world.manes_survival_manager.progress(sid) else {
         return;
     };
+    // EVENT_START (D0 02 01) is sent only once when the participant enters.
+    // Re-sending it on every kill/level-up reinitialises the temporary Manes
+    // loadout and clears the client's skill bar.
     world.send_to_session_owned(
         sid,
-        crate::handler::survival::build_event_start(
-            3,
-            crate::handler::survival::EVENT_DURATION_SECONDS,
+        crate::handler::survival::build_event_progress(
             progress.exp,
             progress.max_exp,
             progress.level,
