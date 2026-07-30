@@ -2200,7 +2200,7 @@ pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
     let Some(progress) = world.manes_survival_manager.progress(sid) else {
         return;
     };
-    sync_manes_vitals_and_level(world, sid, progress);
+    sync_manes_vitals_and_level(world, sid, progress, progress.leveled_up);
     if progress.leveled_up {
         let offer = world.manes_survival_manager.create_offer(sid);
         world.send_to_session_owned(
