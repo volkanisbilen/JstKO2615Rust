@@ -188,6 +188,10 @@ pub fn start_npc_ai_task(world: Arc<WorldState>) -> tokio::task::JoinHandle<()> 
 /// Process one AI tick for all active NPCs.
 /// NPCs are grouped by zone and processed in parallel across tokio worker threads.
 async fn process_ai_tick(world: Arc<WorldState>, now_ms: u64) {
+    world
+        .manes_survival_manager
+        .finalize_requested_event(world.clone());
+
     // ── Process scheduled respawns (monster respawn loop chain) ──────
     {
         let now_secs = std::time::SystemTime::now()

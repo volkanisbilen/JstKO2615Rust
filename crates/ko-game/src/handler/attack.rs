@@ -2174,6 +2174,16 @@ async fn handle_npc_attack(
         damage as i32,
     );
 
+    if tmpl.s_sid == crate::systems::manes_survival::DARK_DRAGON_SID as u16 {
+        world.manes_survival_manager.broadcast_dark_dragon_status(
+            &world,
+            npc.zone_id,
+            crate::systems::manes_survival::DARK_DRAGON_UI_NAME,
+            tmpl.max_hp,
+            new_hp.max(0) as u32,
+        );
+    }
+
     if new_hp <= 0 {
         if is_manes_survival_zone {
             broadcast_npc_death(&world, attacker_sid, npc_id);
@@ -2202,6 +2212,12 @@ pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
         return;
     };
     sync_manes_vitals_and_level(world, sid, progress, progress.leveled_up);
+    world.send_to_session_owned(
+        sid,
+        crate::handler::survival::build_event_score_update(u32::from(
+            crate::systems::manes_survival::score_for_level(progress.level),
+        )),
+    );
     if progress.leveled_up {
         let offer = world.manes_survival_manager.create_offer(sid);
         world.send_to_session_owned(
@@ -2696,6 +2712,17 @@ pub(crate) async fn handle_npc_death(
         s.state = NpcState::Dead;
         s.target_id = None;
     });
+    if is_manes_survival_kill
+        && world
+            .manes_survival_manager
+            .request_final_boss_finish(tmpl.s_sid)
+    {
+        tracing::info!(
+            sid = killer_sid,
+            npc_sid = tmpl.s_sid,
+            "Manes Survival Dark Dragon killed; automatic finish requested"
+        );
+    }
 
     // ── Monument death processing (C++ CNpc::OnDeathProcess) ─────────
     // Only applies to non-monster NPCs with monument types.

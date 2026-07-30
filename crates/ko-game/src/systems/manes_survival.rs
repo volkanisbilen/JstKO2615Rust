@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::{DashMap, DashSet};
 use ko_db::models::{ManesSurvivalMagicRow, ManesSurvivalSpawnRow};
@@ -27,8 +27,13 @@ pub const MANES_TEMP_HP_POTION_ITEM_ID: u32 = 978_023_000;
 pub const MANES_TEMP_MP_POTION_ITEM_ID: u32 = 978_024_000;
 pub const MANES_ORB_ITEM_ID: u32 = 978_026_000;
 pub const DARK_DRAGON_SID: i16 = 10733;
+pub const DARK_DRAGON_UI_NAME: &str = "[boss]red dragon";
 pub const MIN_ACTIVE_PARTICIPANTS: usize = 1;
 pub const MANES_EXIT_DELAY_SECONDS: u64 = 10;
+pub const MANES_NORMAL_RESPAWN_MS: u64 = 10_000;
+pub const MANES_BOSS_RESPAWN_MS: u64 = 120_000;
+const MANES_FINALIZE_DELAY_MS: u64 = 750;
+const LOW_MIDDLE_SPAWN_MULTIPLIER: usize = 3;
 
 const KARUS_ENTRY_START: (f32, f32) = (345.0, 207.0);
 const KARUS_ENTRY_END: (f32, f32) = (260.0, 581.0);
@@ -133,6 +138,8 @@ pub struct ManesSurvivalManager {
     unlocked_magic: DashMap<SessionId, DashSet<u32>>,
     selected_rows: DashMap<SessionId, DashMap<u16, u16>>,
     offers: DashMap<SessionId, ManesOffer>,
+    started_at: RwLock<Option<Instant>>,
+    final_boss_killed_at: RwLock<Option<Instant>>,
 }
 
 impl Default for ManesSurvivalManager {
@@ -147,6 +154,8 @@ impl Default for ManesSurvivalManager {
             unlocked_magic: DashMap::new(),
             selected_rows: DashMap::new(),
             offers: DashMap::new(),
+            started_at: RwLock::new(None),
+            final_boss_killed_at: RwLock::new(None),
         }
     }
 }
@@ -227,6 +236,87 @@ impl ManesSurvivalManager {
 
     pub fn progress(&self, session_id: SessionId) -> Option<ManesProgress> {
         self.progress.get(&session_id).map(|entry| *entry.value())
+    }
+
+    pub fn remaining_seconds(&self) -> u32 {
+        self.started_at
+            .read()
+            .as_ref()
+            .map(|started| {
+                u64::from(crate::handler::survival::EVENT_DURATION_SECONDS)
+                    .saturating_sub(started.elapsed().as_secs())
+                    .min(u64::from(u32::MAX)) as u32
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn broadcast_dark_dragon_status(
+        &self,
+        world: &WorldState,
+        zone_id: u16,
+        boss_name: &str,
+        max_hp: u32,
+        current_hp: u32,
+    ) {
+        if !self.is_active() {
+            return;
+        }
+        let packet = crate::handler::survival::build_event_boss_status(
+            boss_name,
+            max_hp,
+            current_hp,
+            self.remaining_seconds(),
+        );
+        for sid in self.participant_ids() {
+            if world
+                .get_position(sid)
+                .map(|position| position.zone_id == zone_id)
+                .unwrap_or(false)
+            {
+                world.send_to_session_owned(sid, packet.clone());
+            }
+        }
+    }
+
+    pub fn request_final_boss_finish(&self, npc_sid: u16) -> bool {
+        if !self.is_active() || npc_sid != DARK_DRAGON_SID as u16 {
+            return false;
+        }
+        let mut requested_at = self.final_boss_killed_at.write();
+        if requested_at.is_some() {
+            return false;
+        }
+        *requested_at = Some(Instant::now());
+        true
+    }
+
+    /// Consume a Dark Dragon death request after its final combat packets have
+    /// reached the client, then use the normal reward/countdown/exit path.
+    pub fn finalize_requested_event(&self, world: Arc<WorldState>) {
+        let should_finalize = self
+            .final_boss_killed_at
+            .read()
+            .as_ref()
+            .map(|killed_at| {
+                killed_at.elapsed() >= Duration::from_millis(MANES_FINALIZE_DELAY_MS)
+            })
+            .unwrap_or(false);
+        if !should_finalize {
+            return;
+        }
+        self.final_boss_killed_at.write().take();
+        if !self.is_active() {
+            return;
+        }
+
+        let participants = self.participant_ids();
+        let (rewarded, failed) = self.reward_rankings_and_stop(&world);
+        Self::schedule_participant_exit(world, participants);
+        tracing::info!(
+            rewarded,
+            failed,
+            "Manes Survival ended automatically after Dark Dragon death"
+        );
     }
 
     /// One-based event rank, ordered by the score derived from survival level.
@@ -575,6 +665,8 @@ impl ManesSurvivalManager {
         }
 
         self.registration_open.store(false, Ordering::Release);
+        *self.started_at.write() = Some(Instant::now());
+        self.final_boss_killed_at.write().take();
 
         let rows = self.spawns.read().clone();
         if rows.is_empty() {
@@ -593,7 +685,12 @@ impl ManesSurvivalManager {
             };
 
             for row in &rows {
-                let count = row.spawn_count as usize;
+                let count = row.spawn_count as usize
+                    * if matches!(row.grade, 1 | 2) {
+                        LOW_MIDDLE_SPAWN_MULTIPLIER
+                    } else {
+                        1
+                    };
                 let phase = (row.npc_id.rem_euclid(360) as f32).to_radians();
                 let mut created = 0usize;
 
@@ -618,18 +715,29 @@ impl ManesSurvivalManager {
                         );
                     }
 
-                    created += world
-                        .spawn_event_npc_ex(
-                            row.npc_id as u16,
-                            true,
-                            zone_id,
-                            x,
-                            z,
-                            1,
-                            MANES_EVENT_ROOM,
-                            row.boss_tier as u8,
-                        )
-                        .len();
+                    let spawned_ids = world.spawn_event_npc_ex(
+                        row.npc_id as u16,
+                        true,
+                        zone_id,
+                        x,
+                        z,
+                        1,
+                        MANES_EVENT_ROOM,
+                        row.boss_tier as u8,
+                    );
+                    let regen_time_ms = if row.npc_id == DARK_DRAGON_SID {
+                        0
+                    } else if row.boss_tier > 0 {
+                        MANES_BOSS_RESPAWN_MS
+                    } else {
+                        MANES_NORMAL_RESPAWN_MS
+                    };
+                    for npc_id in &spawned_ids {
+                        world.update_npc_ai(*npc_id, |ai| {
+                            ai.regen_time_ms = regen_time_ms;
+                        });
+                    }
+                    created += spawned_ids.len();
                 }
 
                 if created != count {
@@ -663,6 +771,8 @@ impl ManesSurvivalManager {
 
         self.active.store(false, Ordering::Release);
         self.registration_open.store(false, Ordering::Release);
+        self.started_at.write().take();
+        self.final_boss_killed_at.write().take();
         self.participants.clear();
         self.progress.clear();
         self.unlocked_magic.clear();

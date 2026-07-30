@@ -32,7 +32,10 @@ const ACTION_APPLY: u16 = 1;
 const ACTION_CANCEL: u16 = 2;
 const CATEGORY_EVENT: u8 = 2;
 const EVENT_START: u8 = 1;
+const EVENT_BOSS_STATUS: u8 = 2;
 const EVENT_SCORE: u8 = 3;
+const CATEGORY_STATUS: u8 = 4;
+const STATUS_SCORE: u8 = 3;
 const CATEGORY_SKILL: u8 = 6;
 const SKILL_OPEN: u8 = 1;
 const SELECTION_SUBMIT: u8 = 2;
@@ -83,6 +86,38 @@ pub fn build_event_start(
     pkt.write_u16(survival_exp);
     pkt.write_u16(survival_max_exp);
     pkt.write_u8(survival_level);
+    pkt
+}
+
+/// Update the center Red Dragon HP/timer panel.
+///
+/// Verified against `sub_716A10 -> sub_7113D0`, category 2 operation 2:
+/// `D0 02 02 string boss_name u32 max_hp u32 current_hp u32 seconds`.
+pub fn build_event_boss_status(
+    boss_name: &str,
+    max_hp: u32,
+    current_hp: u32,
+    remaining_seconds: u32,
+) -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_EVENT);
+    pkt.write_u8(EVENT_BOSS_STATUS);
+    pkt.write_string(boss_name);
+    pkt.write_u32(max_hp);
+    pkt.write_u32(current_hp);
+    pkt.write_u32(remaining_seconds);
+    pkt
+}
+
+/// Update the score label in the center Survival panel.
+///
+/// Verified against `sub_716A10 -> sub_713040`, category 4 operation 3:
+/// `D0 04 03 u32 score`.
+pub fn build_event_score_update(score: u32) -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_STATUS);
+    pkt.write_u8(STATUS_SCORE);
+    pkt.write_u32(score);
     pkt
 }
 
@@ -492,6 +527,27 @@ mod tests {
             packet.data,
             vec![0x02, 0x01, 0x03, 0xB0, 0x04, 0x00, 0x00, 0xC8, 0x00, 0x01]
         );
+    }
+
+    #[test]
+    fn event_boss_status_matches_v2615_client_contract() {
+        let packet = build_event_boss_status("red dragon", 500_000, 450_000, 516);
+        assert_eq!(packet.opcode, 0xD0);
+        assert_eq!(
+            packet.data,
+            vec![
+                0x02, 0x02, 0x0A, 0x00, b'r', b'e', b'd', b' ', b'd', b'r', b'a', b'g',
+                b'o', b'n', 0x20, 0xA1, 0x07, 0x00, 0xD0, 0xDD, 0x06, 0x00, 0x04, 0x02,
+                0x00, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn event_score_update_matches_v2615_client_contract() {
+        let packet = build_event_score_update(180);
+        assert_eq!(packet.opcode, 0xD0);
+        assert_eq!(packet.data, vec![0x04, 0x03, 0xB4, 0x00, 0x00, 0x00]);
     }
 
     #[test]
