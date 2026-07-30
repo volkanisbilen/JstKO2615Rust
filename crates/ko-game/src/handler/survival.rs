@@ -93,15 +93,17 @@ pub fn build_event_start(
 /// `sub_710140`, then calls `sub_5037D0 -> sub_75C520` to populate and show the
 /// choice UI. Names, descriptions, and icons are client table data and are not
 /// part of this packet.
-/// Return the score displayed by the ALT / My Score panel.
+/// Return the score and one-based rank displayed by ALT / My Score.
 ///
-/// The v2615 client reads this value as a 32-bit integer. Sending only a u16
-/// leaves the score operation packet short, so the panel ignores the response.
-pub fn build_event_score(score: u32) -> Packet {
+/// Operation 3 contains two consecutive 16-bit fields. Treating them as one
+/// u32 made the client decode the score as the first field and rank as zero,
+/// so it rejected the panel update.
+pub fn build_event_score(score: u16, rank: u16) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_EVENT);
     pkt.write_u8(EVENT_SCORE);
-    pkt.write_u32(score);
+    pkt.write_u16(score);
+    pkt.write_u16(rank);
     pkt
 }
 
@@ -179,14 +181,19 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             .progress(session.session_id())
             .map(|progress| progress.level)
             .unwrap_or(1);
-        let score = u32::from(level.saturating_sub(1)).saturating_mul(20);
-        session.send_packet(&build_event_score(score)).await?;
+        let score = crate::systems::manes_survival::score_for_level(level);
+        let rank = session
+            .world()
+            .manes_survival_manager
+            .rank_for_session(session.session_id());
+        session.send_packet(&build_event_score(score, rank)).await?;
         debug!(
-            "[{}] Manes My Score requested sid={} level={} score={}",
+            "[{}] Manes My Score requested sid={} level={} score={} rank={}",
             session.addr(),
             session.session_id(),
             level,
-            score
+            score,
+            rank
         );
         return Ok(());
     }
@@ -418,11 +425,11 @@ mod tests {
 
     #[test]
     fn event_score_matches_alt_my_score_contract() {
-        let packet = build_event_score(180);
+        let packet = build_event_score(180, 1);
         assert_eq!(packet.opcode, 0xD0);
         assert_eq!(
             packet.data,
-            vec![0x02, 0x03, 0xB4, 0x00, 0x00, 0x00]
+            vec![0x02, 0x03, 0xB4, 0x00, 0x01, 0x00]
         );
     }
 

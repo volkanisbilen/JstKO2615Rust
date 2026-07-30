@@ -208,6 +208,20 @@ impl ManesSurvivalManager {
         self.progress.get(&session_id).map(|entry| *entry.value())
     }
 
+    /// One-based event rank, ordered by the score derived from survival level.
+    pub fn rank_for_session(&self, session_id: SessionId) -> u16 {
+        let Some(progress) = self.progress(session_id) else {
+            return 0;
+        };
+        let score = score_for_level(progress.level);
+        let higher_scores = self
+            .progress
+            .iter()
+            .filter(|entry| score_for_level(entry.value().level) > score)
+            .count();
+        u16::try_from(higher_scores.saturating_add(1)).unwrap_or(u16::MAX)
+    }
+
     fn row(&self, selection_id: u16) -> Option<ManesSurvivalMagicRow> {
         self.magic
             .read()
@@ -327,14 +341,27 @@ impl ManesSurvivalManager {
         world: &WorldState,
         session_id: SessionId,
     ) -> usize {
-        let mut removed = 0;
+        // Normal Manes consumables live in bag slots. Use the regular removal
+        // path so every cleared slot gets its own WIZ_ITEM_COUNT_CHANGE packet;
+        // send_item_move_refresh() only refreshes derived equipment stats and
+        // leaves deleted bag items visible as client-side ghosts.
+        let mut removed = usize::from(
+            world.rob_all_of_item(session_id, MANES_TEMP_HP_POTION_ITEM_ID),
+        ) + usize::from(
+            world.rob_all_of_item(session_id, MANES_TEMP_MP_POTION_ITEM_ID),
+        );
+
+        // Defensive sanitisation for a malformed/legacy slot outside the bag.
+        // Persistence and login use the same exact two-ID filter.
+        let mut removed_outside_bag = 0;
         world.update_inventory(session_id, |inventory| {
-            removed = self.remove_temporary_items(inventory);
-            removed > 0
+            removed_outside_bag = self.remove_temporary_items(inventory);
+            removed_outside_bag > 0
         });
-        if removed > 0 {
+        if removed_outside_bag > 0 {
             world.send_item_move_refresh(session_id);
         }
+        removed += removed_outside_bag;
         removed
     }
 
