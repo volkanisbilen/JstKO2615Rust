@@ -19,6 +19,9 @@ pub const ZONES_MANES_SURVIVAL: [u16; 4] = [57, 58, 59, 60];
 /// Zones 57-60 are dedicated physical instances, so their NPCs share room 0
 /// with players entering through the normal zone-change flow.
 pub const MANES_EVENT_ROOM: u16 = 0;
+/// Event-only consumables. These two potion IDs must never survive Manes.
+pub const MANES_TEMP_HP_POTION_ITEM_ID: u32 = 978_023_000;
+pub const MANES_TEMP_MP_POTION_ITEM_ID: u32 = 978_024_000;
 pub const DARK_DRAGON_SID: i16 = 10733;
 pub const MIN_ACTIVE_PARTICIPANTS: usize = 1;
 
@@ -295,27 +298,42 @@ impl ManesSurvivalManager {
         ))
     }
 
-    /// Remove Manes-only consumables from an inventory copy before it is
+    /// Remove only the event HP/MP potions from an inventory copy before it is
     /// exposed as a normal character inventory or persisted to `user_items`.
     ///
-    /// Potion rows are temporary event state. Persisting them makes the next
-    /// normal login feed Manes item IDs through the regular inventory/cospre
-    /// layout, which the v2615 client cannot safely render.
+    /// Manes Orb is a permanent exchange reward and must survive event exit,
+    /// disconnect and the next login. Do not derive this filter from every
+    /// MANES_MAGIC potion row: that previously made permanent rewards eligible
+    /// for deletion.
     pub fn remove_temporary_items(&self, inventory: &mut [UserItemSlot]) -> usize {
-        let item_ids: std::collections::HashSet<u32> = self
-            .magic
-            .read()
-            .iter()
-            .filter(|row| row.kind == 100 && row.item_id > 0)
-            .filter_map(|row| u32::try_from(row.item_id).ok())
-            .collect();
-
         let mut removed = 0;
         for slot in inventory {
-            if slot.item_id != 0 && item_ids.contains(&slot.item_id) {
+            if matches!(
+                slot.item_id,
+                MANES_TEMP_HP_POTION_ITEM_ID | MANES_TEMP_MP_POTION_ITEM_ID
+            ) {
                 *slot = UserItemSlot::default();
                 removed += 1;
             }
+        }
+        removed
+    }
+
+    /// Remove temporary Manes consumables from the live session inventory and
+    /// immediately refresh the client. Persistent save paths independently use
+    /// `remove_temporary_items`, so disconnects are also safe.
+    pub fn cleanup_temporary_items_for_session(
+        &self,
+        world: &WorldState,
+        session_id: SessionId,
+    ) -> usize {
+        let mut removed = 0;
+        world.update_inventory(session_id, |inventory| {
+            removed = self.remove_temporary_items(inventory);
+            removed > 0
+        });
+        if removed > 0 {
+            world.send_item_move_refresh(session_id);
         }
         removed
     }
@@ -586,6 +604,18 @@ impl ManesSurvivalManager {
         for zone_id in ZONES_MANES_SURVIVAL {
             world.despawn_room_npcs(zone_id, MANES_EVENT_ROOM);
         }
+
+        // Clean the live inventory before participant state is discarded.
+        // Offline users are covered by filtered save + login sanitisation.
+        let participant_ids: Vec<SessionId> = self
+            .participants
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        for session_id in participant_ids {
+            self.cleanup_temporary_items_for_session(world, session_id);
+        }
+
         self.active.store(false, Ordering::Release);
         self.registration_open.store(false, Ordering::Release);
         self.participants.clear();
@@ -613,5 +643,29 @@ mod tests {
         assert_eq!(score_for_level(1), 0);
         assert_eq!(score_for_level(10), 180);
         assert_eq!(score_for_level(13), 240);
+    }
+
+    #[test]
+    fn temporary_cleanup_removes_only_event_potions() {
+        let manager = ManesSurvivalManager::default();
+        let mut inventory = vec![
+            UserItemSlot {
+                item_id: MANES_TEMP_HP_POTION_ITEM_ID,
+                ..UserItemSlot::default()
+            },
+            UserItemSlot {
+                item_id: MANES_TEMP_MP_POTION_ITEM_ID,
+                ..UserItemSlot::default()
+            },
+            UserItemSlot {
+                item_id: 978_026_000, // Manes Orb / permanent exchange reward
+                ..UserItemSlot::default()
+            },
+        ];
+
+        assert_eq!(manager.remove_temporary_items(&mut inventory), 2);
+        assert_eq!(inventory[0].item_id, 0);
+        assert_eq!(inventory[1].item_id, 0);
+        assert_eq!(inventory[2].item_id, 978_026_000);
     }
 }
