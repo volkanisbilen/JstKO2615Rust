@@ -8954,18 +8954,29 @@ fn handle_manes_survival_close(session: &mut ClientSession) -> anyhow::Result<()
         return Ok(());
     }
 
-    let (rewarded, failed) = if world.manes_survival_manager.is_active() {
-        world
-            .manes_survival_manager
-            .reward_rankings_and_stop(&world)
+    let active = world.manes_survival_manager.is_active();
+    let participants = if active {
+        world.manes_survival_manager.participant_ids()
+    } else {
+        Vec::new()
+    };
+    let (rewarded, failed) = if active {
+        world.manes_survival_manager.reward_rankings_and_stop(&world)
     } else {
         world.manes_survival_manager.stop(&world);
         (0, 0)
     };
+    if active {
+        crate::systems::manes_survival::ManesSurvivalManager::schedule_participant_exit(
+            world.clone(),
+            participants,
+        );
+    }
     send_help(
         session,
         &format!(
-            "Manes Survival stopped; rewards delivered to {rewarded} participant(s), failed={failed}."
+            "Manes Survival stopped; rewards delivered to {rewarded} participant(s), failed={failed}. Participants will exit in {} seconds.",
+            crate::systems::manes_survival::MANES_EXIT_DELAY_SECONDS
         ),
     );
     info!(

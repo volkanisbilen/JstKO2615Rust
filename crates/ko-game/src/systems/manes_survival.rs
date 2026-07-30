@@ -5,9 +5,12 @@
 //! NPCs and never belong in the global npc_spawn table.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::{DashMap, DashSet};
 use ko_db::models::{ManesSurvivalMagicRow, ManesSurvivalSpawnRow};
+use ko_protocol::{Opcode, Packet};
 use rand::seq::SliceRandom;
 use parking_lot::RwLock;
 
@@ -25,6 +28,7 @@ pub const MANES_TEMP_MP_POTION_ITEM_ID: u32 = 978_024_000;
 pub const MANES_ORB_ITEM_ID: u32 = 978_026_000;
 pub const DARK_DRAGON_SID: i16 = 10733;
 pub const MIN_ACTIVE_PARTICIPANTS: usize = 1;
+pub const MANES_EXIT_DELAY_SECONDS: u64 = 10;
 
 const KARUS_ENTRY_START: (f32, f32) = (345.0, 207.0);
 const KARUS_ENTRY_END: (f32, f32) = (260.0, 581.0);
@@ -721,6 +725,85 @@ impl ManesSurvivalManager {
 
         self.stop(world);
         (rewarded, failed)
+    }
+
+    /// End-of-event evacuation. Rewards and temporary-item cleanup have already
+    /// completed when this is scheduled. After a short result-viewing window,
+    /// restore the persistent character stats/HUD and move every participant
+    /// still inside a physical Manes zone to their nation homeland.
+    pub fn schedule_participant_exit(
+        world: Arc<WorldState>,
+        participants: Vec<SessionId>,
+    ) {
+        let notice = crate::systems::timed_notice::build_notice_packet(
+            8,
+            &format!(
+                "Manes Survival sona erdi. {} saniye sonra normal haritaya aktarilacaksiniz.",
+                MANES_EXIT_DELAY_SECONDS
+            ),
+        );
+        for sid in participants.iter().copied() {
+            world.send_to_session_owned(sid, notice.clone());
+        }
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(MANES_EXIT_DELAY_SECONDS)).await;
+
+            for sid in participants {
+                let Some(position) = world.get_position(sid) else {
+                    continue;
+                };
+                if !ZONES_MANES_SURVIVAL.contains(&position.zone_id) {
+                    continue;
+                }
+
+                // Manes modifies only live derived values. Rebuild them from the
+                // persistent character, equipment and buffs before emitting the
+                // normal level/stat contract. The permanent Orb reward remains
+                // in the same authoritative inventory.
+                world.set_user_ability(sid);
+                world.recalculate_max_hp_mp(sid);
+                world.update_character_stats(sid, |character| {
+                    character.hp = character.max_hp;
+                    character.mp = character.max_mp;
+                });
+
+                let Some(character) = world.get_character_info(sid) else {
+                    continue;
+                };
+                let equipped = world.get_equipped_stats(sid);
+                let mut level_packet = Packet::new(Opcode::WizLevelChange as u8);
+                level_packet.write_u32(sid as u32);
+                level_packet.write_u8(character.level);
+                level_packet.write_i16(character.free_points as i16);
+                level_packet.write_u8(character.skill_points[0]);
+                level_packet.write_i64(character.max_exp);
+                level_packet.write_i64(character.exp as i64);
+                level_packet.write_i16(character.max_hp);
+                level_packet.write_i16(character.hp);
+                level_packet.write_i16(character.max_mp);
+                level_packet.write_i16(character.mp);
+                level_packet.write_u32(equipped.max_weight);
+                level_packet.write_u32(equipped.item_weight);
+                world.send_to_session_owned(sid, level_packet);
+                world.send_item_move_refresh(sid);
+
+                let home_zone = crate::systems::war::nation_home_zone(character.nation);
+                crate::handler::zone_change::server_teleport_to_zone(
+                    &world, sid, home_zone, 0.0, 0.0,
+                );
+                tracing::info!(
+                    sid,
+                    character = %character.name,
+                    persistent_level = character.level,
+                    inventory_slots = world
+                        .with_session(sid, |handle| handle.inventory.len())
+                        .unwrap_or(0),
+                    home_zone,
+                    "Manes Survival participant restored and evacuated"
+                );
+            }
+        });
     }
 }
 
