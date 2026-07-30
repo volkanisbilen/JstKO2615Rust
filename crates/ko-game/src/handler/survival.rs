@@ -32,7 +32,6 @@ const ACTION_APPLY: u16 = 1;
 const ACTION_CANCEL: u16 = 2;
 const CATEGORY_EVENT: u8 = 2;
 const EVENT_START: u8 = 1;
-const EVENT_PROGRESS: u8 = 2;
 const EVENT_SCORE: u8 = 3;
 const CATEGORY_SKILL: u8 = 6;
 const SKILL_OPEN: u8 = 1;
@@ -94,23 +93,6 @@ pub fn build_event_start(
 /// `sub_710140`, then calls `sub_5037D0 -> sub_75C520` to populate and show the
 /// choice UI. Names, descriptions, and icons are client table data and are not
 /// part of this packet.
-/// Update Manes EXP/level without reinitialising the temporary loadout.
-/// Re-sending EVENT_START here clears the client skill bar; operation 2 only
-/// refreshes the Survival progress/stat state.
-pub fn build_event_progress(
-    survival_exp: u16,
-    survival_max_exp: u16,
-    survival_level: u8,
-) -> Packet {
-    let mut pkt = Packet::new(WIZ_SURVIVAL);
-    pkt.write_u8(CATEGORY_EVENT);
-    pkt.write_u8(EVENT_PROGRESS);
-    pkt.write_u16(survival_exp);
-    pkt.write_u16(survival_max_exp);
-    pkt.write_u8(survival_level);
-    pkt
-}
-
 /// Return the score displayed by the ALT / My Score panel.
 pub fn build_event_score(score: u16) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
@@ -232,6 +214,17 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                     .manes_survival_manager
                     .unlock_magic(session.session_id(), manes_magic_id)
                     .expect("validated MANES_MAGIC row must map to MAGIC");
+                if let Some(progress) = session
+                    .world()
+                    .manes_survival_manager
+                    .progress(session.session_id())
+                {
+                    crate::handler::attack::sync_manes_vitals_and_level(
+                        session.world(),
+                        session.session_id(),
+                        progress,
+                    );
+                }
                 debug!(
                     "[{}] Manes skill list selection accepted sid={} manes_magic_id={} magic_id={}",
                     session.addr(),
@@ -412,13 +405,6 @@ mod tests {
             packet.data,
             vec![0x02, 0x01, 0x03, 0xB0, 0x04, 0x00, 0x00, 0xC8, 0x00, 0x01]
         );
-    }
-
-    #[test]
-    fn event_progress_does_not_reinitialize_loadout() {
-        let packet = build_event_progress(40, 200, 3);
-        assert_eq!(packet.opcode, 0xD0);
-        assert_eq!(packet.data, vec![0x02, 0x02, 0x28, 0x00, 0xC8, 0x00, 0x03]);
     }
 
     #[test]
