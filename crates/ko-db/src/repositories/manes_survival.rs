@@ -22,7 +22,7 @@ impl<'a> ManesSurvivalRepository<'a> {
 
     pub async fn load_magic(&self) -> Result<Vec<ManesSurvivalMagicRow>, sqlx::Error> {
         sqlx::query_as::<_, ManesSurvivalMagicRow>(
-            "SELECT col_2 AS selection_id, col_1 AS kind, col_3 AS magic_id, \
+            "SELECT col_2::BIGINT AS selection_id, col_1 AS kind, col_3 AS magic_id, \
              col_5 AS item_id, col_6 AS item_count, col_7 AS price, \
              col_8 AS hp_bonus, col_9 AS attack_bonus_pct, col_10 AS reduction_pct \
              FROM manes_survival_client_magic ORDER BY col_0",
