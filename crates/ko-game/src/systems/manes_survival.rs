@@ -22,6 +22,7 @@ pub const MANES_EVENT_ROOM: u16 = 0;
 /// Event-only consumables. These two potion IDs must never survive Manes.
 pub const MANES_TEMP_HP_POTION_ITEM_ID: u32 = 978_023_000;
 pub const MANES_TEMP_MP_POTION_ITEM_ID: u32 = 978_024_000;
+pub const MANES_ORB_ITEM_ID: u32 = 978_026_000;
 pub const DARK_DRAGON_SID: i16 = 10733;
 pub const MIN_ACTIVE_PARTICIPANTS: usize = 1;
 
@@ -83,6 +84,22 @@ pub fn vitals_for_level(level: u8, hp_bonus: i16) -> (i16, i16) {
 
 pub fn score_for_level(level: u8) -> u16 {
     u16::from(level.saturating_sub(1)) * 20
+}
+
+/// Level-driven attack scale shared by the authoritative damage path and the
+/// stat packet shown by the client. Level 1 starts at 15% and each event level
+/// adds 2.5 percentage points, reaching 87.5% at level 30.
+pub fn attack_scale_per_mille(level: u8) -> u16 {
+    150 + u16::from(level.clamp(1, MANES_MAX_LEVEL).saturating_sub(1)) * 25
+}
+
+pub fn orb_reward_for_rank(rank: usize) -> u16 {
+    match rank {
+        1 => 150,
+        2 => 100,
+        3 => 50,
+        _ => 20,
+    }
 }
 
 /// EXP rewards are intentionally independent from the persistent NPC EXP.
@@ -648,6 +665,63 @@ impl ManesSurvivalManager {
         self.selected_rows.clear();
         self.offers.clear();
     }
+
+    /// Finalise a successfully running event. Rewards are snapshotted and
+    /// granted before `stop()` clears participant/progress state.
+    ///
+    /// Returns `(rewarded, failed)` so the GM command and logs never report a
+    /// successful payout when an inventory could not accept the item.
+    pub fn reward_rankings_and_stop(&self, world: &WorldState) -> (usize, usize) {
+        let mut ranking: Vec<_> = self
+            .participant_ids()
+            .into_iter()
+            .filter_map(|sid| {
+                let progress = self.progress(sid)?;
+                let character = world.get_character_info(sid)?;
+                Some((sid, progress.level, score_for_level(progress.level), character.name))
+            })
+            .collect();
+        ranking.sort_by(|left, right| {
+            right
+                .2
+                .cmp(&left.2)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+
+        let mut rewarded = 0usize;
+        let mut failed = 0usize;
+        for (index, (sid, level, score, name)) in ranking.into_iter().enumerate() {
+            let rank = index + 1;
+            let count = orb_reward_for_rank(rank);
+            if world.give_item(sid, MANES_ORB_ITEM_ID, count) {
+                rewarded += 1;
+                tracing::info!(
+                    sid,
+                    character = %name,
+                    rank,
+                    survival_level = level,
+                    survival_score = score,
+                    item_id = MANES_ORB_ITEM_ID,
+                    item_count = count,
+                    "Manes Survival ranking reward granted"
+                );
+            } else {
+                failed += 1;
+                tracing::error!(
+                    sid,
+                    character = %name,
+                    rank,
+                    item_id = MANES_ORB_ITEM_ID,
+                    item_count = count,
+                    "Manes Survival ranking reward could not be granted"
+                );
+            }
+        }
+
+        self.stop(world);
+        (rewarded, failed)
+    }
 }
 
 #[cfg(test)]
@@ -670,6 +744,22 @@ mod tests {
     }
 
     #[test]
+    fn attack_scale_increases_at_every_survival_level() {
+        assert_eq!(attack_scale_per_mille(1), 150);
+        assert_eq!(attack_scale_per_mille(2), 175);
+        assert_eq!(attack_scale_per_mille(30), 875);
+    }
+
+    #[test]
+    fn ranking_orb_rewards_match_event_contract() {
+        assert_eq!(orb_reward_for_rank(1), 150);
+        assert_eq!(orb_reward_for_rank(2), 100);
+        assert_eq!(orb_reward_for_rank(3), 50);
+        assert_eq!(orb_reward_for_rank(4), 20);
+        assert_eq!(orb_reward_for_rank(200), 20);
+    }
+
+    #[test]
     fn temporary_cleanup_removes_only_event_potions() {
         let manager = ManesSurvivalManager::default();
         let mut inventory = vec![
@@ -682,7 +772,7 @@ mod tests {
                 ..UserItemSlot::default()
             },
             UserItemSlot {
-                item_id: 978_026_000, // Manes Orb / permanent exchange reward
+                item_id: MANES_ORB_ITEM_ID, // Manes Orb / permanent exchange reward
                 ..UserItemSlot::default()
             },
         ];
@@ -690,6 +780,6 @@ mod tests {
         assert_eq!(manager.remove_temporary_items(&mut inventory), 2);
         assert_eq!(inventory[0].item_id, 0);
         assert_eq!(inventory[1].item_id, 0);
-        assert_eq!(inventory[2].item_id, 978_026_000);
+        assert_eq!(inventory[2].item_id, MANES_ORB_ITEM_ID);
     }
 }
