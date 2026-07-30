@@ -1607,6 +1607,15 @@ impl WorldState {
     ///
     /// When `tEndTime != -1 && UNIXTIME >= tEndTime`, the stealth is expired.
     ///
+    /// Snapshot every currently registered session ID.
+    ///
+    /// Used by event shutdown cleanup so inventory sanitisation does not depend
+    /// on an event participant set that may already have been updated by a zone
+    /// change or disconnect.
+    pub fn collect_session_ids(&self) -> Vec<SessionId> {
+        self.sessions.iter().map(|entry| *entry.key()).collect()
+    }
+
     /// Returns a list of session IDs whose stealth_end_time > 0 and <= now.
     pub fn collect_expired_stealths(&self, now_unix: u64) -> Vec<SessionId> {
         let mut expired = Vec::new();
