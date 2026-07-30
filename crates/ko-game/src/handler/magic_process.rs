@@ -494,11 +494,16 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     // ── Nation validation ─────────────────────────────────────────────
     // Skill ID encodes nation (1xxxx=Karus, 2xxxx=Elmorad). Skills < 300000
     // must match the caster's nation. Cancel/cancel2/cancel_transform excluded.
+    let is_unlocked_manes_magic = world
+        .manes_survival_manager
+        .has_unlocked_magic(sid, skill_id);
+
     if b_opcode != MAGIC_CANCEL
         && b_opcode != MAGIC_CANCEL2
         && b_opcode != MAGIC_CANCEL_TRANSFORMATION
         && skill_id < 300000
         && caster.nation != (skill_id / 100000) as u8
+        && !is_unlocked_manes_magic
     {
         let fail_pkt = instance.build_fail_packet();
         world.send_to_session_owned(sid, fail_pkt);
@@ -531,9 +536,6 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     {
         let s_skill = skill.skill.unwrap_or(0);
         let iclass = s_skill / 10;
-        let is_unlocked_manes_magic = world
-            .manes_survival_manager
-            .has_unlocked_magic(sid, skill_id);
         if s_skill != 0
             && iclass != 0
             && !check_skill_class(iclass, caster.class)
@@ -705,7 +707,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             // Type2 skills consume arrows (bNeedArrow count, or 1 for throwing knives).
             // If the skill has a use_item (arrow/knife), check inventory and consume.
             let use_item = skill.use_item.unwrap_or(0) as u32;
-            if use_item != 0 {
+            if use_item != 0 && !is_unlocked_manes_magic {
                 if let Some(type2) = world.get_magic_type2(skill_id as i32) {
                     let mut count = type2.need_arrow.unwrap_or(0) as u16;
                     // Throwing knives: NeedArrow=0 means consume 1
@@ -793,7 +795,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             // Before executing the skill, verify the player has the required
             // consumable item. Type 2 (archer) and type 6 skills skip this.
             // Arrow items (391010000) are already consumed in MAGIC_FLYING.
-            if skill_type != 2 && skill_type != 6 {
+            if skill_type != 2 && skill_type != 6 && !is_unlocked_manes_magic {
                 let use_item_pre = skill.use_item.unwrap_or(0) as u32;
                 if use_item_pre != 0 && use_item_pre != 391010000 {
                     let consume_id = resolve_consume_item(&skill);
@@ -815,7 +817,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
             // ── Consume item after successful cast ──────────────────
             // Called for all non-type2 skills (type2 = heal/buff, no item consumed)
-            if skill_type != 2 {
+            if skill_type != 2 && !is_unlocked_manes_magic {
                 consume_item(&world, sid, &skill);
             }
 
