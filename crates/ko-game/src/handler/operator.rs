@@ -8954,8 +8954,25 @@ fn handle_manes_survival_close(session: &mut ClientSession) -> anyhow::Result<()
         return Ok(());
     }
 
-    world.manes_survival_manager.stop(&world);
-    send_help(session, "Manes Survival registration/event stopped; zone 57-60 monsters removed.");
-    info!("[{}] +manesclose: Manes Survival stopped", session.addr());
+    let (rewarded, failed) = if world.manes_survival_manager.is_active() {
+        world
+            .manes_survival_manager
+            .reward_rankings_and_stop(&world)
+    } else {
+        world.manes_survival_manager.stop(&world);
+        (0, 0)
+    };
+    send_help(
+        session,
+        &format!(
+            "Manes Survival stopped; rewards delivered to {rewarded} participant(s), failed={failed}."
+        ),
+    );
+    info!(
+        "[{}] +manesclose: Manes Survival stopped rewarded={} failed={}",
+        session.addr(),
+        rewarded,
+        failed
+    );
     Ok(())
 }
