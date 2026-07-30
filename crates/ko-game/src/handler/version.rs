@@ -27,9 +27,9 @@ use crate::session::{ClientSession, SessionState};
 
 /// Fallback version if server_settings is not loaded yet.
 ///
-/// For the current 26xx client test, we use 2602.
+/// The verified 2614 client uses wire version 2613.
 /// LoginServer version should also come from server_settings.game_version.
-pub const DEFAULT_SERVER_VERSION: u16 = 2602;
+pub const DEFAULT_SERVER_VERSION: u16 = 2613;
 
 /// Resolve the game version from DB: server_settings.game_version.
 fn resolve_version(session: &ClientSession) -> u16 {
@@ -148,7 +148,7 @@ fn build_version_response_payload(mode: u8, db_version: u16, key: &[u8; 16]) -> 
             response.write_bytes(key);
         }
 
-        // Fallback: [01][db_version][10][key][00]
+        // Stable 2614-client behavior: use server_settings.game_version.
         _ => {
             response.write_u8(1);
             response.write_u16(db_version);
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_default_server_version() {
-        assert_eq!(DEFAULT_SERVER_VERSION, 2602);
+        assert_eq!(DEFAULT_SERVER_VERSION, 2613);
     }
 
     #[test]
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(mode_wire_version(2, 2599), 2602);
         assert_eq!(mode_wire_version(3, 2599), 2602);
         assert_eq!(mode_wire_version(7, 2599), 2602);
-        assert_eq!(mode_wire_version(99, 2602), 2602);
+        assert_eq!(mode_wire_version(99, 2613), 2613);
     }
 
     #[test]
