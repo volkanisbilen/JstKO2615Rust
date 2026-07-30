@@ -32,6 +32,8 @@ const ACTION_APPLY: u16 = 1;
 const ACTION_CANCEL: u16 = 2;
 const CATEGORY_EVENT: u8 = 2;
 const EVENT_START: u8 = 1;
+const EVENT_PROGRESS: u8 = 2;
+const EVENT_SCORE: u8 = 3;
 const CATEGORY_SKILL: u8 = 6;
 const SKILL_OPEN: u8 = 1;
 const SELECTION_SUBMIT: u8 = 2;
@@ -92,6 +94,32 @@ pub fn build_event_start(
 /// `sub_710140`, then calls `sub_5037D0 -> sub_75C520` to populate and show the
 /// choice UI. Names, descriptions, and icons are client table data and are not
 /// part of this packet.
+/// Update Manes EXP/level without reinitialising the temporary loadout.
+/// Re-sending EVENT_START here clears the client skill bar; operation 2 only
+/// refreshes the Survival progress/stat state.
+pub fn build_event_progress(
+    survival_exp: u16,
+    survival_max_exp: u16,
+    survival_level: u8,
+) -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_EVENT);
+    pkt.write_u8(EVENT_PROGRESS);
+    pkt.write_u16(survival_exp);
+    pkt.write_u16(survival_max_exp);
+    pkt.write_u8(survival_level);
+    pkt
+}
+
+/// Return the score displayed by the ALT / My Score panel.
+pub fn build_event_score(score: u16) -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_EVENT);
+    pkt.write_u8(EVENT_SCORE);
+    pkt.write_u16(score);
+    pkt
+}
+
 pub fn build_skill_selection_open(
     skill_choices: &[u16],
     potion_choices: &[u16],
@@ -158,6 +186,25 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let mut reader = PacketReader::new(&pkt.data);
     let category = reader.read_u8().unwrap_or(0);
     let operation = reader.read_u8().unwrap_or(0);
+
+    if category == CATEGORY_EVENT && operation == EVENT_SCORE {
+        let level = session
+            .world()
+            .manes_survival_manager
+            .progress(session.session_id())
+            .map(|progress| progress.level)
+            .unwrap_or(1);
+        let score = u16::from(level.saturating_sub(1)).saturating_mul(20);
+        session.send_packet(&build_event_score(score)).await?;
+        debug!(
+            "[{}] Manes My Score requested sid={} level={} score={}",
+            session.addr(),
+            session.session_id(),
+            level,
+            score
+        );
+        return Ok(());
+    }
 
     if category == CATEGORY_SKILL && operation == SELECTION_SUBMIT {
         let list_type = reader.read_u8().unwrap_or(SKILL_RESULT_FAILURE);
@@ -365,6 +412,20 @@ mod tests {
             packet.data,
             vec![0x02, 0x01, 0x03, 0xB0, 0x04, 0x00, 0x00, 0xC8, 0x00, 0x01]
         );
+    }
+
+    #[test]
+    fn event_progress_does_not_reinitialize_loadout() {
+        let packet = build_event_progress(40, 200, 3);
+        assert_eq!(packet.opcode, 0xD0);
+        assert_eq!(packet.data, vec![0x02, 0x02, 0x28, 0x00, 0xC8, 0x00, 0x03]);
+    }
+
+    #[test]
+    fn event_score_matches_alt_my_score_contract() {
+        let packet = build_event_score(180);
+        assert_eq!(packet.opcode, 0xD0);
+        assert_eq!(packet.data, vec![0x02, 0x03, 0xB4, 0x00]);
     }
 
     #[test]
