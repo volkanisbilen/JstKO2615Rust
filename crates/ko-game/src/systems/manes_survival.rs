@@ -510,7 +510,7 @@ impl ManesSurvivalManager {
                     1,
                 ),
             );
-            crate::handler::attack::sync_manes_vitals_and_level(world, sid, progress);
+            crate::handler::attack::sync_manes_vitals_and_level(world, sid, progress, true);
 
             crate::handler::zone_change::server_teleport_to_zone_force(
                 world, sid, zone_id, x, z,
