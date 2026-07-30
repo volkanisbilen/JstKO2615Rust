@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 70654)
-Total output lines: 7565
-
 //! WIZ_ATTACK (0x08) handler -- physical melee attack.
 //! ## Client Request (C->S)
 //! | Type  | Description                        |
@@ -2528,7 +2525,2162 @@ pub(crate) async fn handle_npc_death(
                             super::level::exp_change(world, rep_sid, proportional_exp).await;
                         }
                         if proportional_loyalty > 0 {
-                            crate::systems::loyalty::s…20654 tokens truncated…u8().unwrap();
+                            crate::systems::loyalty::send_loyalty_change(
+                                world,
+                                rep_sid,
+                                proportional_loyalty,
+                                false,
+                                false,
+                                true, // C++ default: bIsAddLoyaltyMonthly = true
+                            );
+                        }
+                    } else {
+                        // Each eligible party member gets the SAME proportional XP
+                        let total_level: u32 = eligible.iter().map(|&(_, lvl)| lvl as u32).sum();
+                        let num_members = eligible.len() as f64;
+
+                        for &(member_sid, member_level) in &eligible {
+                            if proportional_exp > 0
+                                && !world.try_jackpot_exp(member_sid, proportional_exp).await
+                            {
+                                super::level::exp_change(world, member_sid, proportional_exp).await;
+                            }
+
+                            // Party NP: level-weighted formula
+                            // loyalty * (1 + 0.2*(members-1)) * memberLevel / totalLevel
+                            if proportional_loyalty > 0 && total_level > 0 {
+                                let party_bonus = 1.0 + 0.2 * (num_members - 1.0);
+                                let member_share =
+                                    proportional_loyalty as f64 * party_bonus * member_level as f64
+                                        / total_level as f64;
+                                let final_loyalty = member_share.ceil() as i32;
+                                if final_loyalty > 0 {
+                                    crate::systems::loyalty::send_loyalty_change(
+                                        world,
+                                        member_sid,
+                                        final_loyalty,
+                                        false,
+                                        false,
+                                        true, // C++ default: bIsAddLoyaltyMonthly = true
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Solo damager — proportional XP/NP directly
+                if proportional_exp > 0 && !world.try_jackpot_exp(rep_sid, proportional_exp).await {
+                    super::level::exp_change(world, rep_sid, proportional_exp).await;
+                }
+                if proportional_loyalty > 0 {
+                    crate::systems::loyalty::send_loyalty_change(
+                        world,
+                        rep_sid,
+                        proportional_loyalty,
+                        false,
+                        false,
+                        true, // C++ default: bIsAddLoyaltyMonthly = true
+                    );
+                }
+            }
+        }
+    } else {
+        // Phase 4: Fallback — no valid damagers found (all disconnected/dead/out of range)
+        // Give full XP/NP to the killer (preserves original behavior)
+        award_npc_xp(world, killer_sid, base_exp, tmpl.level).await;
+        award_npc_loyalty_solo(world, killer_sid, base_loyalty, tmpl.level);
+    }
+
+    // ── Quest monster kill tracking (C++ CNpc::OnDeathProcess) ─────
+    // party members within RANGE_80M; otherwise call only for the killer.
+    {
+        let npc_proto = npc.proto_id;
+        let pid = world.get_party_id(killer_sid);
+        if let Some(pid) = pid {
+            if let Some(party) = world.get_party(pid) {
+                for &member_sid in &party.active_members() {
+                    if world.is_player_dead(member_sid) {
+                        continue;
+                    }
+                    if world.get_character_info(member_sid).is_none() {
+                        continue;
+                    }
+                    let in_range = match world.get_position(member_sid) {
+                        Some(pos) => {
+                            let dx = pos.x - npc_x;
+                            let dz = pos.z - npc_z;
+                            dx * dx + dz * dz <= RANGE_80M
+                        }
+                        None => false,
+                    };
+                    if in_range {
+                        super::quest::quest_monster_count_add(world, member_sid, npc_proto);
+                    }
+                }
+            }
+        } else {
+            super::quest::quest_monster_count_add(world, killer_sid, npc_proto);
+        }
+    }
+
+    // ── Daily quest monster kill tracking (C++ CNpc::OnDeathProcess) ──
+    // Same party/solo pattern as regular quest tracking above.
+    {
+        let npc_proto = npc.proto_id;
+        let pid = world.get_party_id(killer_sid);
+        if let Some(pid) = pid {
+            if let Some(party) = world.get_party(pid) {
+                for &member_sid in &party.active_members() {
+                    if world.is_player_dead(member_sid) {
+                        continue;
+                    }
+                    let in_range = match world.get_position(member_sid) {
+                        Some(pos) => {
+                            let dx = pos.x - npc_x;
+                            let dz = pos.z - npc_z;
+                            dx * dx + dz * dz <= RANGE_80M
+                        }
+                        None => false,
+                    };
+                    if in_range {
+                        super::daily_quest::update_daily_quest_count(world, member_sid, npc_proto)
+                            .await;
+                    }
+                }
+            }
+        } else {
+            super::daily_quest::update_daily_quest_count(world, killer_sid, npc_proto).await;
+        }
+    }
+
+    // ── Loot generation (C++ CNpc::Dead → GiveNpcHaveItem) ─────────
+    if super::npc_loot::is_show_box(tmpl.npc_type, npc.zone_id, npc.proto_id) {
+        let looter = world
+            .get_max_damage_user(npc_id)
+            .filter(|&sid| world.get_character_info(sid).is_some())
+            .unwrap_or(killer_sid);
+        super::npc_loot::generate_npc_loot(world, looter, npc_id, npc, tmpl);
+    }
+    world.clear_npc_damage(npc_id);
+
+    // ── Set NPC AI state to Dead — the AI tick system handles respawn ──
+    world.update_npc_ai(npc_id, |s| {
+        s.state = NpcState::Dead;
+        s.target_id = None;
+    });
+
+    // ── Monument death processing (C++ CNpc::OnDeathProcess) ─────────
+    // Only applies to non-monster NPCs with monument types.
+    if !tmpl.is_monster {
+        let (killer_nation, killer_name, killer_clan_id) = world
+            .get_character_info(killer_sid)
+            .map_or((0u8, String::new(), 0u16), |ch| {
+                (ch.nation, ch.name.clone(), ch.knights_id)
+            });
+        super::monument::monument_death_dispatch(
+            world,
+            npc,
+            tmpl,
+            killer_nation,
+            &killer_name,
+            killer_clan_id,
+        )
+        .await;
+    }
+
+    // ── Monster Stone boss kill (C++ CNpc::MonsterStoneKillProcess) ────
+    // When a Monster Stone boss (summon_type == 1) dies, mark the room as
+    // boss-killed and send victory packets to all room users.
+    if npc.event_room > 0 && npc.summon_type == 1 {
+        monster_stone_boss_kill(world, npc.event_room);
+    }
+
+    // ── BDW altar flag pickup (C++ CNpc::OnDeath → BDWMonumentAltarSystem) ──
+    // but we check it unconditionally since the altar NPC (9840) has is_monster=true.
+    if npc.zone_id == bdw::ZONE_BDW && tmpl.npc_type == bdw::NPC_BORDER_MONUMENT {
+        bdw_altar_flag_pickup(world, killer_sid, npc.zone_id, npc_id);
+    }
+
+    // ── Draki Tower monster kill (C++ Npc.cpp:959-967) ──────────────────
+    // When a monster dies in zone 95, decrement the room's kill counter.
+    // When counter reaches 0, all stage monsters are dead → advance stage.
+    {
+        use crate::handler::draki_tower;
+        if npc.zone_id == draki_tower::ZONE_DRAKI_TOWER && npc.event_room > 0 && npc.is_monster {
+            draki_tower_monster_kill(world, killer_sid, npc.event_room).await;
+        }
+    }
+
+    // ── Dungeon Defence monster kill (C++ Npc.cpp:1027-1028) ─────────
+    // When a monster dies in zone 89 with an active event room, process
+    // DD rewards (coins, jewels, tokens) and decrement the room's kill
+    // counter. When counter reaches 0, advance to next stage or finish.
+    if npc.zone_id == ZONE_DUNGEON_DEFENCE && npc.event_room > 0 && npc.is_monster {
+        dd_monster_kill(world, killer_sid, npc.event_room, npc.proto_id);
+    }
+
+    // ── Juraid Mountain monster kill (C++ Npc.cpp:903-907) ──────────────
+    // When a monster dies in zone 87 during an active Juraid event, track
+    // the kill for the player's nation room.
+    if npc.zone_id == ZONE_JURAID_MOUNTAIN && npc.is_monster && npc.event_room > 0 {
+        super::dead::track_juraid_monster_kill(world, killer_sid);
+    }
+
+    // ── Forgotten Temple monster death (C++ CNpc::ForgettenTempleMonsterDead) ──
+    // When a monster dies in zone 55, decrement FT monster count and
+    // optionally trigger a death skill (special boss monsters).
+    if npc.zone_id == super::forgotten_temple::ZONE_FORGOTTEN_TEMPLE && npc.is_monster {
+        let ft_state = world.forgotten_temple_state();
+        let skill_id =
+            super::forgotten_temple::on_monster_dead(ft_state, npc.proto_id, npc.zone_id);
+        if let Some(sid) = skill_id {
+            tracing::info!(
+                proto_id = npc.proto_id,
+                skill_id = sid,
+                remaining = ft_state
+                    .monster_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "Forgotten Temple: boss death skill triggered"
+            );
+            // Broadcast full MAGIC_EFFECTING packet to all zone users.
+            // Packet format: [u8 opcode][u32 skill][u32 caster][u32 target][u32 sData * 7]
+            let mut death_pkt = Packet::new(Opcode::WizMagicProcess as u8);
+            death_pkt.write_u8(3); // MAGIC_EFFECTING
+            death_pkt.write_u32(sid); // nSkillID
+            death_pkt.write_u32(npc_id); // caster = dead NPC
+            death_pkt.write_u32((-1i32) as u32); // target = -1 (zone-wide AOE)
+            death_pkt.write_u32(127); // sData[0] = X center
+            death_pkt.write_u32(0); // sData[1]
+            death_pkt.write_u32(127); // sData[2] = Z center
+            death_pkt.write_u32(0); // sData[3]
+            death_pkt.write_u32(0); // sData[4]
+            death_pkt.write_u32(0); // sData[5]
+            death_pkt.write_u32(0); // sData[6]
+            world.broadcast_to_zone(
+                super::forgotten_temple::ZONE_FORGOTTEN_TEMPLE,
+                Arc::new(death_pkt),
+                None,
+            );
+        }
+    }
+
+    // ── Under The Castle monster death (C++ CNpc::UnderTheCastleProcess) ──
+    // When a monster dies in zone 86, determine movie/gate/reward actions
+    // and broadcast WIZ_UTC_MOVIE if applicable.
+    if npc.zone_id == super::under_castle::ZONE_UNDER_CASTLE && npc.is_monster {
+        let utc_state = world.under_the_castle_state();
+        let result = super::under_castle::on_monster_death(npc.proto_id, tmpl.npc_type as u16);
+
+        // Remove from tracked monster list
+        super::under_castle::remove_from_monster_list(utc_state, npc_id);
+
+        // Broadcast movie packet if a movie should play
+        if result.movie_id > 0 {
+            let movie_pkt = super::under_castle::build_utc_movie_packet(result.movie_id);
+            world.broadcast_to_zone(
+                super::under_castle::ZONE_UNDER_CASTLE,
+                Arc::new(movie_pkt),
+                None,
+            );
+        }
+
+        // Open gate if applicable — send_gate_flag updates NPC state + broadcasts
+        if let Some(gate_idx) = result.gate_index {
+            let gate_npc_id = super::under_castle::get_gate_id(utc_state, gate_idx);
+            if gate_npc_id > 0 {
+                world.send_gate_flag(gate_npc_id, 1);
+                tracing::info!(gate_idx, gate_npc_id, "Under The Castle: gate opened");
+            }
+        }
+
+        if result.reward_room > 0 {
+            tracing::info!(
+                proto_id = npc.proto_id,
+                reward_room = result.reward_room,
+                "Under The Castle: reward room triggered"
+            );
+            // Distribute room rewards to nearby users based on proximity to
+            // room center and boss death position.
+            distribute_utc_room_rewards(world, result.reward_room, npc.x, npc.z);
+        }
+
+        if result.spawn_exit_portals {
+            tracing::info!("Under The Castle: final boss dead, spawning exit portals");
+            // SpawnEventNpc(29197, false, ZONE_UNDER_CASTLE, 852, 0, 830, ...)
+            // SpawnEventNpc(29197, false, ZONE_UNDER_CASTLE, 825, 0, 873, ...)
+            world.spawn_event_npc(
+                super::under_castle::UTC_EXIT_PORTAL_NPC,
+                false,
+                super::under_castle::ZONE_UNDER_CASTLE,
+                852.0,
+                830.0,
+                1,
+            );
+            world.spawn_event_npc(
+                super::under_castle::UTC_EXIT_PORTAL_NPC,
+                false,
+                super::under_castle::ZONE_UNDER_CASTLE,
+                825.0,
+                873.0,
+                1,
+            );
+        }
+    }
+
+    // ── Chaos Stone death processing (C++ ChaosStone.cpp:145-313) ──────
+    // Zones 71 (Ronark Land), 72 (Ardream), 73 (Ronark Land Base).
+    // When a chaos stone NPC dies: advance rank, spawn summoned monsters,
+    // register spawned NPC runtime IDs for boss kill tracking.
+    // When a summoned boss dies: decrement counter via runtime npc_id match.
+    if npc.is_monster && matches!(npc.zone_id, 71..=73) {
+        let cs_infos = world.chaos_stone_infos();
+        let cs_spawns = world.chaos_stone_spawns();
+
+        // Check if this NPC was a chaos stone itself (C++ ChaosStoneDeath)
+        if let Some(idx) = super::chaos_stone::on_chaos_stone_death(
+            &cs_infos,
+            &cs_spawns,
+            npc.proto_id,
+            npc.zone_id,
+        ) {
+            tracing::info!(
+                proto_id = npc.proto_id,
+                zone_id = npc.zone_id,
+                chaos_index = idx,
+                "Chaos Stone killed, spawning summoned monsters"
+            );
+
+            // Zone-wide notice (C++ ChatType::CHAOS_STONE_ENEMY_NOTICE)
+            let notice = super::chat::build_chat_packet(
+                super::chat::ChatType::ChaosStoneEnemyNotice as u8,
+                0,
+                0xFFFF,
+                "",
+                "",
+                0,
+                0,
+                0,
+            );
+            world.broadcast_to_zone(npc.zone_id, Arc::new(notice), None);
+
+            // Spawn summoned monsters at stone's position
+            let stages = world.chaos_stone_stages();
+            let summon_list = world.chaos_stone_summon_list();
+            let monster_ids =
+                super::chaos_stone::death_respawn_monsters(&cs_infos, &summon_list, &stages, idx);
+            drop(cs_spawns);
+            drop(stages);
+            drop(summon_list);
+
+            // Spawn each monster and register runtime IDs for boss tracking
+            // C++ NpcThread.cpp:790-825 — ChaosStoneSummon stores GetID() in sBoosID[]
+            let mut spawned_ids: Vec<u32> = Vec::new();
+            for &mid in &monster_ids {
+                if mid > 0 {
+                    let ids = world.spawn_event_npc(mid as u16, true, npc.zone_id, npc.x, npc.z, 1);
+                    spawned_ids.extend(ids);
+                }
+            }
+            super::chaos_stone::register_spawned_bosses(&cs_infos, idx, &spawned_ids);
+            drop(cs_infos);
+        } else {
+            drop(cs_spawns);
+            // Check if this was a summoned boss (C++ ChaosStoneBossKilledBy)
+            // Uses runtime npc_id (C++ GetID()), NOT proto_id
+            if super::chaos_stone::on_boss_killed(&cs_infos, npc_id, npc.zone_id) {
+                tracing::info!(
+                    npc_id,
+                    proto_id = npc.proto_id,
+                    zone_id = npc.zone_id,
+                    "Chaos Stone: all bosses killed, wave complete"
+                );
+            }
+            drop(cs_infos);
+        }
+    }
+
+    // ── Special Stone death (C++ ChaosStone.cpp:198-227) ───────────────
+    // NPC type 221 (NPC_MONSTER_SPECIAL) — randomly spawns a monster on death.
+    if tmpl.npc_type == super::chaos_stone::NPC_MONSTER_SPECIAL {
+        let stones = world.get_all_special_stones();
+        if let Some((summon_npc, summon_count)) =
+            super::chaos_stone::on_special_stone_death(&stones, npc.proto_id, npc.zone_id)
+        {
+            tracing::info!(
+                proto_id = npc.proto_id,
+                zone_id = npc.zone_id,
+                summon_npc,
+                summon_count,
+                "Special Stone killed, spawning random summon"
+            );
+            world.spawn_event_npc(summon_npc, true, npc.zone_id, npc.x, npc.z, summon_count);
+        }
+    }
+
+    // ── Santa NPC death — proximity rewards (C++ Npc.cpp:8378-8408) ──
+    // When NPC_SANTA (type 219) with area_range >= 1.0 dies, all alive
+    // players in the same zone within area_range receive EXP + etrafa items.
+    if tmpl.npc_type == NPC_SANTA && tmpl.area_range >= 1.0 {
+        let zone_sids = world.sessions_in_zone(npc.zone_id);
+        let range_sq = tmpl.area_range * tmpl.area_range;
+        let npc_x = npc.x;
+        let npc_z = npc.z;
+
+        // Pre-fetch etrafa item settings once.
+        let etrafa: [(u32, u16); 3] = if let Some(ss) = world.get_server_settings() {
+            [
+                (ss.etrafa_item1 as u32, ss.etrafa_count1 as u16),
+                (ss.etrafa_item2 as u32, ss.etrafa_count2 as u16),
+                (ss.etrafa_item3 as u32, ss.etrafa_count3 as u16),
+            ]
+        } else {
+            [(0, 0); 3]
+        };
+
+        for sid in zone_sids {
+            if world.is_player_dead(sid) {
+                continue;
+            }
+            let pos = match world.get_position(sid) {
+                Some(p) => p,
+                None => continue,
+            };
+            let dx = pos.x - npc_x;
+            let dz = pos.z - npc_z;
+            if dx * dx + dz * dz > range_sq {
+                continue;
+            }
+
+            // Give EXP (C++ pUser->ExpChange("New Years Event", m_iExp, true))
+            if tmpl.exp > 0 {
+                super::level::exp_change_with_bonus(world, sid, tmpl.exp as i64, true).await;
+            }
+
+            // Give etrafa items from server settings.
+            for &(item_id, count) in &etrafa {
+                if item_id > 0 && count > 0 {
+                    world.give_item(sid, item_id, count);
+                }
+            }
+        }
+        tracing::info!(
+            npc_id,
+            proto_id = npc.proto_id,
+            zone_id = npc.zone_id,
+            area_range = tmpl.area_range,
+            "Santa NPC death: proximity rewards distributed"
+        );
+    }
+
+    // ── Collection Race kill tracking ─────────────────────────────────
+    // Called for the killer only (CR is an individual event, not party-based).
+    {
+        let cr = world.collection_race_event().clone();
+        if let Err(e) =
+            super::collection_race::handle_kill(world, killer_sid, npc.proto_id, &cr).await
+        {
+            tracing::warn!("CR handle_kill error: {}", e);
+        }
+    }
+
+    // ── Monster resource kill notice (C++ Npc.cpp:994-1010) ───────────
+    // When a boss monster with an entry in `monster_resource` is killed,
+    // broadcast a WIZ_CHAT notice (zone-wide or server-wide).
+    if let Some(mr) = world.get_monster_resource(npc.proto_id as i16) {
+        let killer_nation = world
+            .get_character_info(killer_sid)
+            .map(|c| c.nation)
+            .unwrap_or(0);
+        let notice = super::chat::build_chat_packet(
+            mr.notice_type as u8,
+            killer_nation,
+            killer_sid,
+            "",
+            &mr.resource,
+            0,
+            0,
+            0,
+        );
+        if mr.notice_zone == 0 {
+            // Server-wide notice
+            world.broadcast_to_all(Arc::new(notice), None);
+        } else {
+            // Zone-wide notice
+            world.broadcast_to_zone(npc.zone_id, Arc::new(notice), None);
+        }
+    }
+
+    // ── Monster respawn loop (C++ Npc.cpp:909-915) ────────────────────
+    // When a monster with a matching entry in `monster_respawn_loop` dies,
+    // schedule a delayed respawn of the next NPC in the chain.
+    if let Some(chain) = world.get_respawn_chain(npc.proto_id as i16) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        world.schedule_respawn(crate::world::ScheduledRespawn {
+            born_sid: chain.iborn as u16,
+            zone_id: npc.zone_id,
+            x: npc.x,
+            z: npc.z,
+            spawn_at: now + (chain.deadtime as u64) * 60,
+        });
+        tracing::debug!(
+            "RespawnLoop: scheduled NPC {} spawn in zone {} after {}min",
+            chain.iborn,
+            npc.zone_id,
+            chain.deadtime
+        );
+    }
+}
+
+/// Distribute Under The Castle room rewards to nearby players.
+/// Each room boss kill awards TROPHY_OF_FLAME (1 or 2 based on proximity)
+/// plus room-specific bonus items to all eligible players in zone 86.
+/// Proximity logic:
+/// - If player is within BOTH the room center range AND the boss kill range (15m) -> 2 trophies
+/// - If player is within EITHER the room center range OR the boss kill range -> 1 trophy
+/// - Neither -> skip (no reward for this player)
+/// Room-specific bonus items (given to ALL qualifying players regardless of trophy count):
+/// - Room 1: Trophy only
+/// - Room 2: + Dented Ironmass
+/// - Room 3: + Petrified Weapon Shrapnel
+/// - Room 4: + Iron Powder of Chain
+/// - Room 5: + Plwitoon's Tear + Horn of Pluwitoon
+fn distribute_utc_room_rewards(world: &WorldState, room: u8, boss_x: f32, boss_z: f32) {
+    use super::under_castle;
+
+    let (center_x, center_z, room_range) = match under_castle::get_room_center(room) {
+        Some(c) => c,
+        None => {
+            tracing::warn!(room, "UTC: unknown room for reward distribution");
+            return;
+        }
+    };
+
+    let bonus_items = under_castle::get_utc_room_reward_items(room);
+
+    // Collect eligible players in UTC zone who are alive and in-game.
+    // C++ checks: pUtcPlayer != nullptr, isInGame(), GetZoneID() == ZoneID
+    // C++ does NOT check isDead() for UTC rewards (unlike FT).
+    let utc_users: Vec<(SessionId, f32, f32)> = world
+        .collect_sessions_by(|h| {
+            h.character.is_some() && h.position.zone_id == under_castle::ZONE_UNDER_CASTLE
+        })
+        .iter()
+        .filter_map(|&sid| world.get_position(sid).map(|pos| (sid, pos.x, pos.z)))
+        .collect();
+
+    let mut rewarded = 0u32;
+
+    for (sid, px, pz) in &utc_users {
+        let trophy_count = under_castle::calculate_trophy_count(
+            *px, *pz, center_x, center_z, room_range, boss_x, boss_z,
+        );
+
+        if trophy_count == 0 {
+            continue;
+        }
+
+        // Give trophy(s)
+        world.give_item(*sid, under_castle::TROPHY_OF_FLAME, trophy_count);
+
+        // Give room-specific bonus items
+        for &item_id in &bonus_items {
+            world.give_item(*sid, item_id, 1);
+        }
+
+        rewarded += 1;
+    }
+
+    tracing::info!(
+        room,
+        rewarded,
+        total_in_zone = utc_users.len(),
+        boss_x,
+        boss_z,
+        "Under The Castle: room rewards distributed"
+    );
+}
+
+/// Handle Monster Stone boss kill — mark room, set grace period, notify users.
+/// Sets `isBossKilled = true`, `WaitingTime = now + 20`, and sends
+/// `WIZ_EVENT/TEMPLE_EVENT_FINISH` + `WIZ_QUEST` to all room users.
+fn monster_stone_boss_kill(world: &WorldState, event_room: u16) {
+    use crate::systems::monster_stone;
+
+    // event_room is 1-based; room_id is 0-based
+    let room_id = event_room - 1;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut mgr = world.monster_stone_write();
+    if !mgr.boss_killed(room_id, now) {
+        return; // Already killed or room not active
+    }
+
+    // Get the user list while we hold the lock
+    let users = match mgr.get_room(room_id) {
+        Some(room) => room.users.clone(),
+        None => return,
+    };
+    drop(mgr);
+
+    // Send boss kill packets to all room users
+    let (finish_pkt, quest_pkt) = monster_stone::build_boss_kill_packets();
+    let arc_finish = Arc::new(finish_pkt);
+    let arc_quest = Arc::new(quest_pkt);
+    for &uid in &users {
+        world.send_to_session_arc(uid, Arc::clone(&arc_finish));
+        world.send_to_session_arc(uid, Arc::clone(&arc_quest));
+    }
+
+    tracing::debug!(
+        "Monster Stone boss killed in room {} — grace period started ({} users notified)",
+        room_id,
+        users.len()
+    );
+}
+
+/// Handle Draki Tower monster kill — decrement counter, advance stage if all dead.
+/// Decrements `draki_monster_kill` counter. When it reaches 0, calls
+/// `advance_stage()` to determine the next stage, then sends timer packets
+/// and spawns the next wave.
+async fn draki_tower_monster_kill(world: &WorldState, killer_sid: SessionId, event_room: u16) {
+    use crate::handler::draki_tower;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Decrement kill counter and check if all monsters are dead
+    // C++ Npc.cpp:964-967: decrement, then if 0 → ChangeDrakiMode()
+    let should_advance = {
+        let mut rooms = world.draki_tower_rooms_write();
+        match rooms.get_mut(&event_room) {
+            Some(room) if room.tower_started && room.draki_monster_kill > 0 => {
+                room.draki_monster_kill -= 1;
+                room.draki_monster_kill == 0
+            }
+            _ => false,
+        }
+    };
+
+    if !should_advance {
+        return;
+    }
+
+    // All monsters dead — advance stage (C++ ChangeDrakiMode)
+    let advance_result = {
+        let rooms = world.draki_tower_rooms_read();
+        let stages = world.draki_tower_stages();
+        match rooms.get(&event_room) {
+            Some(room) => draki_tower::advance_stage(room, &stages, now),
+            None => return,
+        }
+    };
+
+    match advance_result {
+        draki_tower::StageAdvanceResult::MonsterStage {
+            stage_index,
+            stage_id,
+        } => {
+            // Apply monster stage transition
+            {
+                let stages = world.draki_tower_stages();
+                let mut rooms = world.draki_tower_rooms_write();
+                if let Some(room) = rooms.get_mut(&event_room) {
+                    if let Some(stage) = draki_tower::get_stage_at(&stages, stage_index) {
+                        draki_tower::apply_monster_stage(room, stage, now);
+                    }
+                }
+            }
+
+            // Despawn old NPCs, then spawn new monsters
+            world.despawn_room_npcs(draki_tower::ZONE_DRAKI_TOWER, event_room);
+            let (spawn_list, time_limit, stage, sub_stage, elapsed) =
+                collect_draki_spawn_data(world, event_room, stage_id, now);
+            for (npc_id, is_monster, x, z) in &spawn_list {
+                world.spawn_event_npc_ex(
+                    *npc_id,
+                    *is_monster,
+                    draki_tower::ZONE_DRAKI_TOWER,
+                    *x,
+                    *z,
+                    1,
+                    event_room,
+                    0,
+                );
+            }
+            // Increment kill counter for spawned monsters
+            {
+                let monster_count =
+                    spawn_list.iter().filter(|(_, is_m, _, _)| *is_m).count() as u32;
+                let mut rooms = world.draki_tower_rooms_write();
+                if let Some(room) = rooms.get_mut(&event_room) {
+                    room.draki_monster_kill = monster_count;
+                }
+            }
+
+            // Send 3-packet timer sequence to killer (C++ SendDrakiTempleDetail(true))
+            send_draki_timer_packets(world, killer_sid, time_limit, stage, sub_stage, elapsed);
+        }
+        draki_tower::StageAdvanceResult::NpcStage {
+            stage_index,
+            stage_id,
+        } => {
+            // Apply NPC (rest) stage transition
+            {
+                let stages = world.draki_tower_stages();
+                let mut rooms = world.draki_tower_rooms_write();
+                if let Some(room) = rooms.get_mut(&event_room) {
+                    if let Some(stage) = draki_tower::get_stage_at(&stages, stage_index) {
+                        draki_tower::apply_npc_stage(room, stage, now, false);
+                    }
+                }
+            }
+
+            // Despawn old monsters, spawn NPC entities
+            world.despawn_room_npcs(draki_tower::ZONE_DRAKI_TOWER, event_room);
+            let (spawn_list, _, _stage, _sub_stage, elapsed) =
+                collect_draki_spawn_data(world, event_room, stage_id, now);
+            for (npc_id, is_monster, x, z) in &spawn_list {
+                world.spawn_event_npc_ex(
+                    *npc_id,
+                    *is_monster,
+                    draki_tower::ZONE_DRAKI_TOWER,
+                    *x,
+                    *z,
+                    1,
+                    event_room,
+                    0,
+                );
+            }
+
+            // Send timer packets with 180s rest timer (C++ SendDrakiTempleDetail(false))
+            // C++ lines 224-228: stage/sub_stage are hardcoded to 0,0 for NPC stages
+            let rest_limit = draki_tower::BETWEEN_STAGE_WAIT as u16;
+            send_draki_timer_packets(world, killer_sid, rest_limit, 0, 0, elapsed);
+
+            // Persist progress (C++ DrakiTowerSavedUserInfo at line 239)
+            draki_tower_save_progress(world, killer_sid, now).await;
+        }
+        draki_tower::StageAdvanceResult::TowerComplete {
+            stage_index,
+            stage_id,
+            elapsed_seconds,
+        } => {
+            // Apply final NPC stage (completion)
+            {
+                let stages = world.draki_tower_stages();
+                let mut rooms = world.draki_tower_rooms_write();
+                if let Some(room) = rooms.get_mut(&event_room) {
+                    if let Some(stage) = draki_tower::get_stage_at(&stages, stage_index) {
+                        draki_tower::apply_npc_stage(room, stage, now, true);
+                    }
+                }
+            }
+
+            // Despawn old monsters, spawn completion NPCs
+            // C++ SendDrakiTempleDetail(false) → SummonDrakiMonsters(SelectNpcDrakiRoom())
+            world.despawn_room_npcs(draki_tower::ZONE_DRAKI_TOWER, event_room);
+            let (spawn_list, _, _stage, _sub_stage, elapsed) =
+                collect_draki_spawn_data(world, event_room, stage_id, now);
+            for (npc_id, is_monster, x, z) in &spawn_list {
+                world.spawn_event_npc_ex(
+                    *npc_id,
+                    *is_monster,
+                    draki_tower::ZONE_DRAKI_TOWER,
+                    *x,
+                    *z,
+                    1,
+                    event_room,
+                    0,
+                );
+            }
+
+            // Send completion timer (TimeLimit = u16::MAX per C++ line 208)
+            // C++ lines 224-228: stage/sub_stage are hardcoded to 0,0 for NPC stages
+            send_draki_timer_packets(world, killer_sid, u16::MAX, 0, 0, elapsed);
+
+            // Persist progress + rift rank (C++ DrakiTowerSavedUserInfo + achievement)
+            draki_tower_save_progress(world, killer_sid, now).await;
+            draki_tower_update_rank(world, killer_sid, elapsed_seconds).await;
+
+            tracing::info!(
+                "Draki Tower COMPLETE! room={}, elapsed={}s",
+                event_room,
+                elapsed_seconds
+            );
+        }
+        draki_tower::StageAdvanceResult::InvalidStage => {
+            tracing::warn!("Draki Tower invalid stage advance for room {}", event_room);
+        }
+    }
+}
+
+/// Collect spawn data for a Draki Tower stage.
+#[allow(clippy::type_complexity)]
+fn collect_draki_spawn_data(
+    world: &WorldState,
+    event_room: u16,
+    stage_id: i16,
+    now: u64,
+) -> (Vec<(u16, bool, f32, f32)>, u16, u16, u16, u16) {
+    use crate::handler::draki_tower;
+
+    let monsters = world.draki_monster_list();
+    let spawn_list: Vec<(u16, bool, f32, f32)> =
+        draki_tower::get_monsters_for_stage(&monsters, stage_id)
+            .into_iter()
+            .map(|m| {
+                (
+                    m.monster_id as u16,
+                    m.is_monster,
+                    m.pos_x as f32,
+                    m.pos_z as f32,
+                )
+            })
+            .collect();
+
+    let (stage, sub_stage, elapsed) = {
+        let rooms = world.draki_tower_rooms_read();
+        rooms
+            .get(&event_room)
+            .map(|r| {
+                let elapsed = now.saturating_sub(r.draki_timer) as u16;
+                (r.draki_stage, r.draki_sub_stage, elapsed)
+            })
+            .unwrap_or((0, 0, 0))
+    };
+
+    let time_limit = draki_tower::SUB_STAGE_TIME_LIMIT as u16;
+    (spawn_list, time_limit, stage, sub_stage, elapsed)
+}
+
+/// Send the 3-packet Draki Tower timer sequence to a player.
+/// Sends WIZ_SELECT_MSG, WIZ_EVENT/TIMER, and WIZ_BIFROST.
+fn send_draki_timer_packets(
+    world: &WorldState,
+    sid: SessionId,
+    time_limit: u16,
+    stage: u16,
+    sub_stage: u16,
+    elapsed: u16,
+) {
+    use crate::handler::draki_tower;
+
+    // 1. WIZ_SELECT_MSG (client countdown UI)
+    let mut select_pkt = Packet::new(Opcode::WizSelectMsg as u8);
+    select_pkt.write_u32(0);
+    select_pkt.write_u8(7);
+    select_pkt.write_u64(0);
+    select_pkt.write_u32(0x0A);
+    select_pkt.write_u8(233);
+    select_pkt.write_u16(time_limit);
+    select_pkt.write_u16(elapsed);
+    world.send_to_session_owned(sid, select_pkt);
+
+    // 2. WIZ_EVENT / TEMPLE_DRAKI_TOWER_TIMER (stage info)
+    let mut timer_pkt = Packet::new(Opcode::WizEvent as u8);
+    timer_pkt.write_u8(draki_tower::TEMPLE_DRAKI_TOWER_TIMER);
+    timer_pkt.write_u8(233);
+    timer_pkt.write_u8(3);
+    timer_pkt.write_u16(stage);
+    timer_pkt.write_u16(sub_stage);
+    timer_pkt.write_u32(time_limit as u32);
+    timer_pkt.write_u32(elapsed as u32);
+    world.send_to_session_owned(sid, timer_pkt);
+
+    // 3. WIZ_BIFROST timer display
+    let mut bifrost_pkt = Packet::new(Opcode::WizBifrost as u8);
+    bifrost_pkt.write_u8(5);
+    bifrost_pkt.write_u16(time_limit);
+    world.send_to_session_owned(sid, bifrost_pkt);
+}
+
+/// Persist Draki Tower progress to the database.
+/// Saves elapsed time and linear stage index for the player.
+pub(crate) async fn draki_tower_save_progress(world: &WorldState, sid: SessionId, now: u64) {
+    use crate::handler::draki_tower;
+    use ko_db::repositories::draki_tower::DrakiTowerRepository;
+
+    let pool = match world.db_pool() {
+        Some(p) => p,
+        None => return,
+    };
+    let ch = match world.get_character_info(sid) {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Read room state to get elapsed time and current stage index.
+    // C++ guard: only persist when is_draki_stage_change == true (dungeon 1 entries only).
+    let event_room = world.get_event_room(sid);
+    let (elapsed, stage_index) = {
+        let rooms = world.draki_tower_rooms_read();
+        match rooms.get(&event_room) {
+            Some(room) if room.tower_started && room.is_draki_stage_change => {
+                let elapsed = now.saturating_sub(room.draki_timer) as i32;
+                let idx = room.saved_draki_stage;
+                (elapsed, idx as i16)
+            }
+            _ => return,
+        }
+    };
+
+    let draki_cls = draki_tower::draki_class(ch.class);
+    let cls_name = draki_tower::draki_class_name(draki_cls);
+    let entrance_limit = world
+        .with_session(sid, |h| h.draki_entrance_limit)
+        .unwrap_or(draki_tower::MAX_ENTRANCE_LIMIT) as i16;
+
+    let repo = DrakiTowerRepository::new(pool);
+    if let Err(e) = repo
+        .save_user_data(
+            &ch.name,
+            draki_cls,
+            cls_name,
+            elapsed,
+            stage_index,
+            entrance_limit,
+        )
+        .await
+    {
+        tracing::warn!("Draki Tower save_user_data failed: {e}");
+    }
+}
+
+/// Update rift ranking when tower is completed.
+async fn draki_tower_update_rank(world: &WorldState, sid: SessionId, elapsed_seconds: u32) {
+    use crate::handler::draki_tower;
+    use ko_db::repositories::draki_tower::DrakiTowerRepository;
+
+    let pool = match world.db_pool() {
+        Some(p) => p,
+        None => return,
+    };
+    let ch = match world.get_character_info(sid) {
+        Some(c) => c,
+        None => return,
+    };
+
+    let draki_cls = draki_tower::draki_class(ch.class);
+    let cls_name = draki_tower::draki_class_name(draki_cls);
+
+    // Determine rank position: load existing ranks, find insert position
+    let repo = DrakiTowerRepository::new(pool);
+    let all_ranks = match repo.load_rift_ranks().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("draki_tower finish_rift load_rift_ranks DB error: {e}");
+            Vec::new()
+        }
+    };
+    let class_ranks: Vec<_> = all_ranks.iter().filter(|r| r.class == draki_cls).collect();
+
+    // Find position where this time beats an existing entry (or is new top-5)
+    let rank_pos = class_ranks
+        .iter()
+        .position(|r| (elapsed_seconds as i32) < r.finish_time)
+        .unwrap_or(class_ranks.len());
+
+    if rank_pos < 5 {
+        let rank_id = (rank_pos + 1) as i32;
+        if let Err(e) = repo
+            .upsert_rift_rank(
+                draki_cls,
+                cls_name,
+                rank_id,
+                &ch.name,
+                41, // stage 41 = completed all 5 dungeons (final stage index)
+                elapsed_seconds as i32,
+            )
+            .await
+        {
+            tracing::warn!("Draki Tower upsert_rift_rank failed: {e}");
+        }
+    }
+}
+
+/// Handle Dungeon Defence monster kill — distribute rewards and advance stage.
+/// and kill-count decrement in `Npc.cpp:971-984`.
+/// 1. Validate the monster is a DD monster (proto ID check).
+/// 2. Calculate rewards (rift jewels, monster coins, lunar tokens for bosses).
+/// 3. Give items to killer and party members.
+/// 4. Decrement the room's kill counter atomically.
+/// 5. When kill counter reaches 0, advance stage or trigger finish.
+fn dd_monster_kill(world: &WorldState, killer_sid: SessionId, event_room: u16, proto_id: u16) {
+    use crate::handler::dungeon_defence;
+
+    // ── 1. Reward calculation ──────────────────────────────────────────
+    // C++ DungeonDefenceProcess lines 545-570: only specific monster IDs get rewards
+    let room = match world.dd_rooms().iter().find(|r| {
+        r.room_id.load(std::sync::atomic::Ordering::Relaxed) == event_room
+            && r.is_started.load(std::sync::atomic::Ordering::Relaxed)
+    }) {
+        Some(r) => r,
+        None => return,
+    };
+
+    let current_stage = room.stage_id.load(std::sync::atomic::Ordering::Relaxed);
+    let reward = match dungeon_defence::calculate_kill_reward(proto_id, current_stage) {
+        Some(r) => r,
+        None => {
+            // Not a DD monster — still decrement kill counter below
+            // C++ Npc.cpp:971-984: kill count decrement is separate from reward
+            dd_decrement_and_advance(world, event_room);
+            return;
+        }
+    };
+
+    // ── 2. Distribute rewards ──────────────────────────────────────────
+    // C++ DungeonDefenceProcess lines 583-637
+
+    // Give rift jewels to killer (1 for stages 1-17, 2 for stages 18-35)
+    world.give_item(
+        killer_sid,
+        dungeon_defence::MONSTER_RIFT_JEWEL,
+        reward.rift_jewel_count,
+    );
+
+    // Get killer's party for coin/token distribution
+    let party_members = world
+        .get_party_id(killer_sid)
+        .and_then(|pid| world.get_party(pid))
+        .map(|p| p.active_members())
+        .unwrap_or_default();
+
+    if party_members.is_empty() {
+        // Solo player: 2 coins to killer
+        world.give_item(
+            killer_sid,
+            dungeon_defence::MONSTER_COIN_ITEM,
+            reward.killer_coin_count,
+        );
+        // Boss: 1 lunar token to killer
+        if reward.lunar_token {
+            world.give_item(killer_sid, dungeon_defence::LUNAR_ORDER_TOKEN, 1);
+        }
+    } else {
+        // In party: 2 coins to killer, 1 coin to each other party member
+        for &msid in &party_members {
+            if msid == killer_sid {
+                world.give_item(
+                    msid,
+                    dungeon_defence::MONSTER_COIN_ITEM,
+                    reward.killer_coin_count,
+                );
+            } else {
+                world.give_item(
+                    msid,
+                    dungeon_defence::MONSTER_COIN_ITEM,
+                    reward.party_coin_count,
+                );
+            }
+            // Boss: 1 lunar token to ALL party members
+            if reward.lunar_token {
+                world.give_item(msid, dungeon_defence::LUNAR_ORDER_TOKEN, 1);
+            }
+        }
+    }
+
+    // ── 3. Decrement kill counter and advance ──────────────────────────
+    dd_decrement_and_advance(world, event_room);
+}
+
+/// Decrement DD room kill counter and advance stage when all monsters are dead.
+fn dd_decrement_and_advance(world: &WorldState, event_room: u16) {
+    use crate::handler::dungeon_defence;
+
+    let room = match world.dd_rooms().iter().find(|r| {
+        r.room_id.load(std::sync::atomic::Ordering::Relaxed) == event_room
+            && r.is_started.load(std::sync::atomic::Ordering::Relaxed)
+    }) {
+        Some(r) => r,
+        None => return,
+    };
+
+    // Atomically decrement kill count; check if all monsters are dead
+    // C++ Npc.cpp:975-977: m_DefenceKillCount--, if <= 0 → ChangeDungeonDefenceStage()
+    let prev = room
+        .kill_count
+        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    if prev > 1 {
+        // More monsters to kill
+        return;
+    }
+
+    // All monsters dead → advance stage
+    // C++ ChangeDungeonDefenceStage() lines 461-512
+    let stages = world.dd_stages();
+    let result = dungeon_defence::advance_stage(room, &stages);
+    drop(stages);
+
+    match result {
+        dungeon_defence::StageAdvanceResult::NextStage { new_stage_id, .. } => {
+            tracing::info!("DD room {} advanced to stage {}", event_room, new_stage_id);
+            // Timer loop will pick up monster_spawned flag and spawn next wave
+        }
+        dungeon_defence::StageAdvanceResult::Finished => {
+            // All stages cleared — trigger finish timer
+            // C++ DungeonDefenceSendFinishTimer() lines 516-536
+            dungeon_defence::trigger_finish(room);
+
+            // Send WIZ_BIFROST(5, 30) countdown packet
+            let mut bifrost_pkt = Packet::new(Opcode::WizBifrost as u8);
+            bifrost_pkt.write_u8(5);
+            bifrost_pkt.write_u16(dungeon_defence::DD_FINISH_TIME);
+            world.broadcast_to_zone_event_room(
+                ZONE_DUNGEON_DEFENCE,
+                event_room,
+                Arc::new(bifrost_pkt),
+                None,
+            );
+
+            // Send WIZ_SELECT_MSG victory UI
+            // C++ lines 528-533: uint32(0) + uint8(7) + uint64(0) + uint8(9)
+            //   + uint16(0) + uint8(0) + uint8(11) + uint16(30) + uint16(0)
+            let mut select_pkt = Packet::new(Opcode::WizSelectMsg as u8);
+            select_pkt.write_u32(0);
+            select_pkt.write_u8(7);
+            select_pkt.write_u64(0);
+            select_pkt.write_u8(9);
+            select_pkt.write_u16(0);
+            select_pkt.write_u8(0);
+            select_pkt.write_u8(11);
+            select_pkt.write_u16(dungeon_defence::DD_FINISH_TIME);
+            select_pkt.write_u16(0);
+            world.broadcast_to_zone_event_room(
+                ZONE_DUNGEON_DEFENCE,
+                event_room,
+                Arc::new(select_pkt),
+                None,
+            );
+
+            tracing::info!(
+                "DD room {} FINISHED — all stages cleared, 30s kick timer started",
+                event_room
+            );
+        }
+        dungeon_defence::StageAdvanceResult::Error => {
+            tracing::warn!(
+                "DD room {} stage advance error (invalid difficulty?)",
+                event_room
+            );
+        }
+    }
+}
+
+/// Handle BDW altar flag pickup when the altar NPC is killed.
+/// 1. Validates user is in a valid BDW room and BDW is active
+/// 2. Sets `has_altar_obtained = true` (flag pickup)
+/// 3. Broadcasts `TEMPLE_EVENT_ALTAR_FLAG` (sub-opcode 49) to all users in the room
+fn bdw_altar_flag_pickup(world: &WorldState, killer_sid: SessionId, _zone_id: u16, npc_id: NpcId) {
+    use crate::systems::event_room::{self, TempleEventType};
+    use crate::world::ActiveBuff;
+
+    let is_bdw_active = world
+        .event_room_manager
+        .read_temple_event(|s| s.is_bdw_active());
+    if !is_bdw_active {
+        return;
+    }
+
+    let (killer_name, _killer_nation) = match world.get_character_info(killer_sid) {
+        Some(ch) => (ch.name.clone(), ch.nation),
+        None => return,
+    };
+
+    // Find killer's room
+    let (room_id, _) = match world
+        .event_room_manager
+        .find_user_room(TempleEventType::BorderDefenceWar, &killer_name)
+    {
+        Some(r) => r,
+        None => return,
+    };
+
+    // Flag pickup inside room lock scope + store altar NPC ID
+    let nation = {
+        let mut bdw_mgr = world.bdw_manager_write();
+
+        let Some(mut room) = world
+            .event_room_manager
+            .get_room_mut(TempleEventType::BorderDefenceWar, room_id)
+        else {
+            return;
+        };
+
+        if room.finish_packet_sent {
+            return;
+        }
+
+        let nation = bdw::flag_pickup(&mut room, &killer_name);
+
+        // Store the altar NPC ID so we can restore its HP on respawn
+        if nation != 0 {
+            if let Some(bdw_state) = bdw_mgr.get_room_state_mut(room_id) {
+                bdw_state.altar_npc_id = npc_id;
+            }
+        }
+
+        nation
+    };
+
+    if nation == 0 {
+        return;
+    }
+
+    // Broadcast altar flag pickup to all room users
+    let flag_pkt = event_room::build_altar_flag_packet(&killer_name, nation);
+    dead::broadcast_to_bdw_room(world, room_id, &flag_pkt);
+
+    // Apply BUFF_TYPE_FRAGMENT_OF_MANES speed debuff to carrier
+    //   pTarget->m_bSpeedAmount = pType->bSpeed;
+    world.apply_buff(
+        killer_sid,
+        ActiveBuff {
+            skill_id: bdw::BUFF_FRAGMENT_OF_MANES_SKILL,
+            buff_type: bdw::BUFF_TYPE_FRAGMENT_OF_MANES,
+            caster_sid: killer_sid,
+            start_time: std::time::Instant::now(),
+            duration_secs: 0, // permanent until explicitly removed
+            attack_speed: 0,
+            speed: bdw::FRAGMENT_SPEED_VALUE,
+            ac: 0,
+            ac_pct: 0,
+            attack: 0,
+            magic_attack: 0,
+            max_hp: 0,
+            max_hp_pct: 0,
+            max_mp: 0,
+            max_mp_pct: 0,
+            str_mod: 0,
+            sta_mod: 0,
+            dex_mod: 0,
+            intel_mod: 0,
+            cha_mod: 0,
+            fire_r: 0,
+            cold_r: 0,
+            lightning_r: 0,
+            magic_r: 0,
+            disease_r: 0,
+            poison_r: 0,
+            hit_rate: 0,
+            avoid_rate: 0,
+            weapon_damage: 0,
+            ac_sour: 0,
+            duration_extended: false,
+            is_buff: true, // C++ classifies this as buff (not debuff)
+        },
+    );
+
+    tracing::info!(
+        "BDW altar flag pickup: '{}' (nation={}) in room {}, debuff applied",
+        killer_name,
+        nation,
+        room_id,
+    );
+}
+
+/// Award NPC kill XP to a single player, applying level-difference modifier.
+/// Uses `level::exp_change()` for proper level-up/down handling and correct
+/// WIZ_EXP_CHANGE packet format.
+async fn award_npc_xp(world: &WorldState, sid: SessionId, base_exp: i64, npc_level: u8) {
+    let player_level = match world.get_character_info(sid) {
+        Some(ch) => ch.level,
+        None => return,
+    };
+
+    // Apply level-difference modifier
+    let modifier = super::level::get_reward_modifier(npc_level, player_level);
+    let final_exp = (base_exp as f32 * modifier) as i64;
+
+    if final_exp <= 0 {
+        return;
+    }
+
+    if !world.try_jackpot_exp(sid, final_exp).await {
+        super::level::exp_change(world, sid, final_exp).await;
+    }
+}
+
+/// Award NPC kill loyalty (NP) to a solo player, applying level-difference modifier.
+fn award_npc_loyalty_solo(world: &WorldState, sid: SessionId, base_loyalty: i32, npc_level: u8) {
+    if base_loyalty <= 0 {
+        return;
+    }
+    let player_level = match world.get_character_info(sid) {
+        Some(ch) => ch.level,
+        None => return,
+    };
+
+    let modifier = super::level::get_reward_modifier(npc_level, player_level);
+    let final_loyalty = ((base_loyalty as f32) * modifier).ceil() as i32;
+    if final_loyalty > 0 {
+        crate::systems::loyalty::send_loyalty_change(
+            world,
+            sid,
+            final_loyalty,
+            false,
+            false,
+            true, // C++ User.cpp:2571 — SendLoyaltyChange("Npc Loyalty", n) uses default true
+        );
+    }
+}
+
+/// Send WIZ_TARGET_HP for an NPC target (HP bar update).
+/// Packet format: `[u32 npc_id][u8 0][u32 max_hp][u32 current_hp][u32 0][u32 0][u8 0]`
+fn send_npc_target_hp_update(
+    world: &WorldState,
+    attacker_sid: SessionId,
+    npc_id: NpcId,
+    max_hp: i32,
+    current_hp: i32,
+    damage: i32,
+) {
+    let mut response = Packet::new(Opcode::WizTargetHp as u8);
+    response.write_u32(npc_id);
+    response.write_u8(0);
+    response.write_u32(max_hp.max(0) as u32);
+    response.write_u32(current_hp.max(0) as u32);
+    response.write_u32((-damage) as u32); // C++ sends negative amount (damage dealt = negative)
+    response.write_u32(0);
+    response.write_u8(0);
+
+    world.send_to_session_owned(attacker_sid, response);
+}
+
+/// Build and broadcast the attack result packet to the 3x3 region.
+/// ```text
+/// Packet result(WIZ_ATTACK, bType);
+/// result << bResult << uint32(GetSocketID()) << uint32(tid) << unknown;
+/// SendToRegion(&result, nullptr, GetEventRoom());
+/// ```
+/// Wire format: `[u8 bType][u8 bResult][u32 attacker_id][u32 target_id][u8 unknown]`
+fn broadcast_attack_result(
+    world: &WorldState,
+    attacker_sid: SessionId,
+    b_type: u8,
+    b_result: u8,
+    target_id: u32,
+    unknown: u8,
+) {
+    let mut pkt = Packet::new(Opcode::WizAttack as u8);
+    pkt.write_u8(b_type);
+    pkt.write_u8(b_result);
+    pkt.write_u32(attacker_sid as u32);
+    pkt.write_u32(target_id);
+    pkt.write_u8(unknown);
+
+    if let Some(pos) = world.get_position(attacker_sid) {
+        let event_room = world.get_event_room(attacker_sid);
+        world.broadcast_to_3x3(
+            pos.zone_id,
+            pos.region_x,
+            pos.region_z,
+            Arc::new(pkt),
+            None,
+            event_room,
+        );
+    }
+}
+
+/// Send a WIZ_TARGET_HP update to the attacker so the client updates the
+/// target's HP bar after taking damage.
+fn send_target_hp_update(
+    world: &WorldState,
+    attacker_sid: SessionId,
+    target_sid: SessionId,
+    damage: i32,
+) {
+    let ch = match world.get_character_info(target_sid) {
+        Some(c) => c,
+        None => return,
+    };
+
+    let mut response = Packet::new(Opcode::WizTargetHp as u8);
+    response.write_u32(target_sid as u32);
+    response.write_u8(0); // echo flag
+    response.write_u32(ch.max_hp as u32);
+    response.write_u32(ch.hp.max(0) as u32);
+    // C++ sends negative amount for damage dealt, positive for heal.
+    // Client uses sign: negative = "X damage dealt", positive = "X HP received"
+    response.write_u32((-damage) as u32);
+    response.write_u32(0); // reserved
+    response.write_u8(0); // reserved
+
+    // Send to the attacker
+    world.send_to_session_owned(attacker_sid, response);
+}
+
+/// Check if a zone is a PK zone (allows PvP combat).
+fn is_pk_zone(zone_id: u16) -> bool {
+    zone_id == ZONE_RONARK_LAND
+        || zone_id == ZONE_ARDREAM
+        || zone_id == ZONE_RONARK_LAND_BASE
+        || zone_id == ZONE_KROWAZ_DOMINION
+        || (ZONE_BATTLE..=ZONE_BATTLE6).contains(&zone_id)
+}
+
+/// Check if a class is a priest class (base class 4, 11, or 12).
+fn is_priest_class(class: u16) -> bool {
+    matches!(class % 100, 4 | 11 | 12)
+}
+
+/// Give zone kill rewards after a PvP kill.
+/// Logic:
+/// 1. Increment the killer's PvP kill count.
+/// 2. For each zone_kill_reward row matching the killer's zone:
+///    - Check status (must be 1/enabled)
+///    - Check drop_rate (random 1-10000, skip if random > rate unless rate == 10000)
+///    - Check kill_count modulo (m_KillCount % reward.KillCount == 0)
+///    - Check party_required (0=solo only, 1=party only, 2=any)
+///    - If all_party_reward and in party, give to all party members in zone
+///    - If not all_party_reward and in party and is_priest=true, redirect to priest in party
+///    - Otherwise give to the killer directly
+fn give_kill_reward(world: &WorldState, killer_sid: SessionId, zone_id: u16) {
+    // Increment kill count on the killer session
+    let mut kill_count: u16 = 0;
+    world.update_session(killer_sid, |h| {
+        h.pvp_kill_count = h.pvp_kill_count.wrapping_add(1);
+        kill_count = h.pvp_kill_count;
+    });
+
+    // Get killer info
+    let killer_info = match world.get_character_info(killer_sid) {
+        Some(ch) => ch,
+        None => return,
+    };
+
+    let in_party = killer_info.party_id.is_some();
+    let killer_class = killer_info.class;
+    let killer_event_room = world.get_event_room(killer_sid);
+
+    // Get zone kill rewards for this zone
+    let rewards = world.get_zone_kill_rewards(zone_id);
+    if rewards.is_empty() {
+        return;
+    }
+
+    // Collect party member session IDs if in a party
+    let party_sids: Vec<SessionId> = if let Some(party_id) = killer_info.party_id {
+        world
+            .get_party(party_id)
+            .map(|p| p.members.iter().filter_map(|m| *m).collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let mut rng = rand::thread_rng();
+
+    for reward in &rewards {
+        // Check drop rate (random 1-10000)
+        let roll: u16 = rng.gen_range(1..=10000);
+        if roll > reward.drop_rate as u16 && reward.drop_rate != 10000 {
+            continue;
+        }
+
+        // Check kill count modulo: m_KillCount % reward.KillCount == 0
+        if reward.kill_count > 0 && !kill_count.is_multiple_of(reward.kill_count as u16) {
+            continue;
+        }
+
+        // Check party requirement
+        //                pReward->Party == 0 && isInParty() -> skip (solo only)
+        if reward.party_required == 1 && !in_party {
+            continue;
+        }
+        if reward.party_required == 0 && in_party {
+            continue;
+        }
+
+        let mut self_reward = true;
+
+        // If in party and all_party_reward, give to all party members in zone+room
+        //   if (pUser->GetZoneID() != GetZoneID()
+        //    || pUser->GetEventRoom() != GetEventRoom()
+        //    || pUser->GetPartyID() != GetPartyID()) continue;
+        if in_party && reward.all_party_reward {
+            for &member_sid in &party_sids {
+                let member_ok = world
+                    .with_session(member_sid, |h| {
+                        h.character.is_some()
+                            && h.position.zone_id == zone_id
+                            && h.event_room == killer_event_room
+                    })
+                    .unwrap_or(false);
+                if !member_ok {
+                    continue;
+                }
+                give_reward_to_player(world, member_sid, reward);
+            }
+            self_reward = false;
+        } else if in_party && !reward.all_party_reward && !is_priest_class(killer_class) {
+            // Non-priest killer in party: chance to redirect reward to a priest
+            let redirect_roll: u16 = rng.gen_range(0..=10000);
+            let priest_rate_threshold = (reward.priest_rate.min(100) as u16) * 100;
+            if redirect_roll < priest_rate_threshold {
+                for &member_sid in &party_sids {
+                    let is_priest_in_zone = world
+                        .with_session(member_sid, |h| {
+                            if let Some(ref ch) = h.character {
+                                is_priest_class(ch.class)
+                                    && h.position.zone_id == zone_id
+                                    && h.event_room == killer_event_room
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if is_priest_in_zone {
+                        give_reward_to_player(world, member_sid, reward);
+                    }
+                }
+            }
+            // Note: killer still gets reward (self_reward stays true) per C++ logic
+        }
+
+        if self_reward {
+            give_reward_to_player(world, killer_sid, reward);
+        }
+    }
+}
+
+/// Give a single zone kill reward item to a player.
+/// - When `isBank` (give_to_warehouse) is true, item goes to warehouse via
+///   `GiveWerehouseItem(ItemID, sCount, false, false, Time)`.
+/// - When `Time` (item_expiration) > 0, item gets an expiry timestamp:
+///   `nExpirationTime = UNIXTIME + (86400 * Time)` (Time is in days).
+fn give_reward_to_player(
+    world: &WorldState,
+    sid: SessionId,
+    reward: &ko_db::models::ZoneKillReward,
+) {
+    let item_id = reward.item_id as u32;
+    let count = reward.item_count.max(1) as u16;
+    let expiry_days = reward.item_expiration.max(0) as u32;
+
+    if item_id == ITEM_GOLD {
+        world.gold_gain(sid, count as u32);
+    } else if reward.give_to_warehouse {
+        world.give_warehouse_item(sid, item_id, count, expiry_days);
+    } else if expiry_days > 0 {
+        world.give_item_with_expiry(sid, item_id, count, expiry_days);
+    } else {
+        world.give_item(sid, item_id, count);
+    }
+
+    tracing::debug!(
+        "[sid={}] Zone kill reward: item_id={}, count={}, zone={}, warehouse={}, expiry_days={}",
+        sid,
+        item_id,
+        count,
+        reward.zone_id,
+        reward.give_to_warehouse,
+        expiry_days,
+    );
+}
+
+// ── PvP zone helpers ───────────────────────────────────────────────────────
+
+/// Apply NPC type-specific damage overrides.
+/// Prison NPC needs punishment stick + 5% MP cost, Fosil needs pickaxe, etc.
+fn apply_npc_type_damage_override(
+    world: &WorldState,
+    attacker_sid: SessionId,
+    attacker: &CharacterInfo,
+    tmpl: &crate::npc::NpcTemplate,
+    npc: &crate::npc::NpcInstance,
+    damage: i16,
+) -> i16 {
+    // Weapon kind for pickaxe: C++ GameDefine.h:1234 — WEAPON_PICKAXE = 61
+    const WEAPON_PICKAXE: i32 = 61;
+    // Punishment stick item ID: C++ GameDefine.h:1622 — `GetNum() == 900356000`
+    const PUNISHMENT_STICK_ID: i32 = 900356000;
+
+    match tmpl.npc_type {
+        NPC_PRISON => {
+            // Requires punishment stick weapon + 5% MP
+            let mp_cost = (attacker.max_mp as i32 * 5 / 100) as i16;
+            if attacker.mp < mp_cost {
+                return 0;
+            }
+            let weapon = world.get_right_hand_weapon(attacker_sid);
+            let slot = world.get_inventory_slot(attacker_sid, 6); // RIGHTHAND=6
+            let valid = match (weapon, slot) {
+                (Some(w), Some(s)) => w.num == PUNISHMENT_STICK_ID && s.durability > 0,
+                _ => false,
+            };
+            if valid {
+                let new_mp = (attacker.mp - mp_cost).max(0);
+                world.update_character_mp(attacker_sid, new_mp);
+                1
+            } else {
+                0
+            }
+        }
+        NPC_FOSIL => {
+            // Requires pickaxe weapon
+            let weapon = world.get_right_hand_weapon(attacker_sid);
+            let slot = world.get_inventory_slot(attacker_sid, 6); // RIGHTHAND=6
+            let valid = match (weapon, slot) {
+                (Some(w), Some(s)) => w.kind == Some(WEAPON_PICKAXE) && s.durability > 0,
+                _ => false,
+            };
+            if valid {
+                1
+            } else {
+                0
+            }
+        }
+        NPC_OBJECT_FLAG if npc.proto_id == 511 => 1,
+        NPC_REFUGEE => {
+            if npc.is_monster {
+                match npc.proto_id {
+                    3202 | 3203 | 3252 | 3253 => 20,
+                    _ => 10,
+                }
+            } else {
+                10
+            }
+        }
+        NPC_TREE => 20,
+        NPC_PARTNER_TYPE if tmpl.group == 0 => 0, // Nation::NONE companion
+        NPC_BORDER_MONUMENT => 10,
+        _ => {
+            // Neutral peaceful NPCs cannot be R-attacked.
+            // NPC nation is stored in the AI state, but group field on template
+            // represents the original nation. For runtime nation, use npc_ai.
+            // Here we check the template group field (matching m_OrgNation).
+            if tmpl.group == 3 {
+                0
+            } else {
+                damage
+            }
+        }
+    }
+}
+
+/// Check if the player has an active Vaccuni transformation that deals 30000 fixed damage.
+/// Specific NPC proto IDs require both a quest event flag and a special weapon
+/// equipped in the right hand. If conditions are met, returns true (damage = 30000).
+fn check_vaccuni_attack(
+    world: &WorldState,
+    attacker_sid: SessionId,
+    npc: &crate::npc::NpcInstance,
+) -> bool {
+    // Item IDs for Vaccuni transformation weapons
+    const TIMING_FLOW_TYON: i32 = 900335523;
+    const TIMING_FLOW_MEGANTHEREON: i32 = 900336524;
+    const TIMING_FLOW_HELLHOUND: i32 = 900337525;
+
+    // (proto_id, event_ids, required_weapon_id)
+    let check = match npc.proto_id {
+        4351 => Some(([793_u16, 794], TIMING_FLOW_TYON)),
+        655 => Some(([795, 796], TIMING_FLOW_MEGANTHEREON)),
+        666 => Some(([798, 799], TIMING_FLOW_HELLHOUND)),
+        // Proto 4301, 605, 611, 616 fall through (return false)
+        _ => None,
+    };
+
+    let (event_ids, weapon_id) = match check {
+        Some(c) => c,
+        None => return false,
+    };
+
+    // Check quest events (C++ CheckExistEvent(event_id, 1))
+    let has_event = world
+        .with_session(attacker_sid, |h| {
+            h.quests
+                .get(&event_ids[0])
+                .map(|q| q.quest_state == 1)
+                .unwrap_or(false)
+                || h.quests
+                    .get(&event_ids[1])
+                    .map(|q| q.quest_state == 1)
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false);
+
+    if !has_event {
+        return false;
+    }
+
+    // Check right-hand weapon
+    let weapon = world.get_right_hand_weapon(attacker_sid);
+    let slot = world.get_inventory_slot(attacker_sid, 6); // RIGHTHAND=6
+
+    match (weapon, slot) {
+        (Some(w), Some(s)) => w.num == weapon_id && s.durability > 0,
+        _ => false,
+    }
+}
+
+/// Check if the player is in an arena area (Moradon arena or ZONE_ARENA).
+/// Returns true if:
+/// - In ZONE_ARENA (48) — all locations considered arena
+/// - In Moradon (21-25) AND within Moradon arena bounds (x: 684-735, z: 360-491)
+pub(crate) fn is_in_arena(zone_id: u16, x: f32, z: f32) -> bool {
+    if zone_id == ZONE_ARENA {
+        return true;
+    }
+    // Moradon zones: 21-25
+    if (ZONE_MORADON..=ZONE_MORADON5).contains(&zone_id) {
+        return x > 684.0 && x < 735.0 && ((z > 360.0 && z < 411.0) || (z > 440.0 && z < 491.0));
+    }
+    false
+}
+
+/// Check if the zone is a normal PVP zone (allows nation-vs-nation combat).
+pub(crate) fn is_in_pvp_zone(zone_id: u16) -> bool {
+    zone_id == ZONE_RONARK_LAND
+        || zone_id == ZONE_RONARK_LAND_BASE
+        || zone_id == ZONE_ARDREAM
+        || zone_id == ZONE_SNOW_BATTLE
+        || zone_id == ZONE_BATTLE
+        || zone_id == ZONE_BATTLE2
+        || zone_id == ZONE_BATTLE3
+        || zone_id == ZONE_BATTLE4
+        || zone_id == ZONE_BATTLE5
+        || zone_id == ZONE_BATTLE6
+        || zone_id == ZONE_JURAID_MOUNTAIN
+        || zone_id == ZONE_BORDER_DEFENSE_WAR
+        || zone_id == ZONE_CLAN_WAR_ARDREAM
+        || zone_id == ZONE_CLAN_WAR_RONARK
+        || zone_id == ZONE_BIFROST
+        || (ZONE_PARTY_VS_1..=ZONE_PARTY_VS_4).contains(&zone_id)
+        || is_in_special_event_zone(zone_id)
+}
+
+/// Check if the zone is a special event zone (Zindan War / SPBATTLE zones 105-115).
+/// ZONE_SPBATTLE_BASE = 104, SPBATTLE1 = 105 .. SPBATTLE11 = 115
+pub(crate) fn is_in_special_event_zone(zone_id: u16) -> bool {
+    (105..=115).contains(&zone_id)
+}
+
+/// Check if the zone is Luferson Castle (Karus nation zones).
+fn is_in_luferson_castle(zone_id: u16) -> bool {
+    zone_id == ZONE_KARUS || zone_id == ZONE_KARUS2 || zone_id == ZONE_KARUS3
+}
+
+/// Check if the zone is El Morad Castle (El Morad nation zones).
+fn is_in_elmorad_castle(zone_id: u16) -> bool {
+    zone_id == ZONE_ELMORAD || zone_id == ZONE_ELMORAD2 || zone_id == ZONE_ELMORAD3
+}
+
+/// Core PvP permission check — determines if attacker can attack target.
+/// This implements the "default deny" model: PvP is only allowed in specific
+/// zones and under specific conditions. Returns `true` if the attack is allowed.
+/// ## Zone Rules (in priority order)
+/// 1. **Moradon Arena**: Party arena (same party can't attack), melee arena (can't attack self)
+/// 2. **ZONE_ARENA**: Rose clan arena restrictions, safety area check, otherwise allow
+/// 3. **Own safety area**: Target in own safety area → deny (cross-nation only)
+/// 4. **PVP zones**: Opposite nation → allow
+/// 5. **Abyss zones**: Opposite nation → allow
+/// 6. **Delos (CSW)**: Both must be in different clans during active CSW war → allow
+/// 7. **Castle wars**: Opposite nation + open flags → allow
+/// 8. **GM override**: GM can attack in castle zones without open flags
+/// 9. **Default**: Deny all PvP
+pub(crate) fn is_hostile_to(
+    world: &WorldState,
+    attacker_sid: SessionId,
+    attacker: &CharacterInfo,
+    attacker_pos: &Position,
+    target_sid: SessionId,
+    target: &CharacterInfo,
+    target_pos: &Position,
+) -> bool {
+    // Self-targeting is never hostile.
+    if attacker_sid == target_sid {
+        return false;
+    }
+
+    let attacker_zone = attacker_pos.zone_id;
+    let attacker_x = attacker_pos.x;
+    let attacker_z = attacker_pos.z;
+
+    // ── Event room check ────────────────────────────────────────────────
+    // Handled earlier in the temple event gate block (lines ~1108-1150)
+    // which blocks cross-room attacks before reaching is_hostile_to.
+
+    // ── Moradon / Arena combat ──────────────────────────────────────────
+    if is_in_arena(attacker_zone, attacker_x, attacker_z)
+        && is_in_arena(target_pos.zone_id, target_pos.x, target_pos.z)
+    {
+        // Party arena: x 684-735, z 360-411
+        if attacker_x > 684.0 && attacker_x < 735.0 && attacker_z > 360.0 && attacker_z < 411.0 {
+            // Same party members can't attack each other in party arena
+            if attacker.party_id.is_some() && attacker.party_id == target.party_id {
+                return false;
+            }
+            return true;
+        }
+        // Melee arena: x 684-735, z 440-491
+        if attacker_x > 684.0 && attacker_x < 735.0 && attacker_z > 440.0 && attacker_z < 491.0 {
+            // Can't attack yourself (name check in C++, sid check here)
+            if attacker_sid == target_sid {
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // ── ZONE_ARENA (full arena zone) ────────────────────────────────────
+    if attacker_zone == ZONE_ARENA {
+        fn in_range_slow(px: f32, pz: f32, cx: f32, cz: f32, radius: f32) -> bool {
+            let dx = px - cx;
+            let dz = pz - cz;
+            dx * dx + dz * dz <= radius * radius
+        }
+
+        // Rose clan arena: two circular areas (64,178 r=60) and (192,178 r=60)
+        if in_range_slow(attacker_x, attacker_z, 64.0, 178.0, 60.0)
+            || in_range_slow(attacker_x, attacker_z, 192.0, 178.0, 60.0)
+        {
+            // If either player is not in a clan, deny
+            if attacker.knights_id == 0 || target.knights_id == 0 {
+                return false;
+            }
+            // Same clan can't attack each other
+            if attacker.knights_id == target.knights_id {
+                return false;
+            }
+        }
+
+        // Safety area check in arena
+        if is_in_enemy_safety_area(attacker_zone, attacker_x, attacker_z, attacker.nation) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // ── Target in own safety area ───────────────────────────────────────
+    if attacker.nation != target.nation
+        && is_in_own_safety_area(
+            target_pos.zone_id,
+            target_pos.x,
+            target_pos.z,
+            target.nation,
+        )
+    {
+        return false;
+    }
+
+    // ── PVP zones: opposite nation can fight ────────────────────────────
+    if attacker.nation != target.nation && is_in_pvp_zone(attacker_zone) {
+        return true;
+    }
+
+    // ── Abyss zones: opposite nation can fight ──────────────────────────
+    if attacker.nation != target.nation
+        && (attacker_zone == ZONE_DESPERATION_ABYSS
+            || attacker_zone == ZONE_HELL_ABYSS
+            || attacker_zone == ZONE_DRAGON_CAVE)
+    {
+        return true;
+    }
+
+    // ── Chaos Temple: all can fight ─────────────────────────────────────
+    // When Chaos Dungeon event is active and both players are in zone 85,
+    // everyone can attack everyone (free-for-all PvP, no nation check).
+    if attacker_zone == ZONE_CHAOS_DUNGEON {
+        let chaos_active = world
+            .event_room_manager
+            .read_temple_event(|s| s.is_chaos_active());
+        if chaos_active {
+            return true;
+        }
+    }
+
+    // ── Delos (Castle Siege Warfare) ────────────────────────────────────
+    if attacker_zone == ZONE_DELOS {
+        let csw = match world.csw_event().try_read() {
+            Ok(guard) => guard,
+            Err(_) => return false, // Lock contention — deny (safe default)
+        };
+        if csw.status != CswOpStatus::War || attacker.knights_id == target.knights_id {
+            return false;
+        }
+        if !csw.is_active() || attacker.knights_id == 0 || target.knights_id == 0 {
+            return false;
+        }
+        drop(csw);
+
+        if is_in_own_safety_area(attacker_zone, attacker_x, attacker_z, attacker.nation)
+            || is_in_own_safety_area(
+                target_pos.zone_id,
+                target_pos.x,
+                target_pos.z,
+                target.nation,
+            )
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    // ── Castle wars (Elmorad/Luferson zones when war is open) ───────────
+    if attacker.nation != target.nation
+        && (is_in_elmorad_castle(attacker_zone) || is_in_luferson_castle(attacker_zone))
+    {
+        let battle = world.get_battle_state();
+        if battle.elmorad_open_flag || battle.karus_open_flag {
+            return true;
+        }
+    }
+
+    // ── Cinderella zone ─────────────────────────────────────────────────
+    // When Cinderella War is active, event users of opposite nations can fight.
+    if world.is_cinderella_active() && world.cinderella_zone_id() == attacker_zone {
+        if attacker.nation == target.nation {
+            return false;
+        }
+        // Both must be registered event users in the Cinderella zone
+        if world.is_player_in_cinderella(attacker_sid) && world.is_player_in_cinderella(target_sid)
+        {
+            return true;
+        }
+    }
+
+    // ── GM override: can attack in castle zones without open flags ──────
+    let is_gm = attacker.authority == 0;
+    if is_gm
+        && attacker.nation != target.nation
+        && (is_in_elmorad_castle(attacker_zone) || is_in_luferson_castle(attacker_zone))
+    {
+        return true;
+    }
+
+    // ── Default: deny PvP ───────────────────────────────────────────────
+    false
+}
+
+// ── Elemental weapon damage constants ──────────────────────────────────
+const ITEM_TYPE_FIRE: u8 = 0x01;
+const ITEM_TYPE_COLD: u8 = 0x02;
+const ITEM_TYPE_LIGHTNING: u8 = 0x03;
+const ITEM_TYPE_POISON: u8 = 0x04;
+const ITEM_TYPE_HP_DRAIN: u8 = 0x05;
+const ITEM_TYPE_MP_DAMAGE: u8 = 0x06;
+const ITEM_TYPE_MP_DRAIN: u8 = 0x07;
+const MAX_RESISTANCE: i32 = 200;
+
+/// Apply elemental weapon damage bonuses from attacker's equipped items (PvP).
+/// Iterates attacker's `equipped_item_bonuses` and adds fire/cold/lightning/poison
+/// damage reduced by target's elemental resistance. Also handles HP/MP drain.
+/// Formula per element: `bonus_amount - bonus_amount * total_resistance / 200`
+/// Resistance = `(base_r * pct_r / 100 + resistance_bonus)`, capped at 200.
+#[allow(clippy::too_many_arguments)]
+fn apply_elemental_weapon_damage_pvp(
+    world: &WorldState,
+    attacker_sid: SessionId,
+    attacker_stats: &crate::world::EquippedStats,
+    target_sid: SessionId,
+    target_stats: &crate::world::EquippedStats,
+    target_pct_fire_r: u8,
+    target_pct_cold_r: u8,
+    target_pct_lightning_r: u8,
+    target_pct_poison_r: u8,
+    base_damage: i16,
+) -> i16 {
+    let (pct_fire, pct_cold, pct_lightning, pct_poison) =
+        (target_pct_fire_r, target_pct_cold_r, target_pct_lightning_r, target_pct_poison_r);
+
+    let resist_bonus = target_stats.resistance_bonus as i32;
+    let mut elemental_bonus: i32 = 0;
+    let mut hp_drain_total: i32 = 0;
+    let mut mp_damage_total: i32 = 0;
+    let mut mp_drain_total: i32 = 0;
+
+    for bonuses in attacker_stats.equipped_item_bonuses.values() {
+        for &(btype, amount) in bonuses {
+            if amount <= 0 {
+                continue;
+            }
+
+            match btype {
+                ITEM_TYPE_FIRE | ITEM_TYPE_COLD | ITEM_TYPE_LIGHTNING | ITEM_TYPE_POISON => {
+                    let base_r: i32 = match btype {
+                        ITEM_TYPE_FIRE => target_stats.fire_r as i32,
+                        ITEM_TYPE_COLD => target_stats.cold_r as i32,
+                        ITEM_TYPE_LIGHTNING => target_stats.lightning_r as i32,
+                        ITEM_TYPE_POISON => target_stats.poison_r as i32,
+                        _ => 0,
+                    };
+                    let pct = match btype {
+                        ITEM_TYPE_FIRE => pct_fire as i32,
+                        ITEM_TYPE_COLD => pct_cold as i32,
+                        ITEM_TYPE_LIGHTNING => pct_lightning as i32,
+                        ITEM_TYPE_POISON => pct_poison as i32,
+                        _ => 100,
+                    };
+                    let total_r = (base_r * pct / 100 + resist_bonus).clamp(0, MAX_RESISTANCE);
+                    elemental_bonus += amount - amount * total_r / MAX_RESISTANCE;
+                }
+                ITEM_TYPE_HP_DRAIN => {
+                    hp_drain_total += amount;
+                }
+                ITEM_TYPE_MP_DAMAGE => {
+                    mp_damage_total += amount;
+                }
+                ITEM_TYPE_MP_DRAIN => {
+                    mp_drain_total += amount;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Apply HP drain: heal attacker by drain amount
+    if hp_drain_total > 0 {
+        let drained = hp_drain_total;
+        world.update_character_stats(attacker_sid, |ch| {
+            ch.hp = (ch.hp as i32 + drained).min(ch.max_hp as i32) as i16;
+        });
+    }
+
+    // Apply MP damage: reduce target MP
+    if mp_damage_total > 0 {
+        world.update_character_stats(target_sid, |ch| {
+            ch.mp = (ch.mp as i32 - mp_damage_total).max(0) as i16;
+        });
+    }
+
+    // Apply MP drain: reduce target MP and restore attacker MP
+    if mp_drain_total > 0 {
+        world.update_character_stats(target_sid, |ch| {
+            ch.mp = (ch.mp as i32 - mp_drain_total).max(0) as i16;
+        });
+        world.update_character_stats(attacker_sid, |ch| {
+            ch.mp = (ch.mp as i32 + mp_drain_total).min(ch.max_mp as i32) as i16;
+        });
+    }
+
+    if elemental_bonus > 0 {
+        (base_damage as i32 + elemental_bonus) as i16
+    } else {
+        base_damage
+    }
+}
+
+/// Apply elemental weapon damage bonuses against an NPC target.
+/// NPC targets use resistance values from the NPC template. NPCs have no
+/// buff-based resistance percentages, so base resistance is used directly.
+fn apply_elemental_weapon_damage_npc(
+    attacker_stats: &crate::world::EquippedStats,
+    npc_tmpl: &crate::npc::NpcTemplate,
+    base_damage: i16,
+) -> i16 {
+    let mut elemental_bonus: i32 = 0;
+
+    for bonuses in attacker_stats.equipped_item_bonuses.values() {
+        for &(btype, amount) in bonuses {
+            if amount <= 0 {
+                continue;
+            }
+
+            let total_r = match btype {
+                ITEM_TYPE_FIRE => (npc_tmpl.fire_r as i32).clamp(0, MAX_RESISTANCE),
+                ITEM_TYPE_COLD => (npc_tmpl.cold_r as i32).clamp(0, MAX_RESISTANCE),
+                ITEM_TYPE_LIGHTNING => (npc_tmpl.lightning_r as i32).clamp(0, MAX_RESISTANCE),
+                ITEM_TYPE_POISON => (npc_tmpl.poison_r as i32).clamp(0, MAX_RESISTANCE),
+                _ => continue,
+            };
+
+            elemental_bonus += amount - amount * total_r / MAX_RESISTANCE;
+        }
+    }
+
+    if elemental_bonus > 0 {
+        (base_damage as i32 + elemental_bonus) as i16
+    } else {
+        base_damage
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ko_protocol::{Opcode, Packet, PacketReader};
+
+    use super::*;
+    use crate::world::BOT_ID_BASE;
+
+    /// Test the attack broadcast packet format matches expected value.
+    #[test]
+    fn test_attack_broadcast_format() {
+        // Build broadcast: [u8 bType][u8 bResult][u32 attacker][u32 target][u8 unknown]
+        let mut pkt = Packet::new(Opcode::WizAttack as u8);
+        pkt.write_u8(1); // bType = normal melee
+        pkt.write_u8(ATTACK_SUCCESS); // bResult
+        pkt.write_u32(42); // attacker_id
+        pkt.write_u32(99); // target_id
+        pkt.write_u8(0); // unknown
+
+        assert_eq!(pkt.opcode, Opcode::WizAttack as u8);
+        // 1 + 1 + 4 + 4 + 1 = 11 bytes
+        assert_eq!(pkt.data.len(), 11);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u8(), Some(1)); // bType
+        assert_eq!(r.read_u8(), Some(ATTACK_SUCCESS)); // bResult
+        assert_eq!(r.read_u32(), Some(42)); // attacker_id
+        assert_eq!(r.read_u32(), Some(99)); // target_id
+        assert_eq!(r.read_u8(), Some(0)); // unknown
+        assert_eq!(r.remaining(), 0);
+    }
+
+    /// Test the attack broadcast format for a kill (ATTACK_TARGET_DEAD).
+    #[test]
+    fn test_attack_broadcast_kill_format() {
+        let mut pkt = Packet::new(Opcode::WizAttack as u8);
+        pkt.write_u8(1);
+        pkt.write_u8(ATTACK_TARGET_DEAD);
+        pkt.write_u32(10);
+        pkt.write_u32(20);
+        pkt.write_u8(0);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u8(), Some(1));
+        assert_eq!(r.read_u8(), Some(ATTACK_TARGET_DEAD));
+        assert_eq!(r.read_u32(), Some(10));
+        assert_eq!(r.read_u32(), Some(20));
+        assert_eq!(r.read_u8(), Some(0));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    /// Test attack client packet parsing roundtrip.
+    #[test]
+    fn test_attack_client_packet_parse() {
+        // Build a client attack packet:
+        // [u8 bType][u8 bResult][u32 tid][i16 delaytime][i16 distance][u8 unknown][u8 unknowns]
+        let mut pkt = Packet::new(Opcode::WizAttack as u8);
+        pkt.write_u8(1); // bType
+        pkt.write_u8(0); // bResult (client sends 0)
+        pkt.write_u32(42); // target id
+        pkt.write_i16(150); // delaytime
+        pkt.write_i16(3); // distance
+        pkt.write_u8(0); // unknown
+        pkt.write_u8(0); // unknowns
+
+        // Parse like the handler does
+        let mut r = PacketReader::new(&pkt.data);
+        let b_type = r.read_u8().unwrap();
+        let _b_result = r.read_u8().unwrap();
+        let tid = r.read_u32().unwrap();
+        let delaytime = r.read_u16().map(|v| v as i16).unwrap();
+        let distance = r.read_u16().map(|v| v as i16).unwrap();
+        let unknown = r.read_u8().unwrap();
+        let unknowns = r.read_u8().unwrap();
 
         assert_eq!(b_type, 1);
         assert_eq!(tid, 42);
