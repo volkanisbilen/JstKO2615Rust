@@ -187,6 +187,14 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             return Ok(());
         }
     };
+    let is_unlocked_manes_magic = world
+        .manes_survival_manager
+        .has_unlocked_magic(sid, skill_id);
+    let is_manes_offensive_magic = is_unlocked_manes_magic
+        && matches!(
+            skill.moral.unwrap_or(0),
+            MORAL_ENEMY | MORAL_AREA_ENEMY | MORAL_ALL | MORAL_AREA_ALL
+        );
 
     // Ground-target AOE packets from v2615 may encode "no entity target" as
     // 0 instead of -1.  Entity validation below would otherwise interpret 0
@@ -442,7 +450,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         })
         .unwrap_or((false, false));
     if skill_type != 9
-        && !has_instant_cast
+        && (!has_instant_cast || is_manes_offensive_magic)
         && b_opcode != MAGIC_TYPE4_EXTEND
         && b_opcode != MAGIC_CANCEL
         && b_opcode != MAGIC_CANCEL2
@@ -465,7 +473,11 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         let type2 = skill.type2.unwrap_or(0) as u8;
         let item_group = skill.item_group.unwrap_or(0) as u8;
         let valid_type = matches!(type1, 1 | 3 | 4 | 5 | 6 | 7);
-        if valid_type && skill_id < 400000 && item_group != 255 && b_opcode != MAGIC_FAIL {
+        if valid_type
+            && (skill_id < 400000 || is_unlocked_manes_magic)
+            && item_group != 255
+            && b_opcode != MAGIC_FAIL
+        {
             // C++ MagicInstance.cpp:1744-1747,1980 — existspeed bypass for bType[0] only
             // pType4 is only set when bType[0]==4 && bType[1]==0; otherwise nullptr.
             let existspeed = b_opcode == MAGIC_TYPE4_EXTEND
@@ -495,10 +507,6 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     // ── Nation validation ─────────────────────────────────────────────
     // Skill ID encodes nation (1xxxx=Karus, 2xxxx=Elmorad). Skills < 300000
     // must match the caster's nation. Cancel/cancel2/cancel_transform excluded.
-    let is_unlocked_manes_magic = world
-        .manes_survival_manager
-        .has_unlocked_magic(sid, skill_id);
-
     if b_opcode != MAGIC_CANCEL
         && b_opcode != MAGIC_CANCEL2
         && b_opcode != MAGIC_CANCEL_TRANSFORMATION
@@ -762,6 +770,34 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                 }
             }
 
+            // MANES_MAGIC contains several offensive rows with zero/very short
+            // recast values because the original Survival runtime supplies its
+            // own gate. Enforce that gate server-side and retain a real miss
+            // chance instead of allowing guaranteed 150ms damage spam.
+            if is_manes_offensive_magic {
+                const MANES_MIN_RECAST_MS: u64 = 900;
+                let success_rate = skill.success_rate.unwrap_or(100).clamp(1, 85) as u32;
+                let landed = rand::thread_rng().gen_range(1..=100) <= success_rate;
+                if !landed {
+                    let now = std::time::Instant::now();
+                    world.update_session(sid, |h| {
+                        h.skill_cooldowns.insert(
+                            skill_id,
+                            now + std::time::Duration::from_millis(MANES_MIN_RECAST_MS),
+                        );
+                    });
+                    instance.data[3] = SKILLMAGIC_FAIL_ATTACKZERO;
+                    world.send_to_session_owned(sid, instance.build_fail_packet());
+                    tracing::debug!(
+                        sid,
+                        skill_id,
+                        success_rate,
+                        "Manes offensive skill missed"
+                    );
+                    return Ok(());
+                }
+            }
+
             // Check mana for non-type2 skills (type2 already deducted in FLYING)
             if skill_type != 2
                 && !check_and_deduct_mana(&world, sid, &caster, &skill, instance.target_id)
@@ -825,9 +861,15 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             // ── Set cooldown after successful cast ──────────────────
             // Formula: expiry = UNIXTIME2 + (sReCastTime * 90)ms
             let recast_time = skill.recast_time.unwrap_or(0);
-            if recast_time > 0 && !has_instant_cast {
+            let configured_recast_ms = recast_time.max(0) as u64 * 90;
+            let recast_ms = if is_manes_offensive_magic {
+                configured_recast_ms.max(900)
+            } else {
+                configured_recast_ms
+            };
+            if recast_ms > 0 && (!has_instant_cast || is_manes_offensive_magic) {
                 let now = std::time::Instant::now();
-                let expiry = now + std::time::Duration::from_millis(recast_time as u64 * 90);
+                let expiry = now + std::time::Duration::from_millis(recast_ms);
                 world.update_session(sid, |h| {
                     h.skill_cooldowns.insert(skill_id, expiry);
                     // Periodic cleanup: remove expired entries to prevent unbounded growth

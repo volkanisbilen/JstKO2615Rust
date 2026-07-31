@@ -2211,7 +2211,18 @@ pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
     let Some(progress) = world.manes_survival_manager.progress(sid) else {
         return;
     };
-    sync_manes_vitals_and_level(world, sid, progress, progress.leveled_up);
+    // Ordinary kills change only Survival EXP/score. Re-sending
+    // WIZ_LEVEL_CHANGE for every kill makes the client tear down and rebuild
+    // its temporary HP/MP bars, which is observed as the bars jumping between
+    // unrelated values. Full vitals are emitted only on an actual level-up.
+    if progress.leveled_up {
+        sync_manes_vitals_and_level(world, sid, progress, true);
+    } else {
+        world.send_to_session_owned(
+            sid,
+            crate::handler::survival::build_event_exp_update(progress.exp),
+        );
+    }
     world.send_to_session_owned(
         sid,
         crate::handler::survival::build_event_score_update(u32::from(
@@ -2248,10 +2259,16 @@ pub(crate) fn sync_manes_vitals_and_level(
     progress: crate::systems::manes_survival::ManesProgress,
     refill_vitals: bool,
 ) {
-    // Manes vitals are fixed by event level. Skill-row HP bonuses must not
-    // inflate the +1000 HP / +200 MP progression contract.
+    // Passive MANES_MAGIC HP rows are part of the client Survival contract.
+    // Applying them only client-side makes selection appear to lower/raise the
+    // bar at random when the next authoritative server packet arrives.
+    let hp_bonus = world
+        .manes_survival_manager
+        .combat_bonuses(sid)
+        .hp
+        .clamp(0, i16::MAX);
     let (max_hp, max_mp) =
-        crate::systems::manes_survival::vitals_for_level(progress.level, 0);
+        crate::systems::manes_survival::vitals_for_level(progress.level, hp_bonus);
 
     // Callers explicitly identify a real level transition. Skill selection and
     // ordinary HUD refreshes preserve spent HP/MP even if another stat
@@ -2262,7 +2279,10 @@ pub(crate) fn sync_manes_vitals_and_level(
     let current_hp = if refill_vitals {
         max_hp
     } else {
-        before_sync.hp.clamp(0, max_hp)
+        // Preserve missing HP when a passive increases max HP. This prevents a
+        // bonus selection from visually damaging or healing the participant.
+        let missing_hp = (before_sync.max_hp - before_sync.hp).max(0);
+        (max_hp - missing_hp).clamp(0, max_hp)
     };
     let current_mp = if refill_vitals {
         max_mp

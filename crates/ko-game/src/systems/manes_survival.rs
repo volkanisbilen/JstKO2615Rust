@@ -857,7 +857,28 @@ impl ManesSurvivalManager {
         }
 
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(MANES_EXIT_DELAY_SECONDS)).await;
+            // Keep the original center Survival UIF visible as the result
+            // countdown. D0 02 02 owns the boss-name/timer area; updating it
+            // once per second gives the same visible finish sequence as the
+            // other instanced events instead of a chat-only notice.
+            for remaining in (1..=MANES_EXIT_DELAY_SECONDS).rev() {
+                let finish_status = crate::handler::survival::build_event_boss_status(
+                    "Etkinlik sona erdi",
+                    1,
+                    0,
+                    remaining as u32,
+                );
+                for sid in participants.iter().copied() {
+                    if world
+                        .get_position(sid)
+                        .map(|position| ZONES_MANES_SURVIVAL.contains(&position.zone_id))
+                        .unwrap_or(false)
+                    {
+                        world.send_to_session_owned(sid, finish_status.clone());
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
 
             for sid in participants {
                 let Some(position) = world.get_position(sid) else {
@@ -881,6 +902,14 @@ impl ManesSurvivalManager {
                 let Some(character) = world.get_character_info(sid) else {
                     continue;
                 };
+                // D0 02 04 is the verified Survival shutdown contract. It
+                // disables the temporary loadout and restores all 28 normal
+                // bag slots, including the permanent Manes Orb reward.
+                if let Some(restore_packet) =
+                    crate::handler::survival::build_event_finish_restore(&world, sid).await
+                {
+                    world.send_to_session_owned(sid, restore_packet);
+                }
                 let equipped = world.get_equipped_stats(sid);
                 let mut level_packet = Packet::new(Opcode::WizLevelChange as u8);
                 level_packet.write_u32(sid as u32);

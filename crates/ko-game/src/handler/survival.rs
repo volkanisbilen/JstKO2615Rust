@@ -34,7 +34,9 @@ const CATEGORY_EVENT: u8 = 2;
 const EVENT_START: u8 = 1;
 const EVENT_BOSS_STATUS: u8 = 2;
 const EVENT_SCORE: u8 = 3;
+const EVENT_FINISH_RESTORE: u8 = 4;
 const CATEGORY_STATUS: u8 = 4;
+const STATUS_EXP: u8 = 1;
 const STATUS_SCORE: u8 = 3;
 const CATEGORY_SKILL: u8 = 6;
 const SKILL_OPEN: u8 = 1;
@@ -70,7 +72,12 @@ pub fn build_registration_result(result: i16, participant_count: u16) -> Packet 
 /// Initialise the v2615 Manes Survival client state.
 ///
 /// Verified against `sub_716A10 -> sub_7113D0`, operation 1:
-/// `D0 02 01 u8 survival_setting u16 seconds u16 exp u16 max_exp u8 level`.
+/// `D0 02 01 u8 survival_setting u16 seconds u16 max_exp u16 exp u8 level`.
+///
+/// The client stores the first value as the level EXP requirement and the
+/// second value as the current Survival EXP. Sending them in the opposite
+/// order makes the temporary level HUD repeatedly rebuild itself with an
+/// impossible `current > maximum` state.
 pub fn build_event_start(
     survival_setting: u8,
     remaining_seconds: u16,
@@ -83,9 +90,23 @@ pub fn build_event_start(
     pkt.write_u8(EVENT_START);
     pkt.write_u8(survival_setting);
     pkt.write_u16(remaining_seconds);
-    pkt.write_u16(survival_exp);
     pkt.write_u16(survival_max_exp);
+    pkt.write_u16(survival_exp);
     pkt.write_u8(survival_level);
+    pkt
+}
+
+/// Update current Manes EXP without rebuilding level, HP, MP or the temporary
+/// Survival inventory.
+///
+/// Verified against `sub_716A10 -> sub_713040`, category 4 operation 1:
+/// `D0 04 01 u8 result u16 current_exp`.
+pub fn build_event_exp_update(current_exp: u16) -> Packet {
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_STATUS);
+    pkt.write_u8(STATUS_EXP);
+    pkt.write_u8(1);
+    pkt.write_u16(current_exp);
     pkt
 }
 
@@ -119,6 +140,54 @@ pub fn build_event_score_update(score: u32) -> Packet {
     pkt.write_u8(STATUS_SCORE);
     pkt.write_u32(score);
     pkt
+}
+
+/// Restore the normal character level/EXP and the 28 ordinary bag slots when
+/// Manes finishes.
+///
+/// Verified against `sub_716A10 -> sub_7113D0`, category 2 operation 4. The
+/// client disables Survival mode, restores the persistent character values,
+/// reads exactly 28 regular inventory slots through `sub_85F250`, and replaces
+/// the temporary Manes bag before the zone change completes.
+pub async fn build_event_finish_restore(
+    world: &crate::world::WorldState,
+    sid: crate::zone::SessionId,
+) -> Option<Packet> {
+    use crate::inventory_constants::{HAVE_MAX, SLOT_MAX};
+
+    let character = world.get_character_info(sid)?;
+    let inventory = world.get_persistent_inventory(sid);
+    let mut pkt = Packet::new(WIZ_SURVIVAL);
+    pkt.write_u8(CATEGORY_EVENT);
+    pkt.write_u8(EVENT_FINISH_RESTORE);
+    pkt.write_i64(character.max_exp);
+    pkt.write_i64(character.exp as i64);
+    pkt.write_u8(character.level);
+
+    for index in SLOT_MAX..SLOT_MAX + HAVE_MAX {
+        let slot = inventory.get(index).cloned().unwrap_or_default();
+        pkt.write_u32(slot.item_id);
+        pkt.write_i16(slot.durability);
+        pkt.write_u16(slot.count);
+        pkt.write_u8(slot.flag);
+        pkt.write_u16(slot.remaining_rental_minutes());
+        if let Some(pool) = world.db_pool() {
+            crate::handler::unique_item_info::write_unique_item_info(
+                world,
+                pool,
+                slot.item_id,
+                slot.serial_num,
+                character.rebirth_level,
+                &mut pkt,
+            )
+            .await;
+        } else {
+            pkt.write_u32(0);
+        }
+        pkt.write_u32(slot.expire_time);
+    }
+
+    Some(pkt)
 }
 
 /// Open the v2615 Manes skill-choice window.
@@ -525,8 +594,15 @@ mod tests {
         assert_eq!(packet.opcode, 0xD0);
         assert_eq!(
             packet.data,
-            vec![0x02, 0x01, 0x03, 0xB0, 0x04, 0x00, 0x00, 0xC8, 0x00, 0x01]
+            vec![0x02, 0x01, 0x03, 0xB0, 0x04, 0xC8, 0x00, 0x00, 0x00, 0x01]
         );
+    }
+
+    #[test]
+    fn event_exp_update_does_not_rebuild_vitals() {
+        let packet = build_event_exp_update(380);
+        assert_eq!(packet.opcode, 0xD0);
+        assert_eq!(packet.data, vec![0x04, 0x01, 0x01, 0x7C, 0x01]);
     }
 
     #[test]
