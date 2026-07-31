@@ -1,7 +1,7 @@
 //! Native event panels used by the verified v2615 client.
 //!
 //! Opcode families:
-//! - `0x9C`: Roulette (`6=open, 7=spin, 8=reveal, 9=history`)
+//! - `0x9C`: Event hub (`0xF0`) and Roulette (`6=open, 7=spin, 8=reveal, 9=history`)
 //! - `0xCC`: Jigsaw selector `1`, Coin selector `2`
 //! - `0xCF`: Knight Marble (`1=open, 2=roll, 3..5=panel actions`)
 
@@ -17,6 +17,12 @@ use crate::session::{ClientSession, SessionState};
 const ROULETTE_FREE_TYPE: i32 = 1;
 const ROULETTE_KC_TYPE: i32 = 2;
 const ROULETTE_KC_COST: u32 = 350;
+
+const EVENT_HUB_SUB: u8 = 0xF0;
+const EVENT_HUB_COIN: u8 = 0;
+const EVENT_HUB_ROULETTE: u8 = 2;
+const EVENT_HUB_JIGSAW: u8 = 3;
+const EVENT_HUB_MARBLE: u8 = 5;
 
 fn character_name(session: &ClientSession) -> Option<String> {
     session
@@ -49,6 +55,9 @@ pub async fn handle_roulette(session: &mut ClientSession, pkt: Packet) -> anyhow
     let sub = reader.read_u8().unwrap_or(0);
     let pool = session.pool().clone();
     let repo = NativeEventsRepository::new(&pool);
+    if sub == EVENT_HUB_SUB {
+        return native_event_hub_open(session, &repo).await;
+    }
     if !repo.is_active("roulette").await.unwrap_or(false) {
         let response = event_unavailable(Opcode::WizContinousPacketData as u8, sub);
         session.send_packet(&response).await?;
@@ -62,6 +71,51 @@ pub async fn handle_roulette(session: &mut ClientSession, pkt: Packet) -> anyhow
         9 => roulette_history(session, &repo, &name, reader.read_i32().unwrap_or(1)).await,
         _ => { debug!("[{}] native roulette unknown sub={sub}", session.addr()); Ok(()) }
     }
+}
+
+/// Reply to the star-button confirmation request.
+///
+/// The v2615 client treats `0xF0` as signed `-16` and dispatches it to
+/// `CUIEventWebSelect::ReceiveMessage` (`0xAEB8C0`).  The verified wire format
+/// after the subcommand is `i16 count`, followed by `u8 event_id, u8 enabled`
+/// pairs. Disabled entries must be omitted: the client only adds pairs whose
+/// enabled byte is non-zero to its selection list.
+async fn native_event_hub_open(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+) -> anyhow::Result<()> {
+    let candidates = [
+        (EVENT_HUB_COIN, "coin"),
+        (EVENT_HUB_ROULETTE, "roulette"),
+        (EVENT_HUB_JIGSAW, "jigsaw"),
+        (EVENT_HUB_MARBLE, "marble"),
+    ];
+    let mut active = Vec::with_capacity(candidates.len());
+    for (event_id, event_key) in candidates {
+        if repo.is_active(event_key).await.unwrap_or(false) {
+            active.push((event_id, 1u8));
+        }
+    }
+
+    let out = native_event_hub_packet(&active);
+    session.send_packet(&out).await?;
+    info!(
+        "[{}] native event hub opened: active_ids={:?}",
+        session.addr(),
+        active.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+fn native_event_hub_packet(active: &[(u8, u8)]) -> Packet {
+    let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
+    out.write_u8(EVENT_HUB_SUB);
+    out.write_i16(active.len().min(i16::MAX as usize) as i16);
+    for &(event_id, enabled) in active.iter().take(i16::MAX as usize) {
+        out.write_u8(event_id);
+        out.write_u8(enabled);
+    }
+    out
 }
 
 async fn roulette_open(
@@ -334,5 +388,17 @@ mod tests {
     fn unavailable_packet_uses_requested_sub() {
         let packet = event_unavailable(0x9C, 6);
         assert_eq!(packet.data, vec![6,0,0,0,0]);
+    }
+
+    #[test]
+    fn event_hub_packet_matches_v2615_signed_f0_contract() {
+        let packet = native_event_hub_packet(&[
+            (EVENT_HUB_COIN, 1),
+            (EVENT_HUB_ROULETTE, 1),
+            (EVENT_HUB_JIGSAW, 1),
+            (EVENT_HUB_MARBLE, 1),
+        ]);
+        assert_eq!(packet.opcode, Opcode::WizContinousPacketData as u8);
+        assert_eq!(packet.data, vec![0xF0, 4, 0, 0, 1, 2, 1, 3, 1, 5, 1]);
     }
 }
