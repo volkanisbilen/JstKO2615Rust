@@ -21,6 +21,9 @@ const ROULETTE_KC_COST: u32 = 350;
 const EVENT_HUB_SUB: u8 = 0xF0;
 const EVENT_HUB_COIN: u8 = 0;
 const EVENT_HUB_ATTENDANCE: u8 = 1;
+// The hub advertises Attendance as list id 1, but the v2615 client sends
+// selector 4 when that row is clicked.
+const EVENT_HUB_ATTENDANCE_SELECT: u8 = 4;
 const EVENT_HUB_ROULETTE: u8 = 2;
 const EVENT_HUB_JIGSAW: u8 = 3;
 const EVENT_HUB_MARBLE: u8 = 5;
@@ -63,6 +66,7 @@ pub async fn handle_roulette(session: &mut ClientSession, pkt: Packet) -> anyhow
         sub,
         EVENT_HUB_COIN
             | EVENT_HUB_ATTENDANCE
+            | EVENT_HUB_ATTENDANCE_SELECT
             | EVENT_HUB_ROULETTE
             | EVENT_HUB_JIGSAW
             | EVENT_HUB_MARBLE
@@ -129,7 +133,7 @@ async fn native_event_hub_select(
     event_id: u8,
 ) -> anyhow::Result<()> {
     let event_key = match event_id {
-        EVENT_HUB_ATTENDANCE => "attendance",
+        EVENT_HUB_ATTENDANCE | EVENT_HUB_ATTENDANCE_SELECT => "attendance",
         EVENT_HUB_ROULETTE => "roulette",
         EVENT_HUB_JIGSAW => "jigsaw",
         EVENT_HUB_COIN => "coin",
@@ -137,7 +141,7 @@ async fn native_event_hub_select(
         _ => return Ok(()),
     };
 
-    if event_id != EVENT_HUB_ATTENDANCE
+    if !matches!(event_id, EVENT_HUB_ATTENDANCE | EVENT_HUB_ATTENDANCE_SELECT)
         && !repo.is_active(event_key).await.unwrap_or(false)
     {
         let response = event_unavailable(Opcode::WizContinousPacketData as u8, event_id);
@@ -146,7 +150,7 @@ async fn native_event_hub_select(
     }
 
     let result = match event_id {
-        EVENT_HUB_ATTENDANCE => {
+        EVENT_HUB_ATTENDANCE | EVENT_HUB_ATTENDANCE_SELECT => {
             let mut request = Packet::new(Opcode::WizAttendance as u8);
             request.write_u8(1);
             crate::handler::attendance::handle(session, request).await
@@ -315,6 +319,9 @@ pub async fn handle_jigsaw_coin(session: &mut ClientSession, pkt: Packet) -> any
     let repo = NativeEventsRepository::new(&pool);
     let Some(name) = character_name(session) else { return Ok(()); };
     match sub {
+        1 if repo.is_active("jigsaw").await.unwrap_or(false) => {
+            jigsaw_open(session, &repo, &name).await
+        }
         4 | 8 => {
             if repo.is_active("jigsaw").await.unwrap_or(false) {
                 jigsaw_open(session, &repo, &name).await
