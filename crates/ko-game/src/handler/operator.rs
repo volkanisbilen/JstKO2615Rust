@@ -438,8 +438,6 @@ fn send_help(session: &mut ClientSession, message: &str) {
 }
 
 /// Enable/disable one of the v2615 native client event panels.
-/// Jigsaw and Coin share the same toolbar request, therefore activating one
-/// also disables the other panel selector.
 async fn handle_native_event_toggle(
     session: &mut ClientSession,
     event_key: &str,
@@ -447,11 +445,6 @@ async fn handle_native_event_toggle(
 ) -> anyhow::Result<()> {
     let pool = session.pool().clone();
     let repo = ko_db::repositories::native_events::NativeEventsRepository::new(&pool);
-    if active && event_key == "jigsaw" {
-        repo.set_active("coin", false).await?;
-    } else if active && event_key == "coin" {
-        repo.set_active("jigsaw", false).await?;
-    }
     if !repo.set_active(event_key, active).await? {
         send_help(session, "Native event configuration row was not found. Run migrations first.");
         return Ok(());

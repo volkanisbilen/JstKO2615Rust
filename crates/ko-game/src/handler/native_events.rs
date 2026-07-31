@@ -20,6 +20,7 @@ const ROULETTE_KC_COST: u32 = 350;
 
 const EVENT_HUB_SUB: u8 = 0xF0;
 const EVENT_HUB_COIN: u8 = 0;
+const EVENT_HUB_ATTENDANCE: u8 = 1;
 const EVENT_HUB_ROULETTE: u8 = 2;
 const EVENT_HUB_JIGSAW: u8 = 3;
 const EVENT_HUB_MARBLE: u8 = 5;
@@ -58,6 +59,16 @@ pub async fn handle_roulette(session: &mut ClientSession, pkt: Packet) -> anyhow
     if sub == EVENT_HUB_SUB {
         return native_event_hub_open(session, &repo).await;
     }
+    if matches!(
+        sub,
+        EVENT_HUB_COIN
+            | EVENT_HUB_ATTENDANCE
+            | EVENT_HUB_ROULETTE
+            | EVENT_HUB_JIGSAW
+            | EVENT_HUB_MARBLE
+    ) {
+        return native_event_hub_select(session, &repo, sub).await;
+    }
     if !repo.is_active("roulette").await.unwrap_or(false) {
         let response = event_unavailable(Opcode::WizContinousPacketData as u8, sub);
         session.send_packet(&response).await?;
@@ -84,13 +95,16 @@ async fn native_event_hub_open(
     session: &mut ClientSession,
     repo: &NativeEventsRepository<'_>,
 ) -> anyhow::Result<()> {
+    // The client renders entries in the order supplied by the server.
+    // Attendance is the already-active WIZ_ATTENDANCE feature and therefore
+    // has no native_event_config toggle of its own.
+    let mut active = vec![(EVENT_HUB_ATTENDANCE, 1u8)];
     let candidates = [
-        (EVENT_HUB_COIN, "coin"),
         (EVENT_HUB_ROULETTE, "roulette"),
         (EVENT_HUB_JIGSAW, "jigsaw"),
+        (EVENT_HUB_COIN, "coin"),
         (EVENT_HUB_MARBLE, "marble"),
     ];
-    let mut active = Vec::with_capacity(candidates.len());
     for (event_id, event_key) in candidates {
         if repo.is_active(event_key).await.unwrap_or(false) {
             active.push((event_id, 1u8));
@@ -105,6 +119,59 @@ async fn native_event_hub_open(
         active.iter().map(|(id, _)| *id).collect::<Vec<_>>()
     );
     Ok(())
+}
+
+/// Dispatch a selection made in the star-button event list to the native
+/// panel handler that already owns that event's wire contract.
+async fn native_event_hub_select(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+    event_id: u8,
+) -> anyhow::Result<()> {
+    let event_key = match event_id {
+        EVENT_HUB_ATTENDANCE => "attendance",
+        EVENT_HUB_ROULETTE => "roulette",
+        EVENT_HUB_JIGSAW => "jigsaw",
+        EVENT_HUB_COIN => "coin",
+        EVENT_HUB_MARBLE => "marble",
+        _ => return Ok(()),
+    };
+
+    if event_id != EVENT_HUB_ATTENDANCE
+        && !repo.is_active(event_key).await.unwrap_or(false)
+    {
+        let response = event_unavailable(Opcode::WizContinousPacketData as u8, event_id);
+        session.send_packet(&response).await?;
+        return Ok(());
+    }
+
+    let result = match event_id {
+        EVENT_HUB_ATTENDANCE => {
+            let mut request = Packet::new(Opcode::WizAttendance as u8);
+            request.write_u8(1);
+            crate::handler::attendance::handle(session, request).await
+        }
+        EVENT_HUB_ROULETTE => roulette_open(session, repo).await,
+        EVENT_HUB_JIGSAW => {
+            let Some(name) = character_name(session) else { return Ok(()); };
+            jigsaw_open(session, repo, &name).await
+        }
+        EVENT_HUB_COIN => {
+            let Some(name) = character_name(session) else { return Ok(()); };
+            coin_open(session, repo, &name).await
+        }
+        EVENT_HUB_MARBLE => {
+            let Some(name) = character_name(session) else { return Ok(()); };
+            marble_open(session, repo, &name).await
+        }
+        _ => Ok(()),
+    };
+
+    info!(
+        "[{}] native event hub selected: id={} key={}",
+        session.addr(), event_id, event_key
+    );
+    result
 }
 
 fn native_event_hub_packet(active: &[(u8, u8)]) -> Packet {
@@ -393,12 +460,13 @@ mod tests {
     #[test]
     fn event_hub_packet_matches_v2615_signed_f0_contract() {
         let packet = native_event_hub_packet(&[
+            (EVENT_HUB_ATTENDANCE, 1),
             (EVENT_HUB_COIN, 1),
             (EVENT_HUB_ROULETTE, 1),
             (EVENT_HUB_JIGSAW, 1),
             (EVENT_HUB_MARBLE, 1),
         ]);
         assert_eq!(packet.opcode, Opcode::WizContinousPacketData as u8);
-        assert_eq!(packet.data, vec![0xF0, 4, 0, 0, 1, 2, 1, 3, 1, 5, 1]);
+        assert_eq!(packet.data, vec![0xF0, 5, 0, 1, 1, 0, 1, 2, 1, 3, 1, 5, 1]);
     }
 }
