@@ -151,9 +151,7 @@ async fn native_event_hub_select(
 
     let result = match event_id {
         EVENT_HUB_ATTENDANCE | EVENT_HUB_ATTENDANCE_SELECT => {
-            let mut request = Packet::new(Opcode::WizAttendance as u8);
-            request.write_u8(1);
-            crate::handler::attendance::handle(session, request).await
+            attendance_open(session).await
         }
         EVENT_HUB_ROULETTE => roulette_open(session, repo).await,
         EVENT_HUB_JIGSAW => {
@@ -176,6 +174,90 @@ async fn native_event_hub_select(
         session.addr(), event_id, event_key
     );
     result
+}
+
+/// Open the v2615 native Attendance panel.
+///
+/// The unpacked client dispatches this UI through WIZ_CONTINOUS_PACKET_DATA
+/// (0x9C), not WIZ_ATTENDANCE (0xB7):
+///
+/// `[0x9C][outer=4][inner=5][i32 error][i32 result][calendar state...]`
+///
+/// `outer=4` selects `CUIAttendanceCheck` at UI-manager offset `+0x66C`;
+/// `inner=5, error=0, result=1` loads the complete calendar and shows it.
+async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
+    const TOTAL_DAYS: usize = 25;
+
+    let pool = session.pool().clone();
+    let repo = ko_db::repositories::daily_reward::DailyRewardRepository::new(&pool);
+    let rewards = repo.load_all().await.unwrap_or_else(|e| {
+        warn!("[{}] native attendance load_all DB error: {e}", session.addr());
+        Vec::new()
+    });
+
+    let Some(name) = character_name(session) else {
+        return Ok(());
+    };
+    let progress = repo.load_user_progress(&name).await.unwrap_or_else(|e| {
+        warn!(
+            "[{}] native attendance load_user_progress DB error: {e}",
+            session.addr()
+        );
+        Vec::new()
+    });
+    let cumulative = repo.load_cumulative().await.unwrap_or_else(|e| {
+        warn!(
+            "[{}] native attendance load_cumulative DB error: {e}",
+            session.addr()
+        );
+        None
+    });
+
+    let mut claimed = [false; TOTAL_DAYS];
+    for row in &progress {
+        let index = row.day_index as usize;
+        if index < TOTAL_DAYS {
+            claimed[index] = row.claimed;
+        }
+    }
+
+    let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
+    out.write_u8(EVENT_HUB_ATTENDANCE_SELECT); // outer selector: CUIAttendanceCheck
+    out.write_u8(5); // inner selector: full calendar response
+    out.write_i32(0); // error
+    out.write_i32(1); // result: load/show panel
+    out.write_i32(chrono::Utc::now().timestamp().clamp(0, i32::MAX as i64) as i32);
+    out.write_i16(TOTAL_DAYS as i16);
+
+    for day in 0..TOTAL_DAYS {
+        let item_id = rewards
+            .iter()
+            .find(|row| row.day_index as usize == day)
+            .map(|row| row.item_id)
+            .unwrap_or(0);
+        out.write_i32(item_id);
+        out.write_u8(u8::from(claimed[day]));
+    }
+
+    let cumulative_items = cumulative
+        .map(|row| [row.item1.unwrap_or(0), row.item2.unwrap_or(0), row.item3.unwrap_or(0)])
+        .unwrap_or([0; 3]);
+    out.write_i16(cumulative_items.len() as i16);
+    for (index, item_id) in cumulative_items.into_iter().enumerate() {
+        out.write_i32(item_id);
+        let milestone = [7usize, 14, 21][index];
+        out.write_u8(u8::from(claimed.iter().take(milestone).all(|value| *value)));
+    }
+    out.write_i32(0); // no pending client-side countdown
+
+    session.send_packet(&out).await?;
+    info!(
+        "[{}] native attendance opened: rewards={} claimed={}",
+        session.addr(),
+        rewards.len(),
+        claimed.iter().filter(|value| **value).count()
+    );
+    Ok(())
 }
 
 fn native_event_hub_packet(active: &[(u8, u8)]) -> Packet {
