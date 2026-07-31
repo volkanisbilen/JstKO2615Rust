@@ -330,6 +330,7 @@ pub async fn update_daily_quest_count(world: &WorldState, sid: SessionId, monste
 
     let all_defs = world.get_all_daily_quests();
     let mut changed = false;
+    let mut changed_quest_ids: Vec<i16> = Vec::new();
 
     for def in &all_defs {
         let uq = match dq_map.get_mut(&def.id) {
@@ -378,6 +379,7 @@ pub async fn update_daily_quest_count(world: &WorldState, sid: SessionId, monste
         // Increment kill count
         uq.kill_count += 1;
         changed = true;
+        changed_quest_ids.push(def.id);
 
         // Send kill update packet
         let kill_pkt = build_kill_update(def.id, monster_id);
@@ -407,11 +409,34 @@ pub async fn update_daily_quest_count(world: &WorldState, sid: SessionId, monste
         }
     }
 
-    // Write back updated map
+    // Write back updated map and persist every accepted kill. Previously only
+    // the final kill was saved, so reconnecting or changing zones could restore
+    // an older count and leave the native quest panel stuck.
     if changed {
+        let rows_to_save: Vec<UserDailyQuestRow> = changed_quest_ids
+            .iter()
+            .filter_map(|quest_id| dq_map.get(quest_id).cloned())
+            .collect();
+
         world.update_session(sid, |h| {
             h.daily_quests = dq_map;
         });
+
+        if let Some(pool) = world.db_pool() {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let repo = ko_db::repositories::daily_quest::DailyQuestRepository::new(&pool);
+                for row in rows_to_save {
+                    if let Err(e) = repo.save_user_quest(&row).await {
+                        tracing::warn!(
+                            "DailyQuest kill save failed for quest {}: {}",
+                            row.quest_id,
+                            e
+                        );
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -475,6 +500,29 @@ async fn daily_quest_finished(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i32;
+
+    // The v2615 native panel has four physical slots. Login fills them with
+    // ongoing quests in sorted ID order, so completion must close the same
+    // slot. The old hard-coded slot 0 left entries such as "Rescuing Sid"
+    // visible when they occupied slot 1, 2 or 3.
+    let native_slot_index = world
+        .with_session(sid, |h| {
+            let mut active_ids: Vec<i16> = h
+                .daily_quests
+                .iter()
+                .filter_map(|(&quest_id, progress)| {
+                    (progress.status == DailyQuestStatus::Ongoing as i16)
+                        .then_some(quest_id)
+                })
+                .collect();
+            active_ids.sort_unstable();
+            active_ids
+                .iter()
+                .take(4)
+                .position(|&quest_id| quest_id == quest.id)
+                .map(|slot| slot as u8)
+        })
+        .flatten();
 
     // Set replay timer
     if quest.replay_time > 0 {
@@ -551,13 +599,20 @@ async fn daily_quest_finished(
         }
     }
 
-    // v2525 native 0xC7 — send quest completion to panel
-    // Client shows text_id 43740 (0xAADC) with quest name, color crimson.
-    let complete_pkt = super::daily_quest_v2525::build_complete(
-        0, // slot_index — client iterates all 4 slots to find matching quest_id
-        quest.id as i32,
-    );
-    world.send_to_session_owned(sid, complete_pkt);
+    // v2615 native 0xC7 — remove the exact slot that was initialised for
+    // this quest. Quests outside the first four were never shown and therefore
+    // do not need a native completion packet.
+    if let Some(slot_index) = native_slot_index {
+        let complete_pkt =
+            super::daily_quest_v2525::build_complete(slot_index, quest.id as i32);
+        world.send_to_session_owned(sid, complete_pkt);
+        tracing::info!(
+            sid,
+            quest_id = quest.id,
+            slot_index,
+            "DailyQuest native panel entry completed"
+        );
+    }
 
     // Async DB save
     if let Some(pool) = world.db_pool() {
