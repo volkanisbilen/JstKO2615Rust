@@ -181,10 +181,9 @@ async fn native_event_hub_select(
 /// The unpacked client dispatches this UI through WIZ_CONTINOUS_PACKET_DATA
 /// (0x9C), not WIZ_ATTENDANCE (0xB7):
 ///
-/// `[0x9C][outer=5][inner=5][i32 error][i32 result][calendar state...]`
+/// `[0x9C][outer=4][inner=5][i32 error][i32 result][calendar state...]`
 ///
-/// `outer=5` selects the server-response path for `CUIAttendanceCheck` at
-/// UI-manager offset `+0x66C` (`outer=4` is the client's request path);
+/// `outer=4` selects `CUIAttendanceCheck` at UI-manager offset `+0x66C`;
 /// `inner=5, error=0, result=1` loads the complete calendar and shows it.
 async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
     const TOTAL_DAYS: usize = 25;
@@ -222,8 +221,10 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
         }
     }
 
+    let next_claimable = claimed.iter().position(|value| !*value);
+
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-    out.write_u8(5); // outer selector: CUIAttendanceCheck server response
+    out.write_u8(EVENT_HUB_ATTENDANCE_SELECT); // outer selector: CUIAttendanceCheck
     out.write_u8(5); // inner selector: full calendar response
     out.write_i32(0); // error
     out.write_i32(1); // result: load/show panel
@@ -237,7 +238,15 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
             .map(|row| row.item_id)
             .unwrap_or(0);
         out.write_i32(item_id);
-        out.write_u8(u8::from(claimed[day]));
+        // Native CUIAttendanceCheck state: 2=claimed, 1=claimable, 0=locked.
+        let state = if claimed[day] {
+            2
+        } else if Some(day) == next_claimable {
+            1
+        } else {
+            0
+        };
+        out.write_u8(state);
     }
 
     let cumulative_items = cumulative
@@ -247,7 +256,15 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
     for (index, item_id) in cumulative_items.into_iter().enumerate() {
         out.write_i32(item_id);
         let milestone = [7usize, 14, 21][index];
-        out.write_u8(u8::from(claimed.iter().take(milestone).all(|value| *value)));
+        let completed = claimed.iter().take(milestone).all(|value| *value);
+        let state = if completed {
+            2
+        } else if claimed.iter().filter(|value| **value).count() + 1 == milestone {
+            1
+        } else {
+            0
+        };
+        out.write_u8(state);
     }
     out.write_i32(0); // no pending client-side countdown
 
