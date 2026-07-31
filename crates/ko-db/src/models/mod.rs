@@ -55,6 +55,7 @@ pub mod manes_survival;
 mod mining;
 pub mod monster_event;
 pub mod monster_resource;
+pub mod native_events;
 mod npc;
 mod object_event;
 pub mod perk;

@@ -98,6 +98,7 @@ pub mod mining;
 pub mod monument;
 pub mod move_handler;
 pub mod moving_tower;
+pub mod native_events;
 pub mod name_change;
 pub mod nation;
 pub mod nation_transfer;
@@ -514,8 +515,18 @@ pub async fn dispatch(session: &mut ClientSession, packet: Packet) -> anyhow::Re
         Some(Opcode::WizCostume) => costume::handle(session, packet).await,
         Some(Opcode::WizSoul) => soul::handle(session, packet).await,
         Some(Opcode::WizDailyQuest) => daily_quest_v2525::handle(session, packet).await,
-        Some(Opcode::WizEnchant) => enchant::handle(session, packet).await,
-        Some(Opcode::WizAbility) => ability::handle(session, packet).await,
+        Some(Opcode::WizEnchant) => {
+            let native = session.world().get_server_settings()
+                .map(|s| s.game_version >= 2600).unwrap_or(false);
+            if native { native_events::handle_jigsaw_coin(session, packet).await }
+            else { enchant::handle(session, packet).await }
+        },
+        Some(Opcode::WizAbility) => {
+            let native = session.world().get_server_settings()
+                .map(|s| s.game_version >= 2600).unwrap_or(false);
+            if native { native_events::handle_marble(session, packet).await }
+            else { ability::handle(session, packet).await }
+        },
         // 0xD0 is version-dependent: v2525 uses Guild Bank, while the
         // verified 26xx client contract uses Manes Survival. Missing settings
         // deliberately preserve the established Guild Bank behavior.
@@ -535,7 +546,12 @@ pub async fn dispatch(session: &mut ClientSession, packet: Packet) -> anyhow::Re
         Some(Opcode::WizWorldBoss) => world_boss::handle(session, packet).await,
         Some(Opcode::WizSeason) => season::handle(session, packet).await,
         // Special protocol (resource transfer — stub is correct):
-        Some(Opcode::WizContinousPacketData) => continuous_packet::handle(session, packet),
+        Some(Opcode::WizContinousPacketData) => {
+            let native = session.world().get_server_settings()
+                .map(|s| s.game_version >= 2600).unwrap_or(false);
+            if native { native_events::handle_roulette(session, packet).await }
+            else { continuous_packet::handle(session, packet) }
+        },
         _ => {
             warn!(
                 "[{}] Unhandled opcode: 0x{:02X}",

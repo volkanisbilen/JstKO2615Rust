@@ -365,6 +365,14 @@ pub async fn process_chat_command(
         "manesopen" => handle_manes_survival_open(session)?,
         "manesstart" => handle_manes_survival_start(session)?,
         "manesclose" => handle_manes_survival_close(session)?,
+        "rouletteopen" => handle_native_event_toggle(session, "roulette", true).await?,
+        "rouletteclose" => handle_native_event_toggle(session, "roulette", false).await?,
+        "puzzleopen" | "jigsawopen" => handle_native_event_toggle(session, "jigsaw", true).await?,
+        "puzzleclose" | "jigsawclose" => handle_native_event_toggle(session, "jigsaw", false).await?,
+        "coinopen" => handle_native_event_toggle(session, "coin", true).await?,
+        "coinclose" => handle_native_event_toggle(session, "coin", false).await?,
+        "marbleopen" => handle_native_event_toggle(session, "marble", true).await?,
+        "marbleclose" => handle_native_event_toggle(session, "marble", false).await?,
         "reloadranks" => {
             let world = session.world();
             let pool = session.pool();
@@ -427,6 +435,31 @@ fn send_help(session: &mut ClientSession, message: &str) {
     pkt.write_u8(0); // system_msg
 
     world.send_to_session_owned(sid, pkt);
+}
+
+/// Enable/disable one of the v2615 native client event panels.
+/// Jigsaw and Coin share the same toolbar request, therefore activating one
+/// also disables the other panel selector.
+async fn handle_native_event_toggle(
+    session: &mut ClientSession,
+    event_key: &str,
+    active: bool,
+) -> anyhow::Result<()> {
+    let pool = session.pool().clone();
+    let repo = ko_db::repositories::native_events::NativeEventsRepository::new(&pool);
+    if active && event_key == "jigsaw" {
+        repo.set_active("coin", false).await?;
+    } else if active && event_key == "coin" {
+        repo.set_active("jigsaw", false).await?;
+    }
+    if !repo.set_active(event_key, active).await? {
+        send_help(session, "Native event configuration row was not found. Run migrations first.");
+        return Ok(());
+    }
+    let state = if active { "opened" } else { "closed" };
+    send_help(session, &format!("Native {event_key} event {state}."));
+    info!("[{}] native event toggle: key={} active={}", session.addr(), event_key, active);
+    Ok(())
 }
 
 /// +give <charname> <itemid> <count> <time> — Give item to another player.
@@ -1501,6 +1534,10 @@ fn handle_help(session: &mut ClientSession) -> anyhow::Result<()> {
         "reload_scripts - Reload quest scripts",
         "reloadranks - Reload rankings",
         "manesopen/manesclose - Manes Survival test lifecycle",
+        "rouletteopen/close - Native Lucky Wheel",
+        "puzzleopen/close - Native Jigsaw Puzzle",
+        "coinopen/close - Native Coin Event",
+        "marbleopen/close - Native Knight Marble",
         "bug CharName - Rescue stuck player",
         "-- Bot/Genie --",
         "botspawn Class Level [Nation] [Count]",
