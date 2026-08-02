@@ -121,10 +121,9 @@ async fn native_event_hub_open(
     repo: &NativeEventsRepository<'_>,
 ) -> anyhow::Result<()> {
     // The client renders entries in the order supplied by the server.
-    // Attendance is the already-active WIZ_ATTENDANCE feature and therefore
-    // has no native_event_config toggle of its own.
-    let mut active = vec![(EVENT_HUB_ATTENDANCE, 1u8)];
+    let mut active = Vec::new();
     let candidates = [
+        (EVENT_HUB_ATTENDANCE, "attendance"),
         (EVENT_HUB_ROULETTE, "roulette"),
         (EVENT_HUB_JIGSAW, "jigsaw"),
         (EVENT_HUB_COIN, "coin"),
@@ -162,9 +161,7 @@ async fn native_event_hub_select(
         _ => return Ok(()),
     };
 
-    if !matches!(event_id, EVENT_HUB_ATTENDANCE | EVENT_HUB_ATTENDANCE_SELECT)
-        && !repo.is_active(event_key).await.unwrap_or(false)
-    {
+    if !repo.is_active(event_key).await.unwrap_or(false) {
         let response = event_unavailable(Opcode::WizContinousPacketData as u8, event_id);
         session.send_packet(&response).await?;
         return Ok(());
