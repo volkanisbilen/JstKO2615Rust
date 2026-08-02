@@ -237,13 +237,14 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
             .map(|row| row.item_id)
             .unwrap_or(0);
         out.write_i32(item_id);
-        // Native CUIAttendanceCheck state: 2=claimed, 1=claimable, 0=locked.
+        // Native CUIAttendanceCheck hides the reward group when state is 0.
+        // State 3 keeps a future/locked reward visible but inactive.
         let state = if claimed[day] {
             2
         } else if Some(day) == next_claimable {
             1
         } else {
-            0
+            3
         };
         out.write_u8(state);
     }
@@ -261,7 +262,7 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
         } else if claimed.iter().filter(|value| **value).count() + 1 == milestone {
             1
         } else {
-            0
+            3
         };
         out.write_u8(state);
     }
