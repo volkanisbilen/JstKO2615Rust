@@ -36,6 +36,18 @@ impl<'a> NativeEventsRepository<'a> {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Ensure every native v2615 event is available after a server restart.
+    /// Runtime GM close commands can still disable individual rows until the
+    /// next restart.
+    pub async fn activate_all(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE native_event_config SET active=TRUE, updated_at=NOW()",
+        )
+        .execute(self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn roulette_rewards(
         &self,
         roulette_type: i16,
