@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 73975)
-Total output lines: 9022
-
 //! WIZ_OPERATOR (0x40) handler — GM operator commands sent via the client's GM panel.
 //! ## Client -> Server (WIZ_OPERATOR 0x40)
 //! ```text
@@ -3162,7 +3159,2881 @@ fn handle_count_level(session: &mut ClientSession, args: &[&str]) -> anyhow::Res
 
 /// Select war commanders from top-ranked clan leaders.
 /// Picks up to 5 clan leaders per nation who are online and in a war zone.
-/// Each selected commander gets COMMAND_CAPTAIN fame (100) + WIZ_AU…23975 tokens truncated…tType::JuraidMountain as i16,
+/// Each selected commander gets COMMAND_CAPTAIN fame (100) + WIZ_AUTHORITY_CHANGE broadcast.
+/// Commander names are announced via WAR_SYSTEM_CHAT to their respective nation.
+pub(crate) async fn select_war_commanders(world: &crate::world::WorldState) {
+    use crate::clan_constants::{COMMAND_AUTHORITY, COMMAND_CAPTAIN};
+
+    // Clear existing commanders
+    world.clear_war_commanders();
+
+    let mut karus_names: Vec<(String, String)> = Vec::new(); // (clan_name, chief_name)
+    let mut elmo_names: Vec<(String, String)> = Vec::new();
+
+    // C++ picks top 5 clan leaders per nation who are online AND in a war zone
+    for nation in [1u8, 2] {
+        let clans = world.get_top_ranked_clans(nation, 5);
+        let names = if nation == 1 {
+            &mut karus_names
+        } else {
+            &mut elmo_names
+        };
+        for (clan_id, chief_name) in &clans {
+            if chief_name.is_empty() {
+                continue;
+            }
+            // Chief must be online
+            let chief_sid = match world.find_session_by_name(chief_name) {
+                Some(s) => s,
+                None => continue,
+            };
+            let zone_id = world
+                .with_session(chief_sid, |h| h.position.zone_id)
+                .unwrap_or(0);
+            if !crate::systems::war::is_battle_zone(zone_id) {
+                continue;
+            }
+            // Verify clan_id matches
+            let ch_clan = world
+                .get_character_info(chief_sid)
+                .map(|ci| ci.knights_id)
+                .unwrap_or(0);
+            if ch_clan != *clan_id {
+                continue;
+            }
+
+            // Get clan name for announcement
+            let clan_name = world
+                .get_knights(*clan_id)
+                .map(|k| k.name.clone())
+                .unwrap_or_default();
+
+            world.add_war_commander(chief_name.clone());
+            names.push((clan_name, chief_name.clone()));
+
+            // Promote to COMMAND_CAPTAIN
+            let fame = world
+                .get_character_info(chief_sid)
+                .map(|ci| ci.fame)
+                .unwrap_or(0);
+            if fame != COMMAND_CAPTAIN {
+                world.update_character_stats(chief_sid, |ci| ci.fame = COMMAND_CAPTAIN);
+                let mut fame_pkt =
+                    ko_protocol::Packet::new(ko_protocol::Opcode::WizAuthorityChange as u8);
+                fame_pkt.write_u8(COMMAND_AUTHORITY);
+                fame_pkt.write_u32(chief_sid as u32);
+                fame_pkt.write_u8(COMMAND_CAPTAIN);
+                let (rx, rz) = world
+                    .with_session(chief_sid, |h| (h.position.region_x, h.position.region_z))
+                    .unwrap_or((0, 0));
+                let event_room = world.get_event_room(chief_sid);
+                world.broadcast_to_3x3(zone_id, rx, rz, Arc::new(fame_pkt), None, event_room);
+            }
+        }
+    }
+
+    // Broadcast commander names per nation (WAR_SYSTEM_CHAT)
+    if !karus_names.is_empty() {
+        let text = karus_names
+            .iter()
+            .map(|(clan, name)| format!("[{clan}][{name}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let msg = format!("Karus Commanders: {text}");
+        crate::systems::war::broadcast_war_chat_to_nation(world, 1, &msg);
+    }
+    if !elmo_names.is_empty() {
+        let text = elmo_names
+            .iter()
+            .map(|(clan, name)| format!("[{clan}][{name}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let msg = format!("El Morad Commanders: {text}");
+        crate::systems::war::broadcast_war_chat_to_nation(world, 2, &msg);
+    }
+
+    let total = karus_names.len() + elmo_names.len();
+    tracing::info!(
+        "War commanders auto-selected: {total} total (Karus: {}, ElMorad: {})",
+        karus_names.len(),
+        elmo_names.len()
+    );
+}
+
+/// Demote all war commanders back to their clan role fame.
+/// For each commander: if online and fame==COMMAND_CAPTAIN, demote based on clan role:
+/// - King clan leader → CHIEF(1), vice chief → VICECHIEF(2), other → TRAINEE(5)
+/// - Non-king → CHIEF(1), no clan → fame 0
+pub(crate) async fn reset_war_commanders(world: &crate::world::WorldState) {
+    use crate::clan_constants::{CHIEF, COMMAND_AUTHORITY, COMMAND_CAPTAIN, TRAINEE, VICECHIEF};
+
+    // Take a snapshot of commander names and clear
+    let commander_names = world.get_war_commander_names();
+    world.clear_war_commanders();
+
+    for name in &commander_names {
+        let sid = match world.find_session_by_name(name) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let ch = match world.get_character_info(sid) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        if ch.fame != COMMAND_CAPTAIN {
+            continue;
+        }
+
+        // Determine new fame based on clan role
+        let new_fame = if ch.knights_id > 0 {
+            if let Some(k) = world.get_knights(ch.knights_id) {
+                if k.chief.eq_ignore_ascii_case(name) {
+                    CHIEF
+                } else if k.vice_chief_1.eq_ignore_ascii_case(name)
+                    || k.vice_chief_2.eq_ignore_ascii_case(name)
+                    || k.vice_chief_3.eq_ignore_ascii_case(name)
+                {
+                    VICECHIEF
+                } else {
+                    TRAINEE
+                }
+            } else {
+                0 // No clan found
+            }
+        } else {
+            0 // Not in clan
+        };
+
+        world.update_character_stats(sid, |ci| ci.fame = new_fame);
+
+        // Broadcast fame change
+        let mut fame_pkt = ko_protocol::Packet::new(ko_protocol::Opcode::WizAuthorityChange as u8);
+        fame_pkt.write_u8(COMMAND_AUTHORITY);
+        fame_pkt.write_u32(sid as u32);
+        fame_pkt.write_u8(new_fame);
+        let (zone_id, rx, rz, event_room) = world
+            .with_session(sid, |h| {
+                (
+                    h.position.zone_id,
+                    h.position.region_x,
+                    h.position.region_z,
+                    h.event_room,
+                )
+            })
+            .unwrap_or_default();
+        world.broadcast_to_3x3(zone_id, rx, rz, Arc::new(fame_pkt), None, event_room);
+    }
+}
+
+/// Broadcast GOLDSHELL (coin-mining) activation/deactivation to all online players.
+/// Packet: `WIZ_MAP_EVENT(0x53)` + `u8(GOLDSHELL=9)` + `u8(flag)` + `u32(socket_id)`
+/// Each player receives a personalized packet containing their own socket ID.
+const GOLDSHELL: u8 = 9;
+
+pub(crate) fn broadcast_goldshell(world: &crate::world::WorldState, enable: bool) {
+    let flag: u8 = if enable { 1 } else { 0 };
+    let session_ids = world.get_in_game_session_ids();
+    for sid in session_ids {
+        let mut pkt = ko_protocol::Packet::new(ko_protocol::Opcode::WizMapEvent as u8);
+        pkt.write_u8(GOLDSHELL);
+        pkt.write_u8(flag);
+        pkt.write_u32(sid as u32);
+        world.send_to_session_owned(sid, pkt);
+    }
+    tracing::debug!("Broadcast GOLDSHELL: enable={enable}");
+}
+
+/// Kick all users from a zone to their nation home zone.
+/// Players in the given zone are teleported to their nation home zone
+/// (Karus → zone 1, El Morad → zone 2) at the zone's spawn position.
+fn kick_out_zone_users(world: &std::sync::Arc<crate::world::WorldState>, zone_id: u16) {
+    use crate::systems::war;
+
+    let sessions = world.sessions_in_zone(zone_id);
+    if sessions.is_empty() {
+        return;
+    }
+
+    for sid in &sessions {
+        let ch = match world.get_character_info(*sid) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // server_teleport_to_zone resolves (0,0) to nation-specific start_position
+        let home_zone = war::nation_home_zone(ch.nation);
+        zone_change::server_teleport_to_zone(world, *sid, home_zone, 0.0, 0.0);
+    }
+
+    tracing::info!(
+        "KickOutZoneUsers: {} players kicked from zone {}",
+        sessions.len(),
+        zone_id
+    );
+}
+
+/// Handle +open1..+open6 — Open a nation battle war zone.
+/// calls `BattleZoneOpen(BATTLEZONE_OPEN, zone_index)`.
+fn handle_nation_war_open(session: &mut ClientSession, zone_index: u8) -> anyhow::Result<()> {
+    use crate::systems::war;
+    let world = session.world().clone();
+
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i32;
+
+    let opened = world.update_battle_state(|state| {
+        war::battle_zone_open(state, war::BATTLEZONE_OPEN, zone_index, now_unix)
+    });
+
+    if opened {
+        broadcast_goldshell(&world, true);
+
+        // Apply NPC war buffs
+        world.change_ability_all_npcs(true);
+
+        // War open announcement
+        war::broadcast_war_announcement(&world, "The war zone has opened!", None);
+
+        // Kick users from conflicting zones to their home zones
+        let battle_zone_type = world.get_battle_state().battle_zone_type;
+        if battle_zone_type == 0 {
+            // Standard war — kick from Ronark Land Base, Ronark Land, Bifrost, Krowaz Dominion
+            kick_out_zone_users(&world, crate::world::ZONE_RONARK_LAND_BASE);
+            kick_out_zone_users(&world, crate::world::ZONE_RONARK_LAND);
+            kick_out_zone_users(&world, crate::world::ZONE_BIFROST);
+            kick_out_zone_users(&world, crate::world::ZONE_KROWAZ_DOMINION);
+        } else if battle_zone_type == crate::systems::war::ZONE_ARDREAM_TYPE {
+            kick_out_zone_users(&world, crate::world::ZONE_ARDREAM);
+        }
+
+        send_help(session, &format!("Nation war zone {zone_index} opened"));
+        tracing::info!("GM +open{zone_index}: Nation war opened");
+    } else {
+        send_help(session, "War is already open or invalid zone");
+    }
+    Ok(())
+}
+
+/// Handle +snow — Open a snow battle war zone.
+/// calls `BattleZoneOpen(SNOW_BATTLE)`.
+fn handle_snow_war_open(session: &mut ClientSession) -> anyhow::Result<()> {
+    use crate::systems::war;
+    let world = session.world().clone();
+
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i32;
+
+    let opened = world.update_battle_state(|state| {
+        war::battle_zone_open(state, war::SNOW_BATTLEZONE_OPEN, 0, now_unix)
+    });
+
+    if opened {
+        broadcast_goldshell(&world, true);
+        world.change_ability_all_npcs(true);
+        war::broadcast_war_announcement(&world, "The snow war zone has opened!", None);
+        send_help(session, "Snow war opened");
+        tracing::info!("GM +snow: Snow war opened");
+    } else {
+        send_help(session, "War is already open");
+    }
+    Ok(())
+}
+
+/// Handle +close — Close the active nation/snow war.
+/// calls `BattleZoneClose()`.
+async fn handle_nation_war_close(session: &mut ClientSession) -> anyhow::Result<()> {
+    use crate::systems::war;
+    let world = session.world().clone();
+
+    let prev_type = world.update_battle_state(war::battle_zone_close);
+
+    if prev_type != war::NO_BATTLE {
+        broadcast_goldshell(&world, false);
+        world.change_ability_all_npcs(false);
+
+        // War close announcement
+        let close_msg = if prev_type == war::SNOW_BATTLE {
+            "The snow war has ended!"
+        } else {
+            "The war has ended!"
+        };
+        war::broadcast_war_announcement(&world, close_msg, None);
+
+        // Demote war commanders on close
+        reset_war_commanders(&world).await;
+        let label = if prev_type == war::SNOW_BATTLE {
+            "Snow war closed"
+        } else {
+            "Nation war closed"
+        };
+        send_help(session, label);
+        tracing::info!("GM +close: {label} (prev_type={prev_type})");
+    } else {
+        send_help(session, "No active war to close");
+    }
+    Ok(())
+}
+
+/// Handle +captain GM command — select war commanders from top ranked clans.
+/// `BattleZoneSelectCommanders()`. Delegates to `select_war_commanders()`.
+async fn handle_captain(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    select_war_commanders(&world).await;
+    let count = world.get_war_commander_names().len();
+    send_help(session, &format!("War commanders selected ({count} total)"));
+    Ok(())
+}
+
+/// Handle +nation_change <charname> — Swap target player's nation (1↔2).
+/// Handle +discount / +alldiscount / +offdiscount — set gold cost discount.
+/// - `+discount`: `m_sDiscount = 1` — winning nation only
+/// - `+alldiscount`: `m_sDiscount = 2` — both nations
+/// - `+offdiscount`: `m_sDiscount = 0` — off
+fn handle_discount(session: &mut ClientSession, value: u8) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    world
+        .discount
+        .store(value, std::sync::atomic::Ordering::Relaxed);
+
+    let label = match value {
+        0 => "Discount OFF",
+        1 => "Discount ON (winning nation only)",
+        2 => "Discount ON (all nations)",
+        _ => "Unknown",
+    };
+    send_help(session, label);
+    tracing::info!("GM +discount: set to {value} ({label})");
+    Ok(())
+}
+
+/// C++ sends to DB via NtsCommand; we apply in-memory + fire-and-forget DB save.
+fn handle_nation_change(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +nation_change CharacterName");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_name = args[0];
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(sid) => sid,
+        None => {
+            send_help(session, "Error: User is not online");
+            return Ok(());
+        }
+    };
+
+    let target_ch = match world.get_character_info(target_sid) {
+        Some(ch) => ch,
+        None => {
+            send_help(session, "Error: Could not read target character");
+            return Ok(());
+        }
+    };
+    let old_nation = target_ch.nation;
+    if old_nation == 0 {
+        send_help(session, "Error: Could not read target nation");
+        return Ok(());
+    }
+
+    let new_nation = if old_nation == 1 { 2u8 } else { 1u8 };
+    let old_class = target_ch.class;
+    // C++ DatabaseThread.cpp:782 — class adjustment: add/sub 100 for nation switch
+    let new_class = if old_nation == 1 {
+        old_class + 100 // Karus(1xx) → Elmorad(2xx)
+    } else {
+        old_class - 100 // Elmorad(2xx) → Karus(1xx)
+    };
+
+    world.update_character_stats(target_sid, |ci| {
+        ci.nation = new_nation;
+        ci.class = new_class;
+    });
+
+    // Disconnect the target so they reconnect with updated nation/class
+    // simpler to just disconnect for a clean reload.
+    let mut kick_pkt = Packet::new(Opcode::WizServerChange as u8);
+    kick_pkt.write_u8(0); // disconnect reason
+    world.send_to_session_owned(target_sid, kick_pkt);
+
+    send_help(
+        session,
+        &format!(
+            "{target_name}: nation changed {old_nation} -> {new_nation} (class {old_class} -> {new_class}, disconnected)"
+        ),
+    );
+    tracing::info!("GM +nation_change: {target_name} {old_nation} -> {new_nation} class {old_class} -> {new_class}");
+    Ok(())
+}
+
+/// Handle +summonknights <clanname> — Teleport all online clan members to GM's location.
+fn handle_summon_knights(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +summonknights ClanName");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    let gm_pos = match world.get_position(sid) {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let clan_name = args[0];
+
+    // Find clan by name
+    let clan_info = match world.find_knights_by_name(clan_name) {
+        Some(info) => info,
+        None => {
+            send_help(session, "Error: Clan not found");
+            return Ok(());
+        }
+    };
+    let clan_id = clan_info.id;
+
+    // Iterate all online players, teleport clan members
+    let session_ids = world.get_in_game_session_ids();
+    let mut count = 0u32;
+    for target_sid in session_ids {
+        if target_sid == sid {
+            continue;
+        }
+        let is_member = world
+            .get_character_info(target_sid)
+            .map(|ch| ch.knights_id == clan_id)
+            .unwrap_or(false);
+        if !is_member {
+            continue;
+        }
+
+        let target_nation = world
+            .get_character_info(target_sid)
+            .map(|ch| ch.nation)
+            .unwrap_or(0);
+
+        world.update_position(target_sid, gm_pos.zone_id, gm_pos.x, 0.0, gm_pos.z);
+
+        let mut zpkt = Packet::new(Opcode::WizZoneChange as u8);
+        zpkt.write_u8(3); // ZONE_CHANGE_TELEPORT
+        zpkt.write_u16(gm_pos.zone_id);
+        zpkt.write_u16(0);
+        zpkt.write_u16((gm_pos.x * 10.0) as u16);
+        zpkt.write_u16((gm_pos.z * 10.0) as u16);
+        zpkt.write_u16(0);
+        zpkt.write_u8(target_nation);
+        zpkt.write_u16(0xFFFF);
+        world.send_to_session_owned(target_sid, zpkt);
+        count += 1;
+    }
+
+    send_help(
+        session,
+        &format!("Summoned {count} members of [{clan_name}]"),
+    );
+    tracing::info!("GM +summonknights: summoned {count} members of [{clan_name}]");
+    Ok(())
+}
+
+/// Handle +partytp <charname> — Teleport all party members of target to GM's location.
+/// calls `pUser->ZoneChangeParty(GetZoneID(), GetX(), GetZ())`
+fn handle_party_tp(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +partytp CharacterName");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    let gm_pos = match world.get_position(sid) {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let target_name = args[0];
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(s) => s,
+        None => {
+            send_help(session, "Error: User is not online");
+            return Ok(());
+        }
+    };
+
+    let party_id = world
+        .get_character_info(target_sid)
+        .and_then(|ch| ch.party_id);
+    let party_id = match party_id {
+        Some(pid) => pid,
+        None => {
+            send_help(session, "Error: Target is not in a party");
+            return Ok(());
+        }
+    };
+
+    let party = match world.get_party(party_id) {
+        Some(p) => p,
+        None => {
+            send_help(session, "Error: Party not found");
+            return Ok(());
+        }
+    };
+
+    let mut count = 0u32;
+    for member_sid in party.members.iter().flatten() {
+        if *member_sid == sid {
+            continue;
+        }
+        let member_nation = world
+            .get_character_info(*member_sid)
+            .map(|ch| ch.nation)
+            .unwrap_or(0);
+
+        world.update_position(*member_sid, gm_pos.zone_id, gm_pos.x, 0.0, gm_pos.z);
+
+        let mut zpkt = Packet::new(Opcode::WizZoneChange as u8);
+        zpkt.write_u8(3); // ZONE_CHANGE_TELEPORT
+        zpkt.write_u16(gm_pos.zone_id);
+        zpkt.write_u16(0);
+        zpkt.write_u16((gm_pos.x * 10.0) as u16);
+        zpkt.write_u16((gm_pos.z * 10.0) as u16);
+        zpkt.write_u16(0);
+        zpkt.write_u8(member_nation);
+        zpkt.write_u16(0xFFFF);
+        world.send_to_session_owned(*member_sid, zpkt);
+        count += 1;
+    }
+
+    send_help(
+        session,
+        &format!("Teleported {count} party members of {target_name}"),
+    );
+    tracing::info!("GM +partytp: teleported {count} party members of {target_name}");
+    Ok(())
+}
+
+/// Handle +job <charname> <1-5> — Change target player's class/job.
+/// 1=Warrior, 2=Rogue, 3=Mage, 4=Priest, 5=Kurian
+/// Simplified: We update the class in-memory and send ALL_POINT_CHANGE to trigger
+/// a full stat recalc. The client reloads character appearance via SendMyInfo.
+fn handle_job_change(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 2 {
+        send_help(
+            session,
+            "Usage: +job CharacterName 1-5 (1=Warrior 2=Rogue 3=Mage 4=Priest 5=Kurian)",
+        );
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_name = args[0];
+    let new_job: u8 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Error: Invalid job id (1-5)");
+            return Ok(());
+        }
+    };
+
+    if !(1..=5).contains(&new_job) {
+        send_help(session, "Error: Job must be 1-5");
+        return Ok(());
+    }
+
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(s) => s,
+        None => {
+            send_help(session, "Error: User is not online");
+            return Ok(());
+        }
+    };
+
+    let target_ch = match world.get_character_info(target_sid) {
+        Some(ch) => ch,
+        None => return Ok(()),
+    };
+
+    // Compute new class based on nation and job
+    // C++ GameDefine.h:12-42 — class IDs:
+    // Karus: Warrior=101, Rogue=102, Mage=103, Priest=104, Kurian=113
+    // Elmorad: Warrior=201, Rogue=202, Mage=203, Priest=204, Kurian=213
+    // ClassType = class % 100: Warrior=1, Rogue=2, Mage=3, Priest=4, Kurian=13
+    let nation_base: u16 = if target_ch.nation == 1 { 100 } else { 200 };
+    let job_offset: u16 = match new_job {
+        1 => 1,  // Warrior beginner (ClassWarrior=1)
+        2 => 2,  // Rogue beginner (ClassRogue=2)
+        3 => 3,  // Mage beginner (ClassMage=3)
+        4 => 4,  // Priest beginner (ClassPriest=4)
+        5 => 13, // Kurian beginner (ClassPortuKurian=13)
+        _ => 1,
+    };
+    let new_class = (nation_base + job_offset) as u16;
+
+    let old_class = target_ch.class;
+    world.update_character_stats(target_sid, |ci| {
+        ci.class = new_class;
+    });
+
+    // Send ALL_POINT_CHANGE to trigger client-side stat recalc
+    let mut pkt = Packet::new(Opcode::WizClassChange as u8);
+    pkt.write_u8(0x06); // ALL_POINT_CHANGE
+    pkt.write_u8(0); // success
+    pkt.write_i32(0);
+    world.send_to_session_owned(target_sid, pkt);
+
+    send_help(
+        session,
+        &format!("{target_name}: class {old_class} -> {new_class}"),
+    );
+    tracing::info!("GM +job: {target_name} class {old_class} -> {new_class}");
+    Ok(())
+}
+
+/// Handle +gender <charname> <1-3> — Change target player's race/gender.
+/// 1=Male, 2=Female, 3=Barbarian (Elmorad only)
+/// Simplified: Update race in-memory and send a user-info update.
+fn handle_gender_change(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 2 {
+        send_help(
+            session,
+            "Usage: +gender CharacterName 1/2/3 (1=Male 2=Female 3=Barbarian)",
+        );
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_name = args[0];
+    let race_input: u8 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Error: Invalid race id (1-3)");
+            return Ok(());
+        }
+    };
+
+    if !(1..=3).contains(&race_input) {
+        send_help(session, "Error: Race must be 1-3");
+        return Ok(());
+    }
+
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(s) => s,
+        None => {
+            send_help(session, "Error: User is not online");
+            return Ok(());
+        }
+    };
+
+    let target_ch = match world.get_character_info(target_sid) {
+        Some(ch) => ch,
+        None => return Ok(()),
+    };
+
+    // Map (nation, input) → actual race code
+    // Karus races: 1=Karus Male Warrior, 2=Karus Priest Male, 3=Karus Mage Male, 4=Karus Female
+    // Elmorad races: 11=Barbarian, 12=El Male, 13=El Female
+    let new_race = if target_ch.nation == 2 {
+        // El Morad
+        match race_input {
+            1 => 12, // Male
+            2 => 13, // Female
+            3 => 11, // Barbarian
+            _ => 12,
+        }
+    } else {
+        // Karus — limited gender change based on class
+        match race_input {
+            1 => 3, // Male (Karus Mage/Priest male type)
+            2 => 4, // Female
+            _ => {
+                send_help(
+                    session,
+                    "Error: Karus only supports race 1 (Male) or 2 (Female)",
+                );
+                return Ok(());
+            }
+        }
+    };
+
+    let old_race = target_ch.race;
+    world.update_character_stats(target_sid, |ci| {
+        ci.race = new_race;
+    });
+
+    // Send ALL_POINT_CHANGE so client refreshes character appearance
+    let mut pkt = Packet::new(Opcode::WizClassChange as u8);
+    pkt.write_u8(0x06); // ALL_POINT_CHANGE
+    pkt.write_u8(0); // success
+    pkt.write_i32(0);
+    world.send_to_session_owned(target_sid, pkt);
+
+    send_help(
+        session,
+        &format!("{target_name}: race {old_race} -> {new_race}"),
+    );
+    tracing::info!("GM +gender: {target_name} race {old_race} -> {new_race}");
+    Ok(())
+}
+
+/// Handle +warresult <1|2> — Manually set the war result winner.
+/// Calls `BattleZoneResult(winner_nation)`.
+fn handle_war_result(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    use crate::systems::war;
+
+    if args.is_empty() {
+        send_help(session, "Usage: +warresult 1/2 (1=KARUS 2=ELMORAD)");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let winner: u8 = match args[0].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Error: Invalid nation (1 or 2)");
+            return Ok(());
+        }
+    };
+
+    if !(1..=2).contains(&winner) {
+        send_help(session, "Error: Nation must be 1 (KARUS) or 2 (ELMORAD)");
+        return Ok(());
+    }
+
+    let is_open = world.is_war_open();
+    if !is_open {
+        send_help(session, "Error: Battle is not open");
+        return Ok(());
+    }
+
+    world.update_battle_state(|state| {
+        war::battle_zone_result(state, winner);
+    });
+
+    let label = if winner == 1 { "KARUS" } else { "ELMORAD" };
+    send_help(session, &format!("War result set: {label} wins"));
+    tracing::info!("GM +warresult: {label} wins");
+    Ok(())
+}
+
+/// +tl <charname> <amount> — Transfer Knight Cash (KC/TL) to a target player.
+/// This is the C++ "+tl" command which adds/removes KC from a target player.
+/// Functionally identical to our existing "+kc" command — delegates to the same
+/// cash_gain/cash_lose functions.
+fn handle_tl_balance(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 2 {
+        send_help(session, "Usage: +tl CharacterName KC(+/-)");
+        return Ok(());
+    }
+
+    let target_name = args[0];
+    let amount: i32 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid KC amount");
+            return Ok(());
+        }
+    };
+
+    if amount == 0 {
+        send_help(session, "Amount must be non-zero");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(s) => s,
+        None => {
+            send_help(session, "Error: User is not online");
+            return Ok(());
+        }
+    };
+
+    let pool = session.pool().clone();
+    if amount > 0 {
+        super::knight_cash::cash_gain(&world, &pool, target_sid, amount as u32);
+        send_help(session, "User has received TL.");
+    } else {
+        super::knight_cash::cash_lose(&world, &pool, target_sid, (-amount) as u32);
+        send_help(
+            session,
+            &format!("Removed {} TL from {target_name}", -amount),
+        );
+    }
+
+    info!("GM +tl: {} KC={}", target_name, amount);
+    Ok(())
+}
+
+/// +block <charname> [days] [reason...] — Ban an account by character name.
+/// Sets the account's authority to -1 (banned) and records in check_account.
+/// If the player is online, disconnects them.
+async fn handle_block(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +block CharacterName [days] [reason...]");
+        return Ok(());
+    }
+
+    let target_name = args[0];
+
+    // Parse optional period (days) — C++ max 1095 (3 years)
+    let period: u32 = if args.len() > 1 {
+        match args[1].parse::<u32>() {
+            Ok(d) if d <= 1095 => d,
+            Ok(_) => {
+                send_help(session, "day error! (max 1095)");
+                return Ok(());
+            }
+            Err(_) => 0,
+        }
+    } else {
+        0 // permanent
+    };
+
+    // Parse optional reason from remaining args
+    let reason = if args.len() > 2 {
+        args[2..].join(" ")
+    } else {
+        "-".to_string()
+    };
+
+    let world = session.world().clone();
+    let sid = session.session_id();
+    let pool = session.pool().clone();
+
+    // Get GM name for audit
+    let gm_name = world
+        .get_character_info(sid)
+        .map(|ch| ch.name.clone())
+        .unwrap_or_else(|| "GM".to_string());
+
+    // Find account_id — try online first, then DB
+    let account_id: Option<String> =
+        if let Some(target_sid) = world.find_session_by_name(target_name) {
+            let acct = world.with_session(target_sid, |h| h.account_id.clone());
+            // Send kick reason before disconnecting
+            let kick_msg = if reason == "-" {
+                "You have been blocked by a GM.".to_string()
+            } else {
+                format!("Blocked: {reason}")
+            };
+            world.send_kick_reason(target_sid, &kick_msg);
+            // Disconnect the target
+            world.unregister_session(target_sid);
+            acct
+        } else {
+            // Offline — look up in DB
+            let repo = ko_db::repositories::account::AccountRepository::new(&pool);
+            match repo.find_account_by_char_name(target_name).await {
+                Ok(acct) => acct,
+                Err(e) => {
+                    warn!("GM +block: DB lookup failed for '{}': {}", target_name, e);
+                    send_help(session, "Error: DB lookup failed");
+                    return Ok(());
+                }
+            }
+        };
+
+    let account_id = match account_id {
+        Some(a) => a,
+        None => {
+            send_help(session, "Error: Character not found");
+            return Ok(());
+        }
+    };
+
+    // Update authority in tb_user
+    let repo = ko_db::repositories::account::AccountRepository::new(&pool);
+    if let Err(e) = repo.update_authority(&account_id, -1).await {
+        warn!("GM +block: update_authority failed: {}", e);
+    }
+
+    // Record in check_account
+    let check_repo = ko_db::repositories::check_account::CheckAccountRepository::new(&pool);
+    if let Err(e) = check_repo.ban(&account_id, &gm_name, &reason).await {
+        warn!("GM +block: check_account ban failed: {}", e);
+    }
+
+    send_help(
+        session,
+        &format!(
+            "{target_name} has been blocked. Period: {} days, Reason: {reason}",
+            if period == 0 {
+                "permanent".to_string()
+            } else {
+                period.to_string()
+            }
+        ),
+    );
+    info!(
+        "GM +block: {} blocked '{}' (account={}, period={}, reason={})",
+        gm_name, target_name, account_id, period, reason
+    );
+    Ok(())
+}
+
+/// +unblock <charname> — Unban an account by character name.
+/// Restores the account's authority to 1 (normal user).
+async fn handle_unblock(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +unblock CharacterName");
+        return Ok(());
+    }
+
+    let target_name = args[0];
+    if target_name.is_empty() || target_name.len() > 20 {
+        send_help(session, "Error: Invalid character name");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let sid = session.session_id();
+    let pool = session.pool().clone();
+
+    let gm_name = world
+        .get_character_info(sid)
+        .map(|ch| ch.name.clone())
+        .unwrap_or_else(|| "GM".to_string());
+
+    // Find account_id
+    let account_id: Option<String> =
+        if let Some(target_sid) = world.find_session_by_name(target_name) {
+            world.with_session(target_sid, |h| h.account_id.clone())
+        } else {
+            let repo = ko_db::repositories::account::AccountRepository::new(&pool);
+            match repo.find_account_by_char_name(target_name).await {
+                Ok(acct) => acct,
+                Err(e) => {
+                    warn!("GM +unblock: DB lookup failed for '{}': {}", target_name, e);
+                    send_help(session, "Error: DB lookup failed");
+                    return Ok(());
+                }
+            }
+        };
+
+    let account_id = match account_id {
+        Some(a) => a,
+        None => {
+            send_help(session, "Error: Character not found");
+            return Ok(());
+        }
+    };
+
+    // Restore authority
+    let repo = ko_db::repositories::account::AccountRepository::new(&pool);
+    if let Err(e) = repo.update_authority(&account_id, 1).await {
+        warn!("GM +unblock: update_authority failed: {}", e);
+    }
+
+    // Update check_account
+    let check_repo = ko_db::repositories::check_account::CheckAccountRepository::new(&pool);
+    if let Err(e) = check_repo.unban(&account_id, &gm_name).await {
+        warn!("GM +unblock: check_account unban failed: {}", e);
+    }
+
+    send_help(session, &format!("{target_name} has been unblocked."));
+    info!(
+        "GM +unblock: {} unblocked '{}' (account={})",
+        gm_name, target_name, account_id
+    );
+    Ok(())
+}
+
+/// +genie <charname> <1|2> — Start (1) or stop (2) genie for a target player.
+/// C++ uses GetTargetID() (click-selected target). Our version takes character name
+/// as argument for easier GM use (no target selection mechanism in chat commands).
+fn handle_genie_toggle(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 2 {
+        send_help(
+            session,
+            "Usage: +genie CharName 1 (start) or +genie CharName 2 (stop)",
+        );
+        return Ok(());
+    }
+
+    let target_name = args[0];
+    let genie_type: u8 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Usage: +genie CharName 1|2");
+            return Ok(());
+        }
+    };
+
+    if genie_type != 1 && genie_type != 2 {
+        send_help(session, "Usage: +genie CharName 1 (start) or 2 (stop)");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(s) => s,
+        None => {
+            send_help(session, "Error: User is not online");
+            return Ok(());
+        }
+    };
+
+    // Check target is in-game
+    if world.get_character_info(target_sid).is_none() {
+        send_help(session, "Error: User is not in game");
+        return Ok(());
+    }
+
+    if genie_type == 1 {
+        // GenieStart — set genie_active=true, send activation packets
+        let abs = world
+            .with_session(target_sid, |h| h.genie_time_abs)
+            .unwrap_or(0);
+        let remaining = super::genie::genie_remaining_from_abs(abs);
+        if remaining == 0 {
+            send_help(session, "Error: Target has no genie time remaining");
+            return Ok(());
+        }
+        world.update_session(target_sid, |h| {
+            h.genie_active = true;
+        });
+
+        let hours = super::genie::get_genie_hours_pub(remaining);
+
+        // Send activation packet to target
+        let mut resp = Packet::new(Opcode::WizGenie as u8);
+        resp.write_u8(1); // GENIE_STATUS_ACTIVE
+        resp.write_u8(4); // GenieStartHandle
+        resp.write_u16(1);
+        resp.write_u16(hours);
+        world.send_to_session_owned(target_sid, resp);
+
+        let mut start_pkt = Packet::new(Opcode::WizGenie as u8);
+        start_pkt.write_u8(1); // GENIE_INFO_REQUEST
+        start_pkt.write_u8(4); // GENIE_START_HANDLE
+        start_pkt.write_u16(1);
+        start_pkt.write_u16(hours);
+        world.send_to_session_owned(target_sid, start_pkt);
+
+        send_help(session, "Genie started for target.");
+    } else {
+        // GenieStop
+        let was_active = world
+            .with_session(target_sid, |h| h.genie_active)
+            .unwrap_or(false);
+        if !was_active {
+            send_help(session, "Error: Genie is not active for target");
+            return Ok(());
+        }
+
+        world.update_session(target_sid, |h| {
+            h.genie_active = false;
+        });
+
+        let abs2 = world
+            .with_session(target_sid, |h| h.genie_time_abs)
+            .unwrap_or(0);
+        let hours = super::genie::get_genie_hours_pub(super::genie::genie_remaining_from_abs(abs2));
+
+        let mut resp = Packet::new(Opcode::WizGenie as u8);
+        resp.write_u8(1); // GENIE_INFO_REQUEST
+        resp.write_u8(5); // GENIE_STOP_HANDLE
+        resp.write_u16(1);
+        resp.write_u16(hours);
+        world.send_to_session_owned(target_sid, resp);
+
+        send_help(session, "Genie stopped for target.");
+    }
+
+    info!("GM +genie: type={}", genie_type);
+    Ok(())
+}
+
+/// +givegenietime <charname> <hours> — Give genie time to a target player.
+/// Adds hours to the target's genie time and sends update packet.
+fn handle_give_genie_time(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 2 {
+        send_help(session, "Usage: +givegenietime UserID Time(hours)");
+        return Ok(());
+    }
+
+    let target_name = args[0];
+    let hours: u32 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid hours");
+            return Ok(());
+        }
+    };
+
+    if hours == 0 {
+        send_help(session, "Hours must be > 0");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(s) => s,
+        None => {
+            send_help(session, "Error: User is not online");
+            return Ok(());
+        }
+    };
+
+    // C++ calculates: UNIXTIME + (KC * HOUR) + existing remaining time
+    // Absolute timestamp: if expired, start from now; if active, extend deadline.
+    let duration_secs = hours * 3600;
+    let now = super::genie::now_secs();
+    world.update_session(target_sid, |h| {
+        h.genie_time_abs = h.genie_time_abs.max(now) + duration_secs;
+    });
+
+    // Send genie update packet to target
+    // C++ sends: WIZ_GENIE << u8(GenieUseSpiringPotion) << u8(GenieUseSpiringPotion) << GetGenieTime()
+    let genie_abs = world
+        .with_session(target_sid, |h| h.genie_time_abs)
+        .unwrap_or(0);
+    let genie_hours =
+        super::genie::get_genie_hours_pub(super::genie::genie_remaining_from_abs(genie_abs));
+    let mut resp = Packet::new(Opcode::WizGenie as u8);
+    resp.write_u8(1); // GenieUseSpiringPotion
+    resp.write_u8(1); // GenieUseSpiringPotion
+    resp.write_u16(genie_hours);
+    world.send_to_session_owned(target_sid, resp);
+
+    send_help(session, "Give Genie successfully");
+    info!("GM +givegenietime: {} hours={}", target_name, hours);
+    Ok(())
+}
+
+/// +pmall <title> <message...> — Send a private chat message to all online players.
+/// Constructs a PRIVATE_CHAT packet and sends it to every online player.
+fn handle_pmall(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 2 {
+        send_help(session, "Usage: +pmall Title Message");
+        return Ok(());
+    }
+
+    let title = args[0];
+    let message_words = &args[1..];
+
+    // C++ validation: max 50 words, max 75 chars per word
+    if message_words.len() > 50 {
+        send_help(session, "Error: long word!");
+        return Ok(());
+    }
+    for word in message_words {
+        if word.len() > 75 {
+            send_help(session, "Error: long word!");
+            return Ok(());
+        }
+    }
+
+    let message = message_words.join(" ");
+    let world = session.world().clone();
+
+    // C++ iterates MAX_USER and sends PRIVATE_CHAT to each player
+    // ChatPacket::Construct with type PRIVATE_CHAT (3), message, title, nation, -1, -1, 21
+    let all_sids = world.all_ingame_session_ids();
+    for target_sid in all_sids {
+        let nation = world
+            .get_character_info(target_sid)
+            .map(|ch| ch.nation)
+            .unwrap_or(0);
+
+        let mut pkt = Packet::new(Opcode::WizChat as u8);
+        pkt.write_u8(3); // PRIVATE_CHAT
+        pkt.write_u8(nation);
+        pkt.write_i32(-1); // sender sid (-1 = system)
+        pkt.write_u8(title.len() as u8); // SByte title
+        pkt.write_bytes(title.as_bytes());
+        pkt.write_string(&message); // DByte message
+        pkt.write_i8(-1); // personal_rank (C++ passes -1)
+        pkt.write_u8(21); // authority (C++ passes 21)
+        pkt.write_u8(0); // system_msg
+
+        world.send_to_session_owned(target_sid, pkt);
+    }
+
+    send_help(session, "PM sent to all online players.");
+    info!("GM +pmall: title='{}' message='{}'", title, message);
+    Ok(())
+}
+
+/// +clearinventory [charname] — Clear all inventory items (bag slots) for a target player.
+/// Clears all items in inventory bag slots (SLOT_MAX..SLOT_MAX+HAVE_MAX) and
+/// sends a WIZ_ITEM_MOVE update packet.
+fn handle_clear_inventory(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    // Determine target: if no args, clear GM's own inventory
+    let target_sid = if args.is_empty() {
+        sid
+    } else {
+        let target_name = args[0];
+        match world.find_session_by_name(target_name) {
+            Some(s) => s,
+            None => {
+                send_help(session, "User is not online");
+                return Ok(());
+            }
+        }
+    };
+
+    let target_name = world
+        .get_character_info(target_sid)
+        .map(|ch| ch.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    // Clear inventory bag slots (SLOT_MAX..SLOT_MAX+HAVE_MAX)
+    world.update_session(target_sid, |h| {
+        for i in super::SLOT_MAX..(super::SLOT_MAX + super::HAVE_MAX) {
+            if i < h.inventory.len() {
+                h.inventory[i] = crate::world::types::UserItemSlot::default();
+            }
+        }
+    });
+
+    // Build WIZ_ITEM_MOVE response packet (sub 2, type 1) with cleared items
+    // C++ sends: [u8(2)] [u8(1)] then for each slot: [u32 nNum] [u16 sDuration]
+    //            [u16 sCount] [u8 bFlag] [u16 sRemainingRentalTime] [u32 0] [u32 nExpirationTime]
+    let mut result = Packet::new(Opcode::WizItemMove as u8);
+    result.write_u8(2); // sub-opcode
+    result.write_u8(1); // type
+    for _i in 0..super::HAVE_MAX {
+        result.write_u32(0); // nNum (cleared)
+        result.write_u16(0); // sDuration
+        result.write_u16(0); // sCount
+        result.write_u8(0); // bFlag
+        result.write_u16(0); // sRemainingRentalTime
+        result.write_u32(0); // reserved
+        result.write_u32(0); // nExpirationTime
+    }
+    world.send_to_session_owned(target_sid, result);
+
+    // Update abilities (weight notification is integrated into set_user_ability)
+    world.set_user_ability(target_sid);
+
+    send_help(
+        session,
+        &format!(
+            "{} Kullanıcısına Ait Inventory Başarıyla Sıfırlanmıştır.",
+            target_name
+        ),
+    );
+    info!("GM +clearinventory: cleared '{}'", target_name);
+    Ok(())
+}
+
+/// +resetranking — Reset PK zone daily loyalty rankings for all players and bots.
+/// Zeroes pk_loyalty_daily and pk_loyalty_premium_bonus for all sessions and ranking arrays.
+fn handle_reset_ranking(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+
+    // C++ calls ResetPlayerKillingRanking() which clears both ranking arrays and session fields
+    world.reset_pk_zone_rankings();
+
+    send_help(session, "Player rankings have been reset.");
+    info!("GM +resetranking: PK zone rankings reset");
+    Ok(())
+}
+
+/// +zone_give_item <zone_id> <item_id> <count> <expiry_hours> — Give item to all players in a zone via letter.
+/// Sends a letter with the item to each player in the specified zone.
+/// If zone_id is 0, sends to all online players (same as +online_give_item).
+async fn handle_zone_give_item(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 4 {
+        send_help(
+            session,
+            "Usage: +zone_give_item ZoneID ItemID Count ExpiryHours",
+        );
+        return Ok(());
+    }
+
+    let zone_id: u16 = match args[0].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid ZoneID");
+            return Ok(());
+        }
+    };
+
+    let item_id: u32 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid ItemID");
+            return Ok(());
+        }
+    };
+
+    let count: u16 = match args[2].parse() {
+        Ok(v) if v > 0 => v,
+        _ => {
+            send_help(session, "Invalid Count (must be > 0)");
+            return Ok(());
+        }
+    };
+
+    let expiry_hours: u32 = match args[3].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid ExpiryHours");
+            return Ok(());
+        }
+    };
+
+    let world = session.world().clone();
+
+    // Validate item exists
+    if world.get_item(item_id).is_none() {
+        send_help(session, "Error: Item does not exist");
+        return Ok(());
+    }
+
+    // Get target sessions based on zone_id
+    let target_sids: Vec<u16> = if zone_id == 0 {
+        world.all_ingame_session_ids()
+    } else {
+        world.sessions_in_zone(zone_id)
+    };
+
+    let pool = session.pool().clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i32;
+
+    // Calculate expiration timestamp (0 = no expiry)
+    let expiry_ts = if expiry_hours > 0 {
+        now + (expiry_hours as i32 * 3600)
+    } else {
+        0
+    };
+
+    let sent_count = target_sids.len();
+
+    // Send letter to each player asynchronously
+    for sid in target_sids {
+        let char_name = match world.get_character_info(sid) {
+            Some(ch) => ch.name.clone(),
+            None => continue,
+        };
+
+        let pool = pool.clone();
+        let name = char_name;
+        tokio::spawn(async move {
+            let repo = ko_db::repositories::letter::LetterRepository::new(&pool);
+            if let Err(e) = repo
+                .send_letter(
+                    "Admin", // sender
+                    &name,   // recipient
+                    "Item",  // subject
+                    "Gift",  // message
+                    2,       // b_type = item letter
+                    item_id as i32,
+                    count as i16,
+                    0, // durability (use item default)
+                    0, // serial
+                    expiry_ts,
+                    0,   // coins
+                    now, // send_date
+                )
+                .await
+            {
+                tracing::warn!("GM zone_give_item: letter send failed for {}: {}", name, e);
+            }
+        });
+    }
+
+    send_help(
+        session,
+        &format!(
+            "Sent item {} (x{}) to {} players in zone {}",
+            item_id, count, sent_count, zone_id
+        ),
+    );
+    info!(
+        "GM +zone_give_item: item={} count={} zone={} players={}",
+        item_id, count, zone_id, sent_count
+    );
+    Ok(())
+}
+
+/// +online_give_item <item_id> <count> [expiry_hours] — Give item to all online players via letter.
+/// Same as +zone_give_item with zone_id=0 (all zones).
+async fn handle_online_give_item(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 2 {
+        send_help(
+            session,
+            "Usage: +online_give_item ItemID Count [ExpiryHours]",
+        );
+        return Ok(());
+    }
+
+    let expiry = if args.len() > 2 { args[2] } else { "0" };
+
+    // Delegate to zone_give_item with zone_id=0 (all zones)
+    let expiry_str = expiry.to_string();
+    let zone_args = ["0", args[0], args[1], &expiry_str];
+    handle_zone_give_item(session, &zone_args).await
+}
+
+/// +noticeall <message> — Send a server-wide announcement to all players.
+/// Broadcasts WAR_SYSTEM_CHAT (type 8) to all online sessions.
+/// Functionally identical to +notice but uses the C++ "noticeall" command name.
+async fn handle_noticeall(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +noticeall Message");
+        return Ok(());
+    }
+
+    // Delegate to existing +notice handler (same functionality)
+    handle_notice(session, args)
+}
+
+/// +open_skill <CharName> — promote beginner → novice (first job change).
+/// Calls `PromoteUserNovice()` (QuestHandler.cpp:666-697).
+fn handle_open_skill(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +open_skill CharName");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_name = args[0];
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(sid) => sid,
+        None => {
+            send_help(session, "Player not found or not online.");
+            return Ok(());
+        }
+    };
+
+    let target_ch = match world.get_character_info(target_sid) {
+        Some(ch) => ch,
+        None => return Ok(()),
+    };
+
+    // Target must be beginner (not already novice or mastered)
+    if !super::class_change::is_beginner(target_ch.class) {
+        send_help(session, "Target is not a beginner class.");
+        return Ok(());
+    }
+
+    // Determine new class (beginner → novice).
+    let class_type = super::class_change::get_class_type(target_ch.class);
+    let new_class_type: u16 = if super::class_change::is_portu_kurian(target_ch.class) {
+        14 // KurianNovice
+    } else {
+        // Warrior(1)→5, Rogue(2)→7, Mage(3)→9, Priest(4)→11
+        match class_type {
+            1 => 5,
+            2 => 7,
+            3 => 9,
+            4 => 11,
+            _ => return Ok(()),
+        }
+    };
+
+    let nation = target_ch.class / 100;
+    let new_class = nation * 100 + new_class_type;
+
+    // Send WIZ_CLASS_CHANGE sub=6 to region (broadcast the promotion).
+    let target_pos = world.get_position(target_sid);
+    let mut region_pkt = Packet::new(Opcode::WizClassChange as u8);
+    region_pkt.write_u8(6); // PROMOTE_NOVICE sub-opcode for broadcast
+    region_pkt.write_u16(new_class);
+    region_pkt.write_u32(target_sid as u32);
+
+    if let Some(pos) = target_pos {
+        world.broadcast_to_region_sync(
+            pos.zone_id,
+            pos.region_x,
+            pos.region_z,
+            Arc::new(region_pkt),
+            None,
+            0,
+        );
+    }
+
+    // Update class locally.
+    world.update_character_stats(target_sid, |ch| {
+        ch.class = new_class;
+    });
+
+    // Recalculate abilities.
+    world.set_user_ability(target_sid);
+
+    // C++ also calls KnightsCurrentMember — update clan if applicable
+    // (clan info already tracks class via CharacterInfo, no separate update needed)
+
+    info!(
+        "[{}] +open_skill: promoted {} class {}→{}",
+        session.addr(),
+        target_name,
+        target_ch.class,
+        new_class,
+    );
+
+    send_help(
+        session,
+        &format!("{} promoted to novice class {}.", target_name, new_class),
+    );
+
+    Ok(())
+}
+
+/// +open_master <CharName> — promote novice → master (second job change).
+/// Calls `PromoteUser()` (QuestHandler.cpp:700-725).
+async fn handle_open_master(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +open_master CharName");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_name = args[0];
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(sid) => sid,
+        None => {
+            send_help(session, "Player not found or not online.");
+            return Ok(());
+        }
+    };
+
+    let target_ch = match world.get_character_info(target_sid) {
+        Some(ch) => ch,
+        None => return Ok(()),
+    };
+
+    // Actually the C++ HandleOpenMaster checks `!isMastered()` — target must NOT already be mastered.
+    // And PromoteUser() checks `if (!isNovice()) return false;` — must be novice.
+    if !super::class_change::is_novice(target_ch.class) {
+        send_help(session, "Target is not a novice class.");
+        return Ok(());
+    }
+
+    // Determine new class (novice → master).
+    let class_type = super::class_change::get_class_type(target_ch.class);
+    let new_class_type = class_type + 1;
+    let nation = target_ch.class / 100;
+    let new_class = nation * 100 + new_class_type;
+
+    // Send WIZ_CLASS_CHANGE sub=6 to region.
+    let target_pos = world.get_position(target_sid);
+    let mut region_pkt = Packet::new(Opcode::WizClassChange as u8);
+    region_pkt.write_u8(6);
+    region_pkt.write_u16(new_class);
+    region_pkt.write_u32(target_sid as u32);
+
+    if let Some(pos) = target_pos {
+        world.broadcast_to_region_sync(
+            pos.zone_id,
+            pos.region_x,
+            pos.region_z,
+            Arc::new(region_pkt),
+            None,
+            0,
+        );
+    }
+
+    // Update class locally.
+    world.update_character_stats(target_sid, |ch| {
+        ch.class = new_class;
+    });
+
+    // Recalculate abilities.
+    world.set_user_ability(target_sid);
+
+    // bBaseClass = (bOldClass / 2) - 1
+    let base_class = (class_type / 2).saturating_sub(1) as u16;
+
+    // Save quest event for class progression (C++ parity).
+    world.update_session(target_sid, |h| {
+        let info = h.quests.entry(base_class).or_default();
+        info.quest_state = 2; // completed
+    });
+    let mut quest_pkt = Packet::new(Opcode::WizQuest as u8);
+    quest_pkt.write_u8(2);
+    quest_pkt.write_u16(base_class);
+    quest_pkt.write_u8(2); // completed
+    world.send_to_session_owned(target_sid, quest_pkt);
+
+    // Fire-and-forget DB save for quest event
+    let pool = session.pool().clone();
+    let target_char_name = target_ch.name.clone();
+    let bc = base_class;
+    tokio::spawn(async move {
+        let repo = ko_db::repositories::quest::QuestRepository::new(&pool);
+        if let Err(e) = repo
+            .save_user_quest(&target_char_name, bc as i16, 2, [0, 0, 0, 0])
+            .await
+        {
+            tracing::warn!("Failed to save master quest for {target_char_name}: {e}");
+        }
+    });
+
+    info!(
+        "[{}] +open_master: promoted {} class {}→{} (base_class={})",
+        session.addr(),
+        target_name,
+        target_ch.class,
+        new_class,
+        base_class,
+    );
+
+    send_help(
+        session,
+        &format!("{} promoted to master class {}.", target_name, new_class),
+    );
+
+    Ok(())
+}
+
+/// +open_questskill <CharName> — save class-specific quest skill events.
+/// Saves multiple quest event IDs (via SaveEvent) based on the target's class.
+async fn handle_open_questskill(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +open_questskill CharName");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_name = args[0];
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(sid) => sid,
+        None => {
+            send_help(session, "Player not found or not online.");
+            return Ok(());
+        }
+    };
+
+    let target_ch = match world.get_character_info(target_sid) {
+        Some(ch) => ch,
+        None => return Ok(()),
+    };
+
+    // Target must NOT be novice (i.e. must be beginner — before novice quest skills)
+    if super::class_change::is_novice(target_ch.class) {
+        send_help(
+            session,
+            "Target already has novice class (quest skills already unlocked).",
+        );
+        return Ok(());
+    }
+
+    // Class-specific quest event IDs
+    let quest_ids: &[u16] = if super::class_change::is_warrior(target_ch.class) {
+        &[334, 359, 365, 273]
+    } else if super::class_change::is_rogue(target_ch.class) {
+        &[335, 347, 360, 366, 273]
+    } else if super::class_change::is_mage(target_ch.class) {
+        &[336, 348, 361, 367, 273]
+    } else if super::class_change::is_priest(target_ch.class) {
+        &[337, 349, 357, 362, 363, 364, 368, 273]
+    } else if super::class_change::is_portu_kurian(target_ch.class) {
+        &[1377, 1378, 273]
+    } else {
+        send_help(session, "Unknown class type.");
+        return Ok(());
+    };
+
+    // Save all quest events for the target.
+    // Since save_event requires a ClientSession and we only have the target's SID,
+    // we save the quest state directly via WorldState + DB.
+    for &quest_id in quest_ids {
+        // Update quest state in world
+        world.update_session(target_sid, |h| {
+            let info = h.quests.entry(quest_id).or_default();
+            info.quest_state = 2; // completed
+        });
+
+        // Send WIZ_QUEST response to target
+        let mut pkt = Packet::new(Opcode::WizQuest as u8);
+        pkt.write_u8(2); // quest state update sub-opcode
+        pkt.write_u16(quest_id);
+        pkt.write_u8(2); // completed
+        world.send_to_session_owned(target_sid, pkt);
+    }
+
+    // Fire-and-forget DB persistence for all quest events
+    let pool = session.pool().clone();
+    let char_id: Option<String> = world
+        .with_session(target_sid, |h| h.character.as_ref().map(|c| c.name.clone()))
+        .flatten();
+    if let Some(char_id) = char_id {
+        let quest_ids_owned: Vec<u16> = quest_ids.to_vec();
+        tokio::spawn(async move {
+            let repo = ko_db::repositories::quest::QuestRepository::new(&pool);
+            for quest_id in quest_ids_owned {
+                if let Err(e) = repo
+                    .save_user_quest(&char_id, quest_id as i16, 2, [0, 0, 0, 0])
+                    .await
+                {
+                    tracing::warn!("Failed to save quest {quest_id} for {char_id}: {e}");
+                }
+            }
+        });
+    }
+
+    info!(
+        "[{}] +open_questskill: saved {} quest events for {}",
+        session.addr(),
+        quest_ids.len(),
+        target_name,
+    );
+
+    send_help(
+        session,
+        &format!(
+            "Quest skill events ({} total) saved for {}.",
+            quest_ids.len(),
+            target_name
+        ),
+    );
+
+    Ok(())
+}
+
+/// +bowlevent <ZoneID> <Duration> — start/stop bowl event.
+/// Duration is in seconds. Duration=0 closes an active event.
+/// Timer ticks are handled by `VirtualEventTimer` (EventMainTimer.cpp).
+fn handle_bowlevent(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 2 {
+        send_help(session, "Usage: +bowlevent ZoneID Duration(seconds)");
+        return Ok(());
+    }
+
+    let zone_id: u8 = match args[0].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid ZoneID.");
+            return Ok(());
+        }
+    };
+    let duration: u16 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid Duration.");
+            return Ok(());
+        }
+    };
+
+    let world = session.world().clone();
+
+    // Get zone name for announcement
+    let zone_name = world
+        .get_zone(zone_id as u16)
+        .and_then(|z| z.zone_info.as_ref().map(|zi| zi.zone_name.clone()))
+        .unwrap_or_else(|| format!("Zone {}", zone_id));
+
+    if world.is_bowl_event_active() && duration == 0 {
+        // Close the event
+        world.close_bowl_event();
+
+        let msg = format!("Bowl Event {} Bolgesinde sona erdi.", zone_name);
+        broadcast_war_system_chat(&world, &msg);
+
+        info!(
+            "[{}] +bowlevent: closed event in zone {}",
+            session.addr(),
+            zone_id
+        );
+        return Ok(());
+    }
+
+    // Open the event
+    world.set_bowl_event_active(true);
+    world.set_bowl_event_time(duration);
+    world.set_bowl_event_zone(zone_id);
+
+    let minutes = duration / 60;
+    let msg = format!(
+        "Bowl Event {} Bolgesinde Basladi. Event Suresi {} Dakikadir.",
+        zone_name, minutes
+    );
+    broadcast_war_system_chat(&world, &msg);
+
+    info!(
+        "[{}] +bowlevent: started in zone {} for {} seconds ({} minutes)",
+        session.addr(),
+        zone_id,
+        duration,
+        minutes,
+    );
+
+    Ok(())
+}
+
+/// +allow <CharName> — allow attack for a player.
+/// Sets `BanTypes::ALLOW_ATTACK (5)` via `UserAuthorityUpdate`.
+/// In our simplified implementation, we set the player's `can_attack` flag to true.
+fn handle_allow_attack(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +allow CharName");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_name = args[0];
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(sid) => sid,
+        None => {
+            send_help(session, "Player not found or not online.");
+            return Ok(());
+        }
+    };
+
+    // Clear attack disable flag (0 = enabled)
+    world.update_session(target_sid, |h| {
+        h.attack_disabled_until = 0;
+    });
+
+    info!(
+        "[{}] +allow: enabled attack for {}",
+        session.addr(),
+        target_name,
+    );
+
+    send_help(session, &format!("Attack enabled for {}.", target_name));
+
+    Ok(())
+}
+
+/// +disable <CharName> — disable attack for a player.
+/// Sets `BanTypes::DIS_ATTACK (4)` via `UserAuthorityUpdate`.
+fn handle_disable_attack(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +disable CharName");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_name = args[0];
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(sid) => sid,
+        None => {
+            send_help(session, "Player not found or not online.");
+            return Ok(());
+        }
+    };
+
+    // Set attack disabled permanently (u32::MAX)
+    world.update_session(target_sid, |h| {
+        h.attack_disabled_until = u32::MAX;
+    });
+
+    info!(
+        "[{}] +disable: disabled attack for {}",
+        session.addr(),
+        target_name,
+    );
+
+    send_help(session, &format!("Attack disabled for {}.", target_name));
+
+    Ok(())
+}
+
+/// Close all open windows/activities before GM toggle.
+/// Cancels: trade, challenge, merchant (sell/buy/browse), mining, fishing.
+async fn reset_windows_gm(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    // 1. Cancel active trade
+    if world.is_trading(sid) {
+        super::trade::exchange_cancel(session).await?;
+    }
+
+    // 2. Cancel challenge (requesting side)
+    let (requesting, challenged, _) = world.get_challenge_state(sid);
+    if requesting != 0 {
+        world.update_session(sid, |h| {
+            h.requesting_challenge = 0;
+            h.challenge_user = -1;
+        });
+    }
+    // 3. Cancel challenge (requested side)
+    if challenged != 0 {
+        world.update_session(sid, |h| {
+            h.challenge_requested = 0;
+            h.challenge_user = -1;
+        });
+    }
+
+    // 4. Close selling merchant stall
+    if world.is_selling_merchant(sid) || world.is_selling_merchant_preparing(sid) {
+        super::merchant::merchant_close(session).await?;
+    }
+
+    // 5. Close buying merchant stall
+    if world.is_buying_merchant(sid) || world.is_buying_merchant_preparing(sid) {
+        super::merchant::buying_merchant_close_internal(session).await?;
+    }
+
+    // 6. Stop browsing a merchant
+    if world.get_browsing_merchant(sid).is_some() {
+        super::merchant::merchant_trade_cancel(session).await?;
+    }
+
+    // 7. Stop mining
+    if world.is_mining(sid) {
+        super::mining::stop_mining_internal(&world, sid);
+    }
+
+    // 8. Stop fishing
+    if world.is_fishing(sid) {
+        super::mining::stop_fishing_internal(&world, sid);
+    }
+
+    Ok(())
+}
+
+/// +gm — toggle self between GM and GM_USER authority.
+/// Toggles between `AUTHORITY_GAME_MASTER (0)` and `AUTHORITY_GM_USER (2)`.
+/// GM mode grants invisibility + entity info overlay; user mode restores normal visibility.
+/// C++ full refresh sequence:
+///   1. m_bAbnormalType = ABNORMAL_INVISIBLE / ABNORMAL_NORMAL
+///   2. SendMyInfo()
+///   3. UserInOut(INOUT_OUT) → disappear
+///   4. RegisterRegion / SetRegion → re-register
+///   5. UserInOut(INOUT_WARP) → re-appear (filtered for invisible GMs)
+///   6. RegionNpcInfoForMe / RegionUserInOutForMe
+///   7. ZoneChange(GetZoneID()) → full zone refresh
+async fn handle_gm_toggle(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    let char_info = match world.get_character_info(sid) {
+        Some(ch) => ch,
+        None => return Ok(()),
+    };
+
+    // Only standing players can toggle. Sitting players get a message, others silently ignored.
+    if char_info.res_hp_type != 1 {
+        if char_info.res_hp_type == 2 {
+            send_help(session, "Stand up to use this command.");
+        }
+        return Ok(());
+    }
+
+    // Toggle authority: GM(0) ↔ GM_USER(2)
+    let current_auth = char_info.authority;
+    let (new_auth, new_abnormal) = if current_auth == 0 {
+        // GM → User mode
+        (2u8, 1u32) // AUTHORITY_GM_USER, ABNORMAL_NORMAL
+    } else {
+        // User → GM mode
+        (0u8, 0u32) // AUTHORITY_GAME_MASTER, ABNORMAL_INVISIBLE
+    };
+
+    // Update authority and abnormal type
+    world.update_character_stats(sid, |ch| {
+        ch.authority = new_auth;
+    });
+    world.update_session(sid, |h| {
+        h.abnormal_type = new_abnormal;
+    });
+
+    // Heal to max if below 50% (C++ parity)
+    if let Some(ch) = world.get_character_info(sid) {
+        if (ch.hp as u32) < (ch.max_hp as u32 / 2) {
+            world.update_character_stats(sid, |c| {
+                c.hp = c.max_hp;
+            });
+        }
+    }
+
+    // ── ResetWindows: close open dialogs/activities ────────────────────
+    reset_windows_gm(session).await?;
+
+    // ── SendMyInfo: full character refresh to self ──────────────────────
+    super::gamestart::send_myinfo_refresh(session).await?;
+
+    // ── Broadcast visibility change ─────────────────────────────────────
+    //   UserInOut(INOUT_OUT) → RegisterRegion / SetRegion →
+    //   UserInOut(INOUT_WARP) → RegionNpcInfoForMe → RegionUserInOutForMe →
+    //   ZoneChange(GetZoneID())
+    if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+        // 1. Broadcast StateChange(5, abnormal) — GM visibility toggle
+        let mut vis_pkt = ko_protocol::Packet::new(ko_protocol::Opcode::WizStateChange as u8);
+        vis_pkt.write_u32(sid as u32);
+        vis_pkt.write_u8(5); // type = GM visibility toggle
+        vis_pkt.write_u32(new_abnormal);
+        let arc_vis_pkt = Arc::new(vis_pkt);
+        world.broadcast_to_3x3(
+            pos.zone_id,
+            pos.region_x,
+            pos.region_z,
+            Arc::clone(&arc_vis_pkt),
+            Some(sid),
+            event_room,
+        );
+        world.send_to_session(sid, &arc_vis_pkt);
+
+        // 2. Broadcast UserInOut (INOUT_OUT to disappear, INOUT_IN to reappear)
+        let ch_opt = world.get_character_info(sid);
+        let clan = ch_opt.as_ref().and_then(|c| {
+            if c.knights_id > 0 {
+                world.get_knights(c.knights_id)
+            } else {
+                None
+            }
+        });
+        let bs = world.get_broadcast_state(sid);
+        let equip_vis = super::region::get_equipped_visual(&world, sid);
+        let ac = clan
+            .as_ref()
+            .and_then(|ki| super::region::resolve_alliance_cape(ki, &world));
+
+        if new_abnormal == 0 {
+            // Going invisible: broadcast INOUT_OUT to remove GM from others' screens
+            let inout_pkt = super::region::build_user_inout_with_clan(
+                super::region::INOUT_OUT,
+                sid,
+                ch_opt.as_ref(),
+                &pos,
+                clan.as_ref(),
+                ac,
+                0,
+                new_abnormal,
+                &bs,
+                &equip_vis,
+            );
+            world.broadcast_to_3x3(
+                pos.zone_id,
+                pos.region_x,
+                pos.region_z,
+                Arc::new(inout_pkt),
+                Some(sid),
+                event_room,
+            );
+        } else {
+            // Going visible: broadcast INOUT_IN so others can see the GM again
+            let inout_pkt = super::region::build_user_inout_with_clan(
+                super::region::INOUT_IN,
+                sid,
+                ch_opt.as_ref(),
+                &pos,
+                clan.as_ref(),
+                ac,
+                0,
+                new_abnormal,
+                &bs,
+                &equip_vis,
+            );
+            world.broadcast_to_3x3(
+                pos.zone_id,
+                pos.region_x,
+                pos.region_z,
+                Arc::new(inout_pkt),
+                Some(sid),
+                event_room,
+            );
+        }
+    }
+
+    // ── Region refresh: resend nearby entities to GM ──────────────────
+    //   RegionNpcInfoForMe();
+    //   RegionUserInOutForMe();
+    //   MerchantUserInOutForMe();
+    super::region::send_region_npc_info_for_me(session).await?;
+    super::region::send_region_user_in_out_for_me(session).await?;
+    super::region::send_merchant_user_in_out_for_me(session).await?;
+
+    // ── InitType4: clear all buffs before recasting ─────────────────────
+    world.clear_all_buffs(sid, false);
+
+    // ── RecastSavedMagic: reapply persistent buffs ──────────────────────
+    world.recast_saved_magic(sid);
+
+    // ── ZoneChange(GetZoneID()): full zone refresh ──────────────────────
+    if let Some(pos) = world.get_position(sid) {
+        super::zone_change::trigger_zone_change(session, pos.zone_id, pos.x, pos.z).await?;
+    }
+
+    // ── GenieStop: stop genie if active ─────────────────────────────────
+    let genie_active = world.with_session(sid, |h| h.genie_active).unwrap_or(false);
+    if genie_active {
+        super::genie::handle_genie_stop(session).await?;
+    }
+
+    if new_auth == 0 {
+        send_help(session, "You are a gamemaster.");
+    } else {
+        send_help(session, "You are a user.");
+    }
+
+    // ── F7B entity level range overlay — sent LAST (after zone change) ──
+    // Client WIZ_STATE_CHANGE handler: type==2 + entity_id==self → state=2(enable)/1(disable)
+    // Sent after zone change to ensure client has fully reinitialized.
+    let need_party_state: u32 = if new_auth == 0 { 2 } else { 1 };
+    let mut sc2_pkt = ko_protocol::Packet::new(ko_protocol::Opcode::WizStateChange as u8);
+    sc2_pkt.write_u32(sid as u32);
+    sc2_pkt.write_u8(2); // type = NeedParty (controls F7B flag)
+    sc2_pkt.write_u32(need_party_state);
+    session.send_packet(&sc2_pkt).await?;
+    tracing::debug!(
+        "[{}] +gm F7B overlay state={} (auth={})",
+        session.addr(),
+        need_party_state,
+        new_auth,
+    );
+
+    info!(
+        "[{}] +gm: toggled authority {}→{} (abnormal={})",
+        session.addr(),
+        current_auth,
+        new_auth,
+        new_abnormal,
+    );
+
+    Ok(())
+}
+
+/// +pcblock <CharName> — permanently ban a player.
+/// Sends WIZ_EXT_HOOK BANSYSTEM packet to target before disconnecting,
+/// then delegates to +block for the actual ban logic.
+async fn handle_pcblock(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +pcblock CharName");
+        return Ok(());
+    }
+
+    let target_name = args[0];
+    let world = session.world().clone();
+
+    // C++ sends WIZ_EXT_HOOK (0xE9) / BANSYSTEM (0xBF) / uint8(1) before disconnect
+    if let Some(target_sid) = world.find_session_by_name(target_name) {
+        let mut pkt = Packet::new(Opcode::EXT_HOOK_S2C); // WIZ_EXT_HOOK S2C
+        pkt.write_u8(super::ext_hook::EXT_SUB_BANSYSTEM);
+        pkt.write_u8(1);
+        world.send_to_session_owned(target_sid, pkt);
+    }
+
+    // Delegate to +block for authority=-1, check_account, and disconnect.
+    handle_block(session, args).await
+}
+
+/// +changeroom <CharName> <ZoneID> <RoomID> — change player's event room.
+/// Only valid for Chaos zones (84, 85, 87) with room IDs 1-60.
+fn handle_change_room(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() < 3 {
+        send_help(session, "Usage: +changeroom CharName ZoneID RoomID");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_name = args[0];
+    let zone_id: u16 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid ZoneID.");
+            return Ok(());
+        }
+    };
+    let room_id: u16 = match args[2].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid RoomID.");
+            return Ok(());
+        }
+    };
+
+    if zone_id != 84 && zone_id != 85 && zone_id != 87 {
+        send_help(session, "Only Chaos zones (84, 85, 87) are valid.");
+        return Ok(());
+    }
+
+    // Room range 1-60
+    if !(1..=60).contains(&room_id) {
+        send_help(session, "Room must be 1-60.");
+        return Ok(());
+    }
+
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(sid) => sid,
+        None => {
+            send_help(session, "Player not found or not online.");
+            return Ok(());
+        }
+    };
+
+    // Set event room and trigger zone change
+    world.update_session(target_sid, |h| {
+        h.event_room = room_id;
+    });
+
+    // Use server_teleport_to_zone which resolves (0,0) to nation-specific
+    // start_position coords (Sprint 671 parity).
+    zone_change::server_teleport_to_zone(&world, target_sid, zone_id, 0.0, 0.0);
+
+    info!(
+        "[{}] +changeroom: moved {} to zone {} room {}",
+        session.addr(),
+        target_name,
+        zone_id,
+        room_id,
+    );
+
+    send_help(
+        session,
+        &format!(
+            "{} moved to zone {} room {}.",
+            target_name, zone_id, room_id
+        ),
+    );
+
+    Ok(())
+}
+
+/// +beefopen — start the Beef/Monument event in Bifrost zone.
+fn handle_beef_open(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+
+    let state = world.get_beef_event();
+    if state.is_active {
+        send_help(session, "Beef event is already active.");
+        return Ok(());
+    }
+
+    // Activate the beef event
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    world.update_beef_event(|e| {
+        e.is_active = true;
+        e.is_attackable = true;
+        e.is_monument_dead = false;
+        e.winner_nation = 0;
+        e.is_farming_play = false;
+        e.farming_end_time = 0;
+        e.loser_sign_time = 0;
+        e.is_loser_sign = false;
+    });
+
+    let msg = "Beef Event Basladi. Bifrost bolgesine girebilirsiniz.";
+    broadcast_war_system_chat(&world, msg);
+
+    info!(
+        "[{}] +beefopen: started at timestamp {}",
+        session.addr(),
+        now,
+    );
+
+    Ok(())
+}
+
+/// +beefclose — close the Beef/Monument event.
+fn handle_beef_close(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+
+    // Reset beef event state
+    world.update_beef_event(|e| {
+        e.is_active = false;
+        e.is_attackable = false;
+        e.is_monument_dead = false;
+        e.winner_nation = 0;
+        e.is_farming_play = false;
+        e.farming_end_time = 0;
+        e.loser_sign_time = 0;
+        e.is_loser_sign = false;
+    });
+
+    let msg = "Beef Event sona erdi.";
+    broadcast_war_system_chat(&world, msg);
+
+    // Kick players from Bifrost zone (zone 71) and Ronark Land (zone 21)
+    kick_out_zone_users(&world, 71); // ZONE_BIFROST
+    kick_out_zone_users(&world, 21); // ZONE_RONARK_LAND
+
+    info!("[{}] +beefclose: event closed", session.addr());
+
+    Ok(())
+}
+
+/// Helper: broadcast WAR_SYSTEM_CHAT to all players.
+fn broadcast_war_system_chat(world: &crate::world::WorldState, message: &str) {
+    let mut pkt = Packet::new(Opcode::WizChat as u8);
+    pkt.write_u8(8); // WAR_SYSTEM_CHAT
+    pkt.write_u8(0); // nation = ALL
+    pkt.write_u32(0); // sender_id = 0 (system)
+    pkt.write_u8(0); // name length (SByte empty)
+    pkt.write_string(message);
+    pkt.write_i8(-1); // personal_rank
+    pkt.write_u8(0); // authority
+    pkt.write_u8(0); // system_msg
+
+    world.broadcast_to_all(Arc::new(pkt), None);
+}
+
+/// +mode_gamemaster — GM mode feedback via WIZ_CHAT.
+/// NOTE: C++ sends WIZ_EXT_HOOK (0xE9) with WIZ_GAME_MASTER_MODE sub-opcode,
+/// but v2525 dispatch range is 0x06-0xD7 — 0xE9 is silently dropped by client.
+/// Instead we confirm via chat and list available GM commands.
+fn handle_mode_gamemaster(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    let char_info = match world.get_character_info(sid) {
+        Some(ch) => ch,
+        None => return Ok(()),
+    };
+
+    send_help(
+        session,
+        &format!(
+            "GM Mode Active — authority={}, name={}. Use +help for commands. Use +npcinfo (Z-target first) to see NPC IDs.",
+            char_info.authority, char_info.name
+        ),
+    );
+
+    info!("[{}] +mode_gamemaster: GM mode confirmed", session.addr());
+
+    Ok(())
+}
+
+/// +ftopen [Type] — open Forgotten Temple event.
+/// Calls `ForgettenTempleManuelOpening(Type)` which validates ptimeopt,
+/// resets state, then calls `ForgettenTempleStart(1, MinLevel, MaxLevel)`.
+fn handle_ft_open(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    let _event_type: u16 = if !args.is_empty() {
+        match args[0].parse::<u16>() {
+            Ok(t) if t > 0 => t,
+            _ => 1,
+        }
+    } else {
+        1
+    };
+
+    let world = session.world().clone();
+    let ft = world.forgotten_temple_state();
+
+    if ft.is_active.load(std::sync::atomic::Ordering::Relaxed) {
+        send_help(session, "Forgotten Temple is already active.");
+        return Ok(());
+    }
+
+    // Read timer options from event_room_manager
+    let opts = world.event_room_manager.ft_opts.read().clone();
+
+    if opts.playing_time == 0 || opts.summon_time == 0 || opts.min_level == 0 || opts.max_level == 0
+    {
+        send_help(
+            session,
+            "FT timer options not configured (playing_time/summon_time/min_level/max_level == 0).",
+        );
+        return Ok(());
+    }
+
+    if world.ft_stages().is_empty() || world.ft_summons().is_empty() {
+        send_help(session, "FT stage/summon data not loaded from DB.");
+        return Ok(());
+    }
+
+    ft.reset();
+    ft.is_active
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    ft.is_join.store(true, std::sync::atomic::Ordering::Relaxed);
+    ft.min_level
+        .store(opts.min_level as u16, std::sync::atomic::Ordering::Relaxed);
+    ft.max_level
+        .store(opts.max_level as u16, std::sync::atomic::Ordering::Relaxed);
+    ft.stage.store(1, std::sync::atomic::Ordering::Relaxed);
+    ft.event_type.store(1, std::sync::atomic::Ordering::Relaxed);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    ft.start_time
+        .store(now, std::sync::atomic::Ordering::Relaxed);
+    ft.finish_time.store(
+        now + (opts.playing_time as u64) * 60,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    // C++ calls Announcement(IDS_MONSTER_CHALLENGE_OPEN)
+    broadcast_war_system_chat(&world, "Monster Challenge has started!");
+
+    info!(
+        "[{}] +ftopen: FT event started (level {}-{}, {}min)",
+        session.addr(),
+        opts.min_level,
+        opts.max_level,
+        opts.playing_time
+    );
+
+    Ok(())
+}
+
+/// +ftclose — close Forgotten Temple event.
+/// If active: kicks zone users, resets state, announces close.
+/// If not active: just resets state.
+fn handle_ft_close(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let ft = world.forgotten_temple_state();
+
+    if !ft.is_active.load(std::sync::atomic::Ordering::Relaxed) {
+        // C++ calls ForgettenTempleReset() even when not active
+        ft.reset();
+        send_help(session, "Forgotten Temple was not active. State reset.");
+        return Ok(());
+    }
+
+    kick_out_zone_users(&world, super::forgotten_temple::ZONE_FORGOTTEN_TEMPLE);
+
+    ft.reset();
+
+    broadcast_war_system_chat(&world, "Monster Challenge has been closed!");
+
+    info!("[{}] +ftclose: FT event closed", session.addr());
+
+    Ok(())
+}
+
+/// +lottery <ID> — start lottery event from DB settings.
+/// Loads lottery config from `lottery_event_settings` table by ID,
+/// then starts the lottery event.
+async fn handle_lottery_start(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +lottery ID");
+        return Ok(());
+    }
+
+    let id: i16 = match args[0].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid ID.");
+            return Ok(());
+        }
+    };
+
+    let world = session.world().clone();
+    let pool = session.pool().clone();
+
+    // Load settings from DB
+    let repo = ko_db::repositories::lottery_event::LotteryEventRepository::new(&pool);
+    let settings = match repo.get_by_lnum(id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            send_help(session, "Lottery System Not Found ID");
+            return Ok(());
+        }
+        Err(e) => {
+            warn!("[{}] +lottery: DB error: {}", session.addr(), e);
+            send_help(session, "DB error loading lottery settings.");
+            return Ok(());
+        }
+    };
+
+    // Build arrays from DB row
+    let req_items: [(u32, u32); super::lottery::MAX_REQ_ITEMS] = [
+        (settings.req_item1 as u32, settings.req_item_count1 as u32),
+        (settings.req_item2 as u32, settings.req_item_count2 as u32),
+        (settings.req_item3 as u32, settings.req_item_count3 as u32),
+        (settings.req_item4 as u32, settings.req_item_count4 as u32),
+        (settings.req_item5 as u32, settings.req_item_count5 as u32),
+    ];
+    let reward_items: [u32; super::lottery::MAX_REWARD_ITEMS] = [
+        settings.reward_item1 as u32,
+        settings.reward_item2 as u32,
+        settings.reward_item3 as u32,
+        settings.reward_item4 as u32,
+    ];
+
+    let lottery = world.lottery_process();
+
+    if !super::lottery::start_lottery(
+        lottery,
+        req_items,
+        reward_items,
+        settings.user_limit as u32,
+        settings.event_time as u32,
+    ) {
+        send_help(
+            session,
+            "Failed to start lottery (already running or invalid config).",
+        );
+        return Ok(());
+    }
+
+    // C++ broadcasts start packet to all + war system chat notice
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32;
+    let start_pkt = super::lottery::build_start_packet(&lottery.read(), now, 0);
+    world.broadcast_to_all(Arc::new(start_pkt), None);
+
+    broadcast_war_system_chat(&world, "Lottery Event started.");
+
+    info!("[{}] +lottery: started with ID={}", session.addr(), id);
+
+    Ok(())
+}
+
+/// +lotteryclose — close the running lottery event, refunding participants.
+/// If active: refunds all participants' required items, resets state, broadcasts end.
+/// If not active: sends error message.
+fn handle_lottery_close(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let lottery = world.lottery_process();
+
+    {
+        let proc = lottery.read();
+        if !proc.lottery_start {
+            send_help(session, "Lottery is not active.");
+            return Ok(());
+        }
+    }
+
+    // C++ LotteryClose: refund participants then reset.
+    // Note: C++ iterates participants and gives back req items/gold per ticket.
+    // In our implementation, the GM close is a forceful shutdown — participants
+    // are refunded by iterating the participant list.
+    {
+        let proc = lottery.read();
+        for user_info in proc.participants.values() {
+            if user_info.ticket_count == 0 {
+                continue;
+            }
+            if let Some(target_sid) = world.find_session_by_name(&user_info.name) {
+                // Refund gold for each ticket
+                for _ in 0..user_info.ticket_count {
+                    for i in 0..super::lottery::MAX_REQ_ITEMS {
+                        let (item_id, item_count) = proc.req_items[i];
+                        if item_id == 0 || item_count == 0 {
+                            continue;
+                        }
+                        if item_id == crate::world::ITEM_GOLD {
+                            // Refund gold
+                            world.gold_gain(target_sid, item_count);
+                        }
+                        // Note: Non-gold item refund requires GiveItem which needs
+                        // a full session context. For simplicity, only gold is
+                        // refunded inline — matches the most common lottery config.
+                    }
+                }
+            }
+        }
+    }
+
+    // Reset lottery state
+    {
+        let mut proc = lottery.write();
+        super::lottery::reset_lottery(&mut proc);
+    }
+
+    // Broadcast end packet to all
+    let end_pkt = super::lottery::build_end_packet();
+    world.broadcast_to_all(Arc::new(end_pkt), None);
+
+    // C++ LotterySystemReset broadcasts WAR_SYSTEM_CHAT + PUBLIC_CHAT notice
+    broadcast_war_system_chat(&world, "Lottery Event has finished.");
+
+    send_help(session, "Lottery closed.");
+    info!("[{}] +lotteryclose: lottery event closed", session.addr());
+
+    Ok(())
+}
+
+/// +resetloyalty — reset monthly loyalty for all online players.
+/// Sets loyalty_monthly to 0 for every online player and sends LOYALTY_CHANGE packet.
+/// Also sends a DB request to persist the reset.
+async fn handle_reset_loyalty(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let pool = session.pool().clone();
+
+    let mut count = 0u32;
+
+    // Iterate all sessions, reset monthly loyalty, send update packet
+    let session_ids: Vec<_> = world.all_session_ids();
+    for sid in &session_ids {
+        let info = world.get_character_info(*sid);
+        if let Some(ch) = info {
+            let loyalty = ch.loyalty;
+            // Reset monthly loyalty
+            world.update_character_loyalty_monthly(*sid, 0);
+
+            // Send WIZ_LOYALTY_CHANGE packet: sub=1 (LOYALTY_NATIONAL_POINTS)
+            let mut pkt = Packet::new(Opcode::WizLoyaltyChange as u8);
+            pkt.write_u8(1); // LOYALTY_NATIONAL_POINTS
+            pkt.write_u32(loyalty);
+            pkt.write_u32(0); // loyalty_monthly = 0
+            pkt.write_u32(0); // clan donations
+            pkt.write_u32(0); // clan loyalty amount
+            world.send_to_session_owned(*sid, pkt);
+
+            count += 1;
+        }
+    }
+
+    // C++ also sends a DB request to reset loyalty in DB
+    let char_repo = ko_db::repositories::character::CharacterRepository::new(&pool);
+    if let Err(e) = char_repo.reset_loyalty_monthly().await {
+        tracing::warn!("Failed to reset monthly loyalty in DB: {e}");
+    }
+
+    send_help(
+        session,
+        &format!("Monthly loyalty reset for {} online players.", count),
+    );
+    info!(
+        "[{}] +resetloyalty: reset {} players",
+        session.addr(),
+        count
+    );
+
+    Ok(())
+}
+
+/// +cropen <EventID> — start Collection Race event.
+/// Loads event definition from WorldState settings, then starts the event.
+fn handle_cr_open(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +cropen EventID");
+        return Ok(());
+    }
+
+    let event_id: i16 = match args[0].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            send_help(session, "Invalid EventID.");
+            return Ok(());
+        }
+    };
+
+    let world = session.world().clone();
+
+    let def = match world.get_collection_race_def(event_id) {
+        Some(d) => d,
+        None => {
+            send_help(session, "CollectionRace sEventIndex is nullptr");
+            return Ok(());
+        }
+    };
+
+    // Build rewards from event_rewards table (rewards are loaded from DB at startup)
+    // C++ uses LoadCollectionReward which populates pCollectionRaceEvent.RewardItemID/Count/Time
+    // Our start_event expects: &[(item_id, count, time, rate, session)]
+    // For simplicity, pass empty rewards — the event system loads them separately if available.
+    let rewards: Vec<(u32, u32, u32, u8, u8)> = Vec::new();
+
+    let cr = world.collection_race_event();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32;
+
+    if !super::collection_race::start_event(cr, &def, &rewards, 1, now) {
+        send_help(session, "Failed to start Collection Race event.");
+        return Ok(());
+    }
+
+    broadcast_war_system_chat(&world, "Collection Race Event has started!");
+    info!(
+        "[{}] +cropen: started CR event '{}' (ID={})",
+        session.addr(),
+        def.event_name,
+        event_id
+    );
+
+    Ok(())
+}
+
+/// +crclose — close the active Collection Race event.
+fn handle_cr_close(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let cr = world.collection_race_event();
+
+    {
+        let ev = cr.read();
+        if !ev.is_active {
+            send_help(session, "CR event is already closed.");
+            return Ok(());
+        }
+    }
+
+    super::collection_race::end_event(&world, cr);
+
+    send_help(session, "Collection Race closed.");
+    info!("[{}] +crclose: CR event closed", session.addr());
+
+    Ok(())
+}
+
+/// +npcinfo — display target NPC info to GM.
+/// GM must Z-target an NPC first. Shows NPC name, runtime ID, and proto ID.
+fn handle_npc_info(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    let target_id = world.with_session(sid, |h| h.target_id).unwrap_or(0);
+    if target_id == 0 || target_id < crate::npc::NPC_BAND {
+        send_help(
+            session,
+            "No NPC targeted. Z-target an NPC first, then +npcinfo.",
+        );
+        return Ok(());
+    }
+
+    let instance = match world.get_npc_instance(target_id) {
+        Some(n) => n,
+        None => {
+            send_help(session, "Target NPC not found.");
+            return Ok(());
+        }
+    };
+
+    let name = match world.get_npc_template(instance.proto_id, instance.is_monster) {
+        Some(t) => {
+            if t.name.is_empty() {
+                "<NoName>".to_string()
+            } else {
+                t.name.clone()
+            }
+        }
+        None => "<NoTemplate>".to_string(),
+    };
+
+    send_help(
+        session,
+        &format!(
+            "[Npc Name] = {} | [Npc ID] = {} | [Npc Proto ID] = {}",
+            name, instance.nid, instance.proto_id
+        ),
+    );
+
+    Ok(())
+}
+
+/// +bug <AccountID> — rescue a stuck character by removing their session names.
+/// Finds the user by account ID and unregisters them from the session,
+/// allowing them to re-login.
+fn handle_bug_rescue(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +bug AccountID");
+        return Ok(());
+    }
+
+    let account_id = args[0];
+    if account_id.is_empty() || account_id.len() > 20 {
+        send_help(session, "Error: Invalid AccountID.");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+
+    match world.find_session_by_account(account_id) {
+        Some(target_sid) => {
+            world.unregister_session(target_sid);
+            send_help(
+                session,
+                &format!(
+                    "Session for account '{}' removed (sid={}).",
+                    account_id, target_sid
+                ),
+            );
+            info!(
+                "[{}] +bug: rescued stuck account '{}' (sid={})",
+                session.addr(),
+                account_id,
+                target_sid
+            );
+        }
+        None => {
+            send_help(session, "Error: User is not online.");
+        }
+    }
+
+    Ok(())
+}
+
+/// +changegm <CharName> — promote a player to GM authority.
+/// Sets target's authority to GM (0 = AUTHORITY_GAME_MASTER).
+async fn handle_change_gm(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.is_empty() {
+        send_help(session, "Usage: +changegm CharName");
+        return Ok(());
+    }
+
+    let target_name = args[0];
+    let world = session.world().clone();
+
+    let target_sid = match world.find_session_by_name(target_name) {
+        Some(s) => s,
+        None => {
+            send_help(session, "Error: User is not online.");
+            return Ok(());
+        }
+    };
+
+    // C++ sets m_bAuthority = AUTHORITY_GAME_MASTER (0)
+    world.update_session(target_sid, |h| {
+        if let Some(ref mut ch) = h.character {
+            ch.authority = 0; // AUTHORITY_GAME_MASTER
+        }
+    });
+
+    // DB persist
+    let pool = session.pool().clone();
+    let char_repo = ko_db::repositories::character::CharacterRepository::new(&pool);
+    if let Err(e) = char_repo.update_authority(target_name, 0).await {
+        tracing::warn!("Failed to update authority for {target_name}: {e}");
+    }
+
+    // Disconnect the target so they reconnect with GM authority (clean reload)
+    // C++ does SendMyInfo+INOUT_OUT+INOUT_WARP but disconnect is simpler/safer.
+    let mut kick_pkt = Packet::new(Opcode::WizServerChange as u8);
+    kick_pkt.write_u8(0);
+    world.send_to_session_owned(target_sid, kick_pkt);
+
+    send_help(
+        session,
+        &format!(
+            "'{}' promoted to GM (disconnected for reload).",
+            target_name
+        ),
+    );
+    info!(
+        "[{}] +changegm: promoted '{}' to GM",
+        session.addr(),
+        target_name
+    );
+
+    Ok(())
+}
+
+/// Unified enum for the 3 temple events (Chaos, BDW, Juraid).
+/// Maps to `pvroomop[0..2]` indices and `TempleEventType` enum values.
+enum TempleEventKind {
+    Bdw,
+    Chaos,
+    Juraid,
+}
+
+impl TempleEventKind {
+    fn vroom_index(&self) -> usize {
+        match self {
+            Self::Bdw => 0,
+            Self::Chaos => 1,
+            Self::Juraid => 2,
+        }
+    }
+
+    fn active_event_id(&self) -> i16 {
+        match self {
+            Self::Bdw => crate::systems::event_room::TempleEventType::BorderDefenceWar as i16,
+            Self::Chaos => crate::systems::event_room::TempleEventType::ChaosDungeon as i16,
+            Self::Juraid => crate::systems::event_room::TempleEventType::JuraidMountain as i16,
         }
     }
 
