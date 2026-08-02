@@ -71,6 +71,15 @@ impl GameServer {
             warn!("Failed to reset concurrent user count: {}", e);
         }
 
+        // Native v2615 panels are always available after a server restart.
+        // GM open/close commands remain effective for the current runtime.
+        let native_repo =
+            ko_db::repositories::native_events::NativeEventsRepository::new(&self.pool);
+        match native_repo.activate_all().await {
+            Ok(count) => info!("Native client events activated at startup: {} rows", count),
+            Err(e) => warn!("Failed to activate native client events at startup: {}", e),
+        }
+
         let listener = TcpListener::bind(&self.config.bind_addr).await?;
         info!("Listening on {}", self.config.bind_addr);
 
