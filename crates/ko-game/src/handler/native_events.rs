@@ -5,6 +5,7 @@
 //! - `0xCC`: Jigsaw selector `1`, Coin selector `2`
 //! - `0xCF`: Knight Marble (`1=open, 2=roll, 3..5=panel actions`)
 
+use chrono::{DateTime, Datelike, Utc};
 use ko_db::models::native_events::{NativeJigsawState, NativeRoulettePending};
 use ko_db::repositories::native_events::NativeEventsRepository;
 use ko_protocol::{Opcode, Packet, PacketReader};
@@ -51,6 +52,26 @@ fn event_unavailable(opcode: u8, selector: u8) -> Packet {
     pkt.write_u8(selector);
     pkt.write_i32(0);
     pkt
+}
+
+/// Seconds remaining in the current monthly attendance period.
+///
+/// The v2615 client uses this value for the panel countdown and treats zero as
+/// an expired/unavailable calendar. The database progress resets by calendar
+/// month, so the wire value must expire at the same boundary.
+fn attendance_seconds_remaining(now: DateTime<Utc>) -> i32 {
+    let (year, month) = if now.month() == 12 {
+        (now.year() + 1, 1)
+    } else {
+        (now.year(), now.month() + 1)
+    };
+
+    let next_period = chrono::NaiveDate::from_ymd_opt(year, month, 1)
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|date_time| date_time.and_utc().timestamp())
+        .unwrap_or_else(|| now.timestamp() + 1);
+
+    (next_period - now.timestamp()).clamp(1, i32::MAX as i64) as i32
 }
 
 pub async fn handle_roulette(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
@@ -223,11 +244,14 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
 
     let next_claimable = claimed.iter().position(|value| !*value);
 
+    let now = chrono::Utc::now();
+    let seconds_remaining = attendance_seconds_remaining(now);
+
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
     out.write_u8(EVENT_HUB_ATTENDANCE_SELECT); // outer selector: CUIAttendanceCheck
     out.write_i32(0); // error
     out.write_i32(1); // result: load/show panel
-    out.write_i32(chrono::Utc::now().timestamp().clamp(0, i32::MAX as i64) as i32);
+    out.write_i32(now.timestamp().clamp(0, i32::MAX as i64) as i32);
     out.write_i16(TOTAL_DAYS as i16);
 
     for day in 0..TOTAL_DAYS {
@@ -266,14 +290,15 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
         };
         out.write_u8(state);
     }
-    out.write_i32(0); // no pending client-side countdown
+    out.write_i32(seconds_remaining);
 
     session.send_packet(&out).await?;
     info!(
-        "[{}] native attendance opened: rewards={} claimed={}",
+        "[{}] native attendance opened: rewards={} claimed={} seconds_remaining={}",
         session.addr(),
         rewards.len(),
-        claimed.iter().filter(|value| **value).count()
+        claimed.iter().filter(|value| **value).count(),
+        seconds_remaining
     );
     Ok(())
 }
