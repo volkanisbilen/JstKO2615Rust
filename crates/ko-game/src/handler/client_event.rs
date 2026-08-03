@@ -170,12 +170,12 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
         h.event_sid = proto_id as i16;
     });
 
-    // The v2615 Event Post-Up/Board is not a Lua dialog. Its reply travels
-    // through WIZ_CONTINOUS_PACKET_DATA (0x9C), so open it directly while the
-    // validated NPC interaction context above is still current.
-    // quest_helper id 13685 belongs to [Advisor] Herga, whose real NPC proto
-    // is 24407.  Compare the validated proto, never the dynamic runtime NID.
-    if proto_id == 24407 {
+    // The v2615 Event Post-Up/Board is not a SelectMsg/Lua dialog. Its reply
+    // travels through WIZ_CONTINOUS_PACKET_DATA (0x9C), so open it directly
+    // while the validated NPC interaction context above is still current.
+    // <Goddess Akara Statue> uses proto 31774 in K_NPCPOS2369. Compare the
+    // validated proto, never the dynamically allocated runtime NID.
+    if proto_id == 31774 {
         super::native_events::open_board_from_npc(session).await?;
         return Ok(());
     }
