@@ -65,11 +65,11 @@ BEGIN
                          WHEN 2 THEN 2099000000
                          ELSE 2098000000
                      END,
-           str_memo = format(
-               '%s MORANKER %s. sıra test notu',
+           str_memo = LEFT(format(
+               '%s #%s rank memo',
                CASE chosen.nation WHEN 1 THEN 'Karus' ELSE 'Human' END,
                chosen.nation_rank
-           ),
+           ), 20),
            dt_update_time = NOW()
       FROM chosen
      WHERE u.str_user_id = chosen.str_user_id;
