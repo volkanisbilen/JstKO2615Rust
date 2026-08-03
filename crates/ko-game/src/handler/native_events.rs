@@ -29,9 +29,10 @@ const EVENT_HUB_ATTENDANCE_SELECT: u8 = 4;
 const EVENT_HUB_ROULETTE: u8 = 2;
 const EVENT_HUB_JIGSAW: u8 = 3;
 const EVENT_HUB_MARBLE: u8 = 5;
-// Quest-helper row 13685 points at the actual [Advisor] Herga NPC proto 24407.
-// Runtime NIDs are allocated dynamically and must never be used as proto IDs.
-const BOARD_NPC_PROTO_ID: i16 = 24407;
+// The Board belongs to <Goddess Akara Statue>. K_NPCPOS2369/NPC spawn data
+// uses 31774 as the NPC proto ID. Runtime NIDs are allocated dynamically and
+// must never be compared with this value.
+const BOARD_NPC_PROTO_ID: i16 = 31774;
 const BOARD_REWARD_ITEM_ID: u32 = 811_084_000;
 const BOARD_REPLY_SUB: u8 = 3;
 
@@ -232,8 +233,7 @@ async fn native_event_hub_select(
 }
 
 /// Open the v2615 Event Post-Up board after client_event has validated NPC
-/// existence, zone and MAX_NPC_RANGE and stored event_sid=24407.  The user-
-/// facing quest-helper row for this NPC is 13685.
+/// existence, zone and MAX_NPC_RANGE and stored event_sid=31774.
 pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<()> {
     let Some(name) = character_name(session) else {
         return Ok(());
