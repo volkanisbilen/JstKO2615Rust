@@ -325,6 +325,25 @@ async fn handle_open(session: &mut ClientSession) -> anyhow::Result<()> {
 /// 4. Give item, mark claimed, save to DB
 /// 5. If milestone (day 7/14/21): also give cumulative reward
 async fn handle_claim(session: &mut ClientSession) -> anyhow::Result<()> {
+    handle_claim_impl(session, true).await.map(|_| ())
+}
+
+/// Claim the next daily reward for the native v2615 Attendance window.
+///
+/// `CUIAttendanceCheck` is opened through opcode `0x9C` and does not emit the
+/// legacy `0xB7/sub=8` claim request when its reward tile is clicked.  The
+/// server therefore performs the same once-per-calendar-day claim while the
+/// native window is opened, without sending legacy `0xB7` UI packets.
+pub(super) async fn claim_for_native_open(
+    session: &mut ClientSession,
+) -> anyhow::Result<bool> {
+    handle_claim_impl(session, false).await
+}
+
+async fn handle_claim_impl(
+    session: &mut ClientSession,
+    send_legacy_ui: bool,
+) -> anyhow::Result<bool> {
     let pool = session.pool().clone();
     let repo = ko_db::repositories::daily_reward::DailyRewardRepository::new(&pool);
 
@@ -340,7 +359,7 @@ async fn handle_claim(session: &mut ClientSession) -> anyhow::Result<()> {
         }
     };
     if reward_config.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let mut item_ids = [0i32; TOTAL_DAYS];
@@ -360,7 +379,7 @@ async fn handle_claim(session: &mut ClientSession) -> anyhow::Result<()> {
         .map(|c| c.name.clone())
         .unwrap_or_default();
     if char_name.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let mut user_rows = match repo.load_user_progress(&char_name).await {
@@ -411,24 +430,30 @@ async fn handle_claim(session: &mut ClientSession) -> anyhow::Result<()> {
         None => {
             // All 25 days claimed — cycle complete
             let msg = build_result_msg(RESULT_ALREADY_CLAIMED);
-            session.send_packet(&msg).await?;
-            return Ok(());
+            if send_legacy_ui {
+                session.send_packet(&msg).await?;
+            }
+            return Ok(false);
         }
     };
 
     // Validate sequential: previous day must be claimed (except day 0)
     if claim_idx > 0 && sb_type[claim_idx - 1] == 0 {
         let msg = build_result_msg(RESULT_TIMER);
-        session.send_packet(&msg).await?;
-        return Ok(());
+        if send_legacy_ui {
+            session.send_packet(&msg).await?;
+        }
+        return Ok(false);
     }
 
     // Validate same-day: previous day must not be claimed on the same calendar day
     // Binary/ Reference: HandleDailyRewardGive — "can only claim once per calendar day"
     if claim_idx > 0 && s_get_day[claim_idx - 1] == today_day {
         let msg = build_result_msg(RESULT_ALREADY_CLAIMED);
-        session.send_packet(&msg).await?;
-        return Ok(());
+        if send_legacy_ui {
+            session.send_packet(&msg).await?;
+        }
+        return Ok(false);
     }
 
     // Valid claim!
@@ -447,25 +472,33 @@ async fn handle_claim(session: &mut ClientSession) -> anyhow::Result<()> {
     if !gave {
         // Inventory full — send error, do NOT mark as claimed
         let msg = build_result_msg(RESULT_INVENTORY_FULL);
-        session.send_packet(&msg).await?;
-        return Ok(());
+        if send_legacy_ui {
+            session.send_packet(&msg).await?;
+        }
+        return Ok(false);
     }
 
     // Send success: Sub 1 result=1 (item added)
-    let added = build_item_added(day_index, count, complete);
-    session.send_packet(&added).await?;
+    if send_legacy_ui {
+        let added = build_item_added(day_index, count, complete);
+        session.send_packet(&added).await?;
+    }
 
     // Send reward notification: Sub 4
     let item_name = world
         .get_item(item_id)
         .and_then(|i| i.str_name.clone())
         .unwrap_or_else(|| format!("Item #{}", item_id));
-    let notify = build_reward_notify(&item_name, 0);
-    session.send_packet(&notify).await?;
+    if send_legacy_ui {
+        let notify = build_reward_notify(&item_name, 0);
+        session.send_packet(&notify).await?;
+    }
 
     // Send claim success: Sub 8 result=1 (close panel)
-    let result = build_claim_result(1);
-    session.send_packet(&result).await?;
+    if send_legacy_ui {
+        let result = build_claim_result(1);
+        session.send_packet(&result).await?;
+    }
 
     // Cumulative milestone check: give bonus items at days 7, 14, 21
     let claimed_so_far = claim_idx + 1; // 1-based count after this claim
@@ -493,8 +526,10 @@ async fn handle_claim(session: &mut ClientSession) -> anyhow::Result<()> {
                     .get_item(bonus_id as u32)
                     .and_then(|i| i.str_name.clone())
                     .unwrap_or_else(|| format!("Bonus #{}", bonus_id));
-                let bonus_notify = build_reward_notify(&bonus_name, 1);
-                session.send_packet(&bonus_notify).await?;
+                if send_legacy_ui {
+                    let bonus_notify = build_reward_notify(&bonus_name, 1);
+                    session.send_packet(&bonus_notify).await?;
+                }
                 info!(
                     "[{}] WIZ_ATTENDANCE cumulative milestone day {}: item {} ({})",
                     session.addr(),
@@ -506,23 +541,18 @@ async fn handle_claim(session: &mut ClientSession) -> anyhow::Result<()> {
         }
     }
 
-    // Save to DB (fire-and-forget)
-    let char_name_db = char_name.clone();
-    let day_idx_db = claim_idx as i16;
-    let month_db = current_month;
-    let pool_db = pool.clone();
-    tokio::spawn(async move {
-        let repo = ko_db::repositories::daily_reward::DailyRewardRepository::new(&pool_db);
-        if let Err(e) = repo
-            .update_user_day_with_month(&char_name_db, day_idx_db, true, today_day as i16, month_db)
-            .await
-        {
-            warn!(
-                "Failed to save attendance claim for {}: {}",
-                char_name_db, e
-            );
-        }
-    });
+    // Persist before returning/refreshing the native calendar. Awaiting this
+    // write also closes the duplicate-open race that the former fire-and-forget
+    // update allowed.
+    repo.update_user_day_with_month(
+        &char_name,
+        claim_idx as i16,
+        true,
+        today_day as i16,
+        current_month,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to save attendance claim for {char_name}: {e}"))?;
 
     info!(
         "[{}] WIZ_ATTENDANCE claimed: day {} item {}×{} ({})",
@@ -533,7 +563,7 @@ async fn handle_claim(session: &mut ClientSession) -> anyhow::Result<()> {
         char_name,
     );
 
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
