@@ -1,4 +1,4 @@
--- v2615 Event Post-Up board, opened only by NPC proto 13685.
+-- v2615 Event Post-Up board, opened only by quest-helper 13685's NPC proto 24407.
 -- One row is one successful reward delivery; ISO-week enforcement is handled
 -- transactionally by NativeEventsRepository::reserve_board_claim.
 
@@ -13,4 +13,4 @@ CREATE INDEX IF NOT EXISTS idx_native_board_claim_character_week
     ON native_board_claim (character_name, claimed_at DESC);
 
 COMMENT ON TABLE native_board_claim IS
-    'Successful NPC 13685 I Love Knight Online board rewards; maximum 3 per ISO week';
+    'Successful quest-helper 13685 / NPC proto 24407 I Love Knight Online board rewards; maximum 3 per ISO week';
