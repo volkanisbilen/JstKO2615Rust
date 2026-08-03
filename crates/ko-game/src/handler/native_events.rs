@@ -29,11 +29,10 @@ const EVENT_HUB_ATTENDANCE_SELECT: u8 = 4;
 const EVENT_HUB_ROULETTE: u8 = 2;
 const EVENT_HUB_JIGSAW: u8 = 3;
 const EVENT_HUB_MARBLE: u8 = 5;
-// The interactive v2615 template is the complete <Goddess Akara Statue>
-// record (proto/picture 30001, type 0). The previously reconstructed
-// 31774/type174 row only reproduced the sniffer appearance and never makes
-// the client emit an NPC interaction packet on right-click.
-const BOARD_NPC_PROTO_ID: u16 = 30001;
+// v2615's Moradon Akara instance uses proto 31774 with picture 30001. It
+// must remain a nation-3 NPC; nation/group 0 makes the client classify the
+// statue as an attack target and suppress WIZ_NPC_EVENT on right-click.
+const BOARD_NPC_PROTO_ID: u16 = 31774;
 const BOARD_REWARD_ITEM_ID: u32 = 811_084_000;
 const BOARD_OPEN_SUB: u8 = 2;
 const BOARD_REPLY_SUB: u8 = 3;
@@ -240,7 +239,7 @@ async fn native_event_hub_select(
 }
 
 /// Open the v2615 Event Post-Up board after the Akara menu selection has
-/// validated NPC existence, zone, distance and stored event_sid=30001.
+/// validated NPC existence, zone, distance and stored event_sid=31774.
 pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<()> {
     let Some(name) = character_name(session) else {
         return Ok(());
@@ -324,7 +323,7 @@ pub async fn try_open_akara_menu_from_target(
         AKARA_MENU_HEADER_TEXT,
         &button_texts,
         &button_events,
-        "30001_Akara.lua",
+        "31774_Akara.lua",
     );
     info!(
         "[{}] Akara menu opened: nid={} proto={}",
@@ -359,7 +358,7 @@ pub async fn handle_akara_menu_event(
                 -1,
                 &empty,
                 &empty,
-                "30001_Akara.lua",
+                "31774_Akara.lua",
             );
             info!(
                 "[{}] native Akara Altar action dispatched: select_flag=0x5B",

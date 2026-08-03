@@ -173,7 +173,7 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
     // Akara must be opened only by a real NPC interaction (right-click), never
     // by WIZ_TARGET_HP: that packet is also emitted by ordinary left-click
     // target selection.
-    if proto_id == 30001 {
+    if proto_id == 31774 {
         super::native_events::try_open_akara_menu_from_target(session, npc_nid).await?;
         return Ok(());
     }
