@@ -218,6 +218,11 @@ async fn native_event_hub_select(
 async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
     const TOTAL_DAYS: usize = 25;
 
+    // The native v2615 panel does not send the legacy WIZ_ATTENDANCE claim
+    // request. Claim today's next sequential reward on open; the shared claim
+    // routine enforces one reward per calendar day and inventory capacity.
+    let granted = crate::handler::attendance::claim_for_native_open(session).await?;
+
     let pool = session.pool().clone();
     let repo = ko_db::repositories::daily_reward::DailyRewardRepository::new(&pool);
     let rewards = repo.load_all().await.unwrap_or_else(|e| {
@@ -276,9 +281,9 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
         // Native CUIAttendanceCheck hides the reward group when state is 0.
         // State 3 keeps a future/locked reward visible but inactive.
         let state = if claimed[day] {
-            2
-        } else if Some(day) == next_claimable {
             1
+        } else if Some(day) == next_claimable {
+            3
         } else {
             3
         };
@@ -298,9 +303,9 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
         let milestone = [7usize, 14, 21][index];
         let completed = claimed.iter().take(milestone).all(|value| *value);
         let state = if completed {
-            2
-        } else if claimed.iter().filter(|value| **value).count() + 1 == milestone {
             1
+        } else if claimed.iter().filter(|value| **value).count() + 1 == milestone {
+            3
         } else {
             3
         };
@@ -310,10 +315,11 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
 
     session.send_packet(&out).await?;
     info!(
-        "[{}] native attendance opened: rewards={} claimed={} seconds_remaining={}",
+        "[{}] native attendance opened: rewards={} claimed={} granted_today={} seconds_remaining={}",
         session.addr(),
         rewards.len(),
         claimed.iter().filter(|value| **value).count(),
+        granted,
         seconds_remaining
     );
     Ok(())
