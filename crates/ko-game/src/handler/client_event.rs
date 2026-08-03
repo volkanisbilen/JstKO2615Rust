@@ -170,13 +170,11 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
         h.event_sid = proto_id as i16;
     });
 
-    // The v2615 Event Post-Up/Board is not a SelectMsg/Lua dialog. Its reply
-    // travels through WIZ_CONTINOUS_PACKET_DATA (0x9C), so open it directly
-    // while the validated NPC interaction context above is still current.
-    // <Goddess Akara Statue> uses proto 31774 in K_NPCPOS2369. Compare the
-    // validated proto, never the dynamically allocated runtime NID.
+    // Some client builds may emit WIZ_CLIENT_EVENT for Akara while v2615
+    // normally emits only WIZ_TARGET_HP. Both paths must open the same single
+    // selection menu; neither path may open a native panel directly.
     if proto_id == 31774 {
-        super::native_events::open_board_from_npc(session).await?;
+        super::native_events::try_open_akara_menu_from_target(session, npc_nid).await?;
         return Ok(());
     }
 

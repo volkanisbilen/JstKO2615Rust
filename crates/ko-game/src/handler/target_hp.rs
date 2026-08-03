@@ -118,10 +118,10 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
     // The v2615 Akara Statue model does not emit WIZ_CLIENT_EVENT or
     // WIZ_NPC_EVENT when right-clicked; it only targets the statue through
-    // WIZ_TARGET_HP. Resolve the runtime NID server-side and open Board only
-    // after native_events has validated its proto, zone, life and distance.
+    // WIZ_TARGET_HP. Resolve the runtime NID server-side and open its single
+    // native selection menu after proto, zone, life and distance validation.
     if target_id >= NPC_BAND {
-        super::native_events::try_open_board_from_target(session, target_id).await?;
+        super::native_events::try_open_akara_menu_from_target(session, target_id).await?;
     }
 
     tracing::debug!(

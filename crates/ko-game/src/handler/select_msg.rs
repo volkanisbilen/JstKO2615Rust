@@ -16,7 +16,7 @@ use crate::session::{ClientSession, SessionState};
 const MAX_MESSAGE_EVENT: usize = 12;
 
 /// Handle WIZ_SELECT_MSG from the client.
-pub fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
+pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
     if session.state() != SessionState::InGame {
         return Ok(());
     }
@@ -75,14 +75,6 @@ pub fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
         })
         .unwrap_or((0, 0, -1));
 
-    // Must have an active quest helper
-    if quest_helper_id == 0 {
-        world.update_session(sid, |h| {
-            h.select_msg_events = [-1; 12];
-        });
-        return Ok(());
-    }
-
     // Handle special case: selected_reward == -1 && flag == 5
     let (effective_menu_id, effective_reward) = if selected_reward == -1 && select_msg_flag == 5 {
         (0u8, menu_id as i8)
@@ -112,6 +104,21 @@ pub fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
             effective_menu_id,
             effective_event,
         );
+        return Ok(());
+    }
+
+    if matches!(
+        effective_event,
+        super::native_events::AKARA_ALTAR_EVENT | super::native_events::AKARA_POST_UP_EVENT
+    ) {
+        super::native_events::handle_akara_menu_event(session, effective_event).await?;
+        return Ok(());
+    }
+
+    // Normal Lua selections must have an active quest helper. Akara's target
+    // model emits no WIZ_CLIENT_EVENT, so its two native menu events are
+    // deliberately dispatched above without fabricating a quest helper.
+    if quest_helper_id == 0 {
         return Ok(());
     }
 

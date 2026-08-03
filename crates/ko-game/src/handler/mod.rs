@@ -391,7 +391,7 @@ pub async fn dispatch(session: &mut ClientSession, packet: Packet) -> anyhow::Re
         Some(Opcode::WizClientEvent) => client_event::handle(session, packet).await,
         Some(Opcode::WizMapEvent) => map_event::handle(session, packet).await,
         Some(Opcode::WizWeightChange) => weight_change::handle(session, packet).await,
-        Some(Opcode::WizSelectMsg) => select_msg::handle(session, packet),
+        Some(Opcode::WizSelectMsg) => select_msg::handle(session, packet).await,
         Some(Opcode::WizAuthorityChange) => Ok(()), // server→client only (fame/authority broadcast)
         Some(Opcode::WizEditBox) => edit_box::handle(session, packet).await,
         Some(Opcode::WizSanta) => Ok(()), // server→client only (flying Santa/Angel visual event)

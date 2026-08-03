@@ -35,6 +35,11 @@ const EVENT_HUB_MARBLE: u8 = 5;
 const BOARD_NPC_PROTO_ID: u16 = 31774;
 const BOARD_REWARD_ITEM_ID: u32 = 811_084_000;
 const BOARD_REPLY_SUB: u8 = 3;
+pub(crate) const AKARA_ALTAR_EVENT: i32 = 9_317_741;
+pub(crate) const AKARA_POST_UP_EVENT: i32 = 9_317_742;
+const AKARA_MENU_HEADER_TEXT: i32 = 45_136;
+const AKARA_ALTAR_MENU_TEXT: i32 = 45_202;
+const AKARA_POST_UP_MENU_TEXT: i32 = 45_236;
 
 // CUIAttendanceCheck does not treat the i32 in each calendar entry as an item
 // number.  The v2615 client searches its 28 in-memory slot records by this
@@ -232,8 +237,8 @@ async fn native_event_hub_select(
     result
 }
 
-/// Open the v2615 Event Post-Up board after client_event has validated NPC
-/// existence, zone and MAX_NPC_RANGE and stored event_sid=31774.
+/// Open the v2615 Event Post-Up board after the Akara menu selection has
+/// validated NPC existence, zone, distance and stored event_sid=31774.
 pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<()> {
     let Some(name) = character_name(session) else {
         return Ok(());
@@ -255,13 +260,13 @@ pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<
     Ok(())
 }
 
-/// Open the Board for clients which expose Akara Statue as a targetable statue
-/// and only send WIZ_TARGET_HP when it is right-clicked. Unlike normal NPCs,
-/// this client object does not send WIZ_CLIENT_EVENT/WIZ_NPC_EVENT.
+/// Open the single selection menu for clients which expose Akara Statue as a
+/// targetable statue and only send WIZ_TARGET_HP when it is clicked. Unlike
+/// normal NPCs, this client object does not send WIZ_CLIENT_EVENT/WIZ_NPC_EVENT.
 ///
 /// The target NID is resolved server-side and all normal NPC interaction
 /// guards are applied before establishing the reply context.
-pub async fn try_open_board_from_target(
+pub async fn try_open_akara_menu_from_target(
     session: &mut ClientSession,
     target_nid: u32,
 ) -> anyhow::Result<bool> {
@@ -288,12 +293,98 @@ pub async fn try_open_board_from_target(
         return Ok(false);
     }
 
+    let menu_already_open = world
+        .with_session(sid, |state| {
+            state.event_nid == target_nid as i16
+                && state.event_sid == BOARD_NPC_PROTO_ID as i16
+                && state.select_msg_events[0] == AKARA_ALTAR_EVENT
+                && state.select_msg_events[1] == AKARA_POST_UP_EVENT
+        })
+        .unwrap_or(false);
+    if menu_already_open {
+        return Ok(true);
+    }
+
     world.update_session(sid, |state| {
         state.event_nid = target_nid as i16;
         state.event_sid = BOARD_NPC_PROTO_ID as i16;
     });
-    open_board_from_npc(session).await?;
+
+    let mut button_texts = [-1; 12];
+    button_texts[0] = AKARA_ALTAR_MENU_TEXT;
+    button_texts[1] = AKARA_POST_UP_MENU_TEXT;
+    let mut button_events = [-1; 12];
+    button_events[0] = AKARA_ALTAR_EVENT;
+    button_events[1] = AKARA_POST_UP_EVENT;
+    super::select_msg::send_select_msg(
+        &world,
+        sid,
+        3,
+        -1,
+        AKARA_MENU_HEADER_TEXT,
+        &button_texts,
+        &button_events,
+        "31774_Akara.lua",
+    );
+    info!(
+        "[{}] Akara menu opened: nid={} proto={}",
+        session.addr(), target_nid, BOARD_NPC_PROTO_ID
+    );
     Ok(true)
+}
+
+pub async fn handle_akara_menu_event(
+    session: &mut ClientSession,
+    event: i32,
+) -> anyhow::Result<bool> {
+    if !validate_akara_context(session) {
+        warn!("[{}] ignored stale Akara menu event={event}", session.addr());
+        return Ok(true);
+    }
+
+    match event {
+        AKARA_ALTAR_EVENT => {
+            // v2615 CUISpecialAuction::ReceiveMessage is dispatched by opcode
+            // 0xC3. Sub-command 7 loads the auction list; an empty list is a
+            // valid initial state and opens the native Akara Altar panel.
+            let mut out = Packet::new(0xC3);
+            out.write_u8(7);
+            out.write_i16(0);
+            session.send_packet(&out).await?;
+            info!("[{}] native Akara Altar opened", session.addr());
+        }
+        AKARA_POST_UP_EVENT => open_board_from_npc(session).await?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn validate_akara_context(session: &ClientSession) -> bool {
+    let world = session.world();
+    let sid = session.session_id();
+    let Some((event_nid, event_sid)) =
+        world.with_session(sid, |state| (state.event_nid, state.event_sid))
+    else {
+        return false;
+    };
+    if event_nid <= 0 || event_sid != BOARD_NPC_PROTO_ID as i16 {
+        return false;
+    }
+    let Some(npc) = world.get_npc_instance(event_nid as u32) else {
+        return false;
+    };
+    let Some(pos) = world.get_position(sid) else {
+        return false;
+    };
+    if npc.proto_id != BOARD_NPC_PROTO_ID
+        || npc.zone_id != pos.zone_id
+        || world.is_npc_dead(event_nid as u32)
+    {
+        return false;
+    }
+    let dx = pos.x - npc.x;
+    let dz = pos.z - npc.z;
+    (dx * dx + dz * dz).sqrt() <= MAX_NPC_RANGE
 }
 
 async fn board_reply(
