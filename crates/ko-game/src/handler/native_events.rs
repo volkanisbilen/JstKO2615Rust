@@ -34,6 +34,7 @@ const EVENT_HUB_MARBLE: u8 = 5;
 // must never be compared with this value.
 const BOARD_NPC_PROTO_ID: u16 = 31774;
 const BOARD_REWARD_ITEM_ID: u32 = 811_084_000;
+const BOARD_OPEN_SUB: u8 = 2;
 const BOARD_REPLY_SUB: u8 = 3;
 pub(crate) const AKARA_ALTAR_EVENT: i32 = 9_317_741;
 pub(crate) const AKARA_POST_UP_EVENT: i32 = 9_317_742;
@@ -260,12 +261,10 @@ pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<
     Ok(())
 }
 
-/// Open the single selection menu for clients which expose Akara Statue as a
-/// targetable statue and only send WIZ_TARGET_HP when it is clicked. Unlike
-/// normal NPCs, this client object does not send WIZ_CLIENT_EVENT/WIZ_NPC_EVENT.
-///
-/// The target NID is resolved server-side and all normal NPC interaction
-/// guards are applied before establishing the reply context.
+/// Open Akara's selection menu from a real NPC interaction packet
+/// (WIZ_CLIENT_EVENT/WIZ_NPC_EVENT). WIZ_TARGET_HP is deliberately not an
+/// interaction trigger: the client emits it for ordinary left-click target
+/// selection too.
 pub async fn try_open_akara_menu_from_target(
     session: &mut ClientSession,
     target_nid: u32,
@@ -344,14 +343,27 @@ pub async fn handle_akara_menu_event(
 
     match event {
         AKARA_ALTAR_EVENT => {
-            // v2615 CUISpecialAuction::ReceiveMessage is dispatched by opcode
-            // 0xC3. Sub-command 7 loads the auction list; an empty list is a
-            // valid initial state and opens the native Akara Altar panel.
-            let mut out = Packet::new(0xC3);
-            out.write_u8(7);
-            out.write_i16(0);
-            session.send_packet(&out).await?;
-            info!("[{}] native Akara Altar opened", session.addr());
+            // Verified against the unpacked v2615 SelectMsg action switch:
+            // flag 0x5B calls CUISpecialAuction's open/request routine
+            // (sub_DCD290). 0xC3/sub=7 is a list response consumed only after
+            // that request; sending it directly never opens the panel.
+            let world = session.world().clone();
+            let sid = session.session_id();
+            let empty = [-1; 12];
+            super::select_msg::send_select_msg(
+                &world,
+                sid,
+                0x5B,
+                -1,
+                -1,
+                &empty,
+                &empty,
+                "31774_Akara.lua",
+            );
+            info!(
+                "[{}] native Akara Altar action dispatched: select_flag=0x5B",
+                session.addr()
+            );
         }
         AKARA_POST_UP_EVENT => open_board_from_npc(session).await?,
         _ => return Ok(false),
@@ -447,13 +459,23 @@ async fn board_reply(
 
 fn board_open_packet(history: &[i32]) -> Packet {
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-    out.write_u8(BOARD_REPLY_SUB);
-    out.write_i32(1); // result: load/show
-    out.write_i16(history.len().min(i16::MAX as usize) as i16);
-    for claimed_at in history.iter().take(i16::MAX as usize) {
-        out.write_u8(0); // normal claim-history row
-        out.write_i32(*claimed_at);
-    }
+    // v2615 CUIEventPostUp dispatches sub=2 to sub_ADAC20 (load/open) and
+    // sub=3 to sub_ADAF40 (reply result). The open body begins with the board
+    // id and result, followed by four i32 header fields and an i16 row count.
+    // A zero-row payload is a complete, valid panel-open response.
+    out.write_u8(BOARD_OPEN_SUB);
+    out.write_i32(0); // board id; matches the panel's initial id
+    out.write_i32(0); // load result: success
+    out.write_i32(0); // event/start header
+    out.write_i32(0); // event/end header
+    out.write_i32(0); // display/start timestamp
+    out.write_i32(0); // display/end timestamp
+    out.write_i16(0); // post/history row count
+
+    // Claim history is enforced server-side. Its v2615 display-row structure
+    // contains four strings plus a timestamp per row, not the old guessed
+    // u8+i32 layout, so do not serialize malformed rows into the panel.
+    let _ = history;
     out
 }
 
@@ -883,11 +905,20 @@ mod tests {
     }
 
     #[test]
-    fn board_packets_match_unpacked_v2615_layout_without_inner_byte() {
+    fn board_packets_match_unpacked_v2615_open_and_reply_dispatch() {
         let open = board_open_packet(&[1_700_000_000]);
         assert_eq!(
             open.data,
-            vec![3, 1, 0, 0, 0, 1, 0, 0, 0, 0, 241, 83, 101]
+            vec![
+                2, // load/open dispatch
+                0, 0, 0, 0, // board id
+                0, 0, 0, 0, // success
+                0, 0, 0, 0, // event/start header
+                0, 0, 0, 0, // event/end header
+                0, 0, 0, 0, // display/start timestamp
+                0, 0, 0, 0, // display/end timestamp
+                0, 0, // row count
+            ]
         );
 
         let reply = board_reply_packet(7, 1);
