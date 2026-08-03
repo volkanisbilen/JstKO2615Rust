@@ -29,10 +29,11 @@ const EVENT_HUB_ATTENDANCE_SELECT: u8 = 4;
 const EVENT_HUB_ROULETTE: u8 = 2;
 const EVENT_HUB_JIGSAW: u8 = 3;
 const EVENT_HUB_MARBLE: u8 = 5;
-const BOARD_NPC_PROTO_ID: i16 = 13685;
+// Quest-helper row 13685 points at the actual [Advisor] Herga NPC proto 24407.
+// Runtime NIDs are allocated dynamically and must never be used as proto IDs.
+const BOARD_NPC_PROTO_ID: i16 = 24407;
 const BOARD_REWARD_ITEM_ID: u32 = 811_084_000;
 const BOARD_REPLY_SUB: u8 = 3;
-const BOARD_OPEN_INNER: u8 = 15;
 
 // CUIAttendanceCheck does not treat the i32 in each calendar entry as an item
 // number.  The v2615 client searches its 28 in-memory slot records by this
@@ -151,7 +152,7 @@ async fn native_event_hub_open(
     let candidates = [
         (EVENT_HUB_ATTENDANCE, "attendance"),
         (EVENT_HUB_ROULETTE, "roulette"),
-        (EVENT_HUB_COIN, "coin"),
+        (EVENT_HUB_JIGSAW, "jigsaw"),
         (EVENT_HUB_MARBLE, "marble"),
     ];
     for (event_id, event_key) in candidates {
@@ -231,7 +232,8 @@ async fn native_event_hub_select(
 }
 
 /// Open the v2615 Event Post-Up board after client_event has validated NPC
-/// existence, zone and MAX_NPC_RANGE and stored event_sid=13685.
+/// existence, zone and MAX_NPC_RANGE and stored event_sid=24407.  The user-
+/// facing quest-helper row for this NPC is 13685.
 pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<()> {
     let Some(name) = character_name(session) else {
         return Ok(());
@@ -242,15 +244,7 @@ pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<
         warn!("[{}] native board history DB error: {e}", session.addr());
         Vec::new()
     });
-    let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-    out.write_u8(BOARD_REPLY_SUB);
-    out.write_u8(BOARD_OPEN_INNER);
-    out.write_i32(1); // result: load/show
-    out.write_i16(history.len().min(i16::MAX as usize) as i16);
-    for claimed_at in history.iter().take(i16::MAX as usize) {
-        out.write_u8(0); // normal claim-history row
-        out.write_i32(*claimed_at);
-    }
+    let out = board_open_packet(&history);
     session.send_packet(&out).await?;
     info!(
         "[{}] native board opened from npc proto={} history={}",
@@ -310,17 +304,33 @@ async fn board_reply(
         }
     }
 
-    let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-    out.write_u8(BOARD_REPLY_SUB);
-    out.write_u8(BOARD_REPLY_SUB);
-    out.write_i32(board_id);
-    out.write_i32(result);
+    let out = board_reply_packet(board_id, result);
     session.send_packet(&out).await?;
     info!(
         "[{}] native board reply: character={} board_id={} npc_ok={} correct={} result={}",
         session.addr(), name, board_id, npc_ok, correct, result
     );
     Ok(())
+}
+
+fn board_open_packet(history: &[i32]) -> Packet {
+    let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
+    out.write_u8(BOARD_REPLY_SUB);
+    out.write_i32(1); // result: load/show
+    out.write_i16(history.len().min(i16::MAX as usize) as i16);
+    for claimed_at in history.iter().take(i16::MAX as usize) {
+        out.write_u8(0); // normal claim-history row
+        out.write_i32(*claimed_at);
+    }
+    out
+}
+
+fn board_reply_packet(board_id: i32, result: i32) -> Packet {
+    let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
+    out.write_u8(BOARD_REPLY_SUB);
+    out.write_i32(board_id);
+    out.write_i32(result);
+    out
 }
 
 /// Open the v2615 native Attendance panel.
@@ -732,12 +742,24 @@ mod tests {
     fn event_hub_packet_matches_v2615_signed_f0_contract() {
         let packet = native_event_hub_packet(&[
             (EVENT_HUB_ATTENDANCE, 1),
-            (EVENT_HUB_COIN, 1),
             (EVENT_HUB_ROULETTE, 1),
+            (EVENT_HUB_JIGSAW, 1),
             (EVENT_HUB_MARBLE, 1),
         ]);
         assert_eq!(packet.opcode, Opcode::WizContinousPacketData as u8);
-        assert_eq!(packet.data, vec![0xF0, 4, 0, 1, 1, 0, 1, 2, 1, 5, 1]);
+        assert_eq!(packet.data, vec![0xF0, 4, 0, 1, 1, 2, 1, 3, 1, 5, 1]);
+    }
+
+    #[test]
+    fn board_packets_match_unpacked_v2615_layout_without_inner_byte() {
+        let open = board_open_packet(&[1_700_000_000]);
+        assert_eq!(
+            open.data,
+            vec![3, 1, 0, 0, 0, 1, 0, 0, 0, 0, 241, 83, 101]
+        );
+
+        let reply = board_reply_packet(7, 1);
+        assert_eq!(reply.data, vec![3, 7, 0, 0, 0, 1, 0, 0, 0]);
     }
 
     #[test]
