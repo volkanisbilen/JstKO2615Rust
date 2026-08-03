@@ -36,6 +36,10 @@ const BOARD_NPC_PROTO_ID: u16 = 31774;
 const BOARD_REWARD_ITEM_ID: u32 = 811_084_000;
 const BOARD_OPEN_SUB: u8 = 2;
 const BOARD_REPLY_SUB: u8 = 3;
+// WIZ_SELECT_MSG action flags verified in v2615 sub_7F0770:
+// 0x3A -> CUISpecialAuction (Akara Altar), 0x44 -> CUIEventPostUp board 0.
+const AKARA_ALTAR_SELECT_FLAG: u8 = 0x3A;
+const AKARA_POST_UP_SELECT_FLAG: u8 = 0x44;
 pub(crate) const AKARA_ALTAR_EVENT: i32 = 9_317_741;
 pub(crate) const AKARA_POST_UP_EVENT: i32 = 9_317_742;
 const AKARA_MENU_HEADER_TEXT: i32 = 45_136;
@@ -107,6 +111,21 @@ pub async fn handle_roulette(session: &mut ClientSession, pkt: Packet) -> anyhow
     let repo = NativeEventsRepository::new(&pool);
     if sub == EVENT_HUB_SUB {
         return native_event_hub_open(session, &repo).await;
+    }
+    // CUIEventPostUp is first opened by WIZ_SELECT_MSG flag 0x44. The client
+    // then requests board 0 with exactly [sub=2][i32 board_id]. A one-byte
+    // sub=2 remains the event hub's Roulette selector, so length separates
+    // the two native v2615 contracts without ambiguity.
+    if sub == BOARD_OPEN_SUB && pkt.data.len() == 5 {
+        let board_id = reader.read_i32().unwrap_or(0);
+        if validate_akara_context(session) {
+            return open_board_from_npc(session, board_id).await;
+        }
+        warn!(
+            "[{}] ignored Event Post-Up request outside Akara context: board_id={board_id}",
+            session.addr()
+        );
+        return Ok(());
     }
     // The unpacked UIEventPostUp client writes exactly:
     // [sub=3][i32 board_id][u8 text_len][text]. A one-byte sub=3 packet is
@@ -240,7 +259,10 @@ async fn native_event_hub_select(
 
 /// Open the v2615 Event Post-Up board after the Akara menu selection has
 /// validated NPC existence, zone, distance and stored event_sid=31774.
-pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<()> {
+pub async fn open_board_from_npc(
+    session: &mut ClientSession,
+    board_id: i32,
+) -> anyhow::Result<()> {
     let Some(name) = character_name(session) else {
         return Ok(());
     };
@@ -250,12 +272,13 @@ pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<
         warn!("[{}] native board history DB error: {e}", session.addr());
         Vec::new()
     });
-    let out = board_open_packet(&history);
+    let out = board_open_packet(board_id, &history);
     session.send_packet(&out).await?;
     info!(
-        "[{}] native board opened from npc proto={} history={}",
+        "[{}] native board opened from npc proto={} board_id={} history={}",
         session.addr(),
         BOARD_NPC_PROTO_ID,
+        board_id,
         history.len()
     );
     Ok(())
@@ -343,17 +366,16 @@ pub async fn handle_akara_menu_event(
 
     match event {
         AKARA_ALTAR_EVENT => {
-            // Verified against the unpacked v2615 SelectMsg action switch:
-            // flag 0x5B calls CUISpecialAuction's open/request routine
-            // (sub_DCD290). 0xC3/sub=7 is a list response consumed only after
-            // that request; sending it directly never opens the panel.
+            // v2615 sub_7F0770 case 0x3A calls sub_DD0D00, which initializes
+            // and shows CUISpecialAuction in Akara Altar mode. 0x5B belongs to
+            // the UI's later button-action switch and cannot open the panel.
             let world = session.world().clone();
             let sid = session.session_id();
             let empty = [-1; 12];
             super::select_msg::send_select_msg(
                 &world,
                 sid,
-                0x5B,
+                AKARA_ALTAR_SELECT_FLAG,
                 -1,
                 -1,
                 &empty,
@@ -361,11 +383,34 @@ pub async fn handle_akara_menu_event(
                 "31774_Akara.lua",
             );
             info!(
-                "[{}] native Akara Altar action dispatched: select_flag=0x5B",
-                session.addr()
+                "[{}] native Akara Altar UIF dispatched: select_flag=0x{:02X}",
+                session.addr(),
+                AKARA_ALTAR_SELECT_FLAG
             );
         }
-        AKARA_POST_UP_EVENT => open_board_from_npc(session).await?,
+        AKARA_POST_UP_EVENT => {
+            // v2615 sub_7F0770 case 0x44 shows CUIEventPostUp for board 0 and
+            // makes the client send [0x9C][2][i32 0]. The board payload must
+            // be returned only after that request, while the UIF is alive.
+            let world = session.world().clone();
+            let sid = session.session_id();
+            let empty = [-1; 12];
+            super::select_msg::send_select_msg(
+                &world,
+                sid,
+                AKARA_POST_UP_SELECT_FLAG,
+                -1,
+                -1,
+                &empty,
+                &empty,
+                "31774_Akara.lua",
+            );
+            info!(
+                "[{}] native I Love Knight Online UIF dispatched: select_flag=0x{:02X}",
+                session.addr(),
+                AKARA_POST_UP_SELECT_FLAG
+            );
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -457,14 +502,14 @@ async fn board_reply(
     Ok(())
 }
 
-fn board_open_packet(history: &[i32]) -> Packet {
+fn board_open_packet(board_id: i32, history: &[i32]) -> Packet {
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
     // v2615 CUIEventPostUp dispatches sub=2 to sub_ADAC20 (load/open) and
     // sub=3 to sub_ADAF40 (reply result). The open body begins with the board
     // id and result, followed by four i32 header fields and an i16 row count.
     // A zero-row payload is a complete, valid panel-open response.
     out.write_u8(BOARD_OPEN_SUB);
-    out.write_i32(0); // board id; matches the panel's initial id
+    out.write_i32(board_id);
     out.write_i32(0); // load result: success
     out.write_i32(0); // event/start header
     out.write_i32(0); // event/end header
@@ -906,12 +951,12 @@ mod tests {
 
     #[test]
     fn board_packets_match_unpacked_v2615_open_and_reply_dispatch() {
-        let open = board_open_packet(&[1_700_000_000]);
+        let open = board_open_packet(7, &[1_700_000_000]);
         assert_eq!(
             open.data,
             vec![
                 2, // load/open dispatch
-                0, 0, 0, 0, // board id
+                7, 0, 0, 0, // requested board id
                 0, 0, 0, 0, // success
                 0, 0, 0, 0, // event/start header
                 0, 0, 0, 0, // event/end header
@@ -923,6 +968,12 @@ mod tests {
 
         let reply = board_reply_packet(7, 1);
         assert_eq!(reply.data, vec![3, 7, 0, 0, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn akara_select_flags_match_v2615_select_msg_dispatch() {
+        assert_eq!(AKARA_ALTAR_SELECT_FLAG, 0x3A);
+        assert_eq!(AKARA_POST_UP_SELECT_FLAG, 0x44);
     }
 
     #[test]
