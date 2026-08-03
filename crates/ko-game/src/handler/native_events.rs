@@ -29,6 +29,18 @@ const EVENT_HUB_ROULETTE: u8 = 2;
 const EVENT_HUB_JIGSAW: u8 = 3;
 const EVENT_HUB_MARBLE: u8 = 5;
 
+// CUIAttendanceCheck does not treat the i32 in each calendar entry as an item
+// number.  The v2615 client searches its 28 in-memory slot records by this
+// value, then resolves the actual reward through Attendance.tbl.  Daily rows
+// are keyed 1..=25 and cumulative rows are keyed 101..=103.
+fn attendance_daily_slot_key(day: usize) -> i32 {
+    day as i32 + 1
+}
+
+fn attendance_cumulative_slot_key(index: usize) -> i32 {
+    index as i32 + 101
+}
+
 fn character_name(session: &ClientSession) -> Option<String> {
     session
         .world()
@@ -252,12 +264,15 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
     out.write_i16(TOTAL_DAYS as i16);
 
     for day in 0..TOTAL_DAYS {
-        let item_id = rewards
+        let has_reward = rewards
             .iter()
             .find(|row| row.day_index as usize == day)
-            .map(|row| row.item_id)
-            .unwrap_or(0);
-        out.write_i32(item_id);
+            .is_some_and(|row| row.item_id > 0);
+        out.write_i32(if has_reward {
+            attendance_daily_slot_key(day)
+        } else {
+            0
+        });
         // Native CUIAttendanceCheck hides the reward group when state is 0.
         // State 3 keeps a future/locked reward visible but inactive.
         let state = if claimed[day] {
@@ -275,7 +290,11 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
         .unwrap_or([0; 3]);
     out.write_i16(cumulative_items.len() as i16);
     for (index, item_id) in cumulative_items.into_iter().enumerate() {
-        out.write_i32(item_id);
+        out.write_i32(if item_id > 0 {
+            attendance_cumulative_slot_key(index)
+        } else {
+            0
+        });
         let milestone = [7usize, 14, 21][index];
         let completed = claimed.iter().take(milestone).all(|value| *value);
         let state = if completed {
@@ -597,5 +616,13 @@ mod tests {
         ]);
         assert_eq!(packet.opcode, Opcode::WizContinousPacketData as u8);
         assert_eq!(packet.data, vec![0xF0, 5, 0, 1, 1, 0, 1, 2, 1, 3, 1, 5, 1]);
+    }
+
+    #[test]
+    fn attendance_wire_keys_match_v2615_calendar_lookup() {
+        assert_eq!(attendance_daily_slot_key(0), 1);
+        assert_eq!(attendance_daily_slot_key(24), 25);
+        assert_eq!(attendance_cumulative_slot_key(0), 101);
+        assert_eq!(attendance_cumulative_slot_key(2), 103);
     }
 }
