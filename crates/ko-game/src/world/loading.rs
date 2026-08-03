@@ -134,6 +134,9 @@ impl WorldState {
         // ─── NPC / Monster Loading ──────────────────────────────────────────────
         self.load_npcs_and_monsters(pool).await?;
 
+        // ─── Native MORANKER Statues (top 3 per nation by NP) ──────────────────
+        self.reload_moraranker(pool, false).await?;
+
         // ─── Manes Survival Runtime Configuration ──────────────────────────────
         if let Err(e) = self.load_manes_survival(pool).await {
             tracing::warn!(

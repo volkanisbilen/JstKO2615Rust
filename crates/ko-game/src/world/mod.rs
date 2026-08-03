@@ -5,6 +5,7 @@
 pub mod combat;
 pub mod inventory;
 mod loading;
+pub mod moraranker;
 pub mod npc;
 pub mod session;
 pub mod social;

@@ -96,6 +96,7 @@ pub mod max_hp_change;
 pub mod merchant;
 pub mod mining;
 pub mod monument;
+pub mod moraranker;
 pub mod move_handler;
 pub mod moving_tower;
 pub mod native_events;
@@ -545,6 +546,7 @@ pub async fn dispatch(session: &mut ClientSession, packet: Packet) -> anyhow::Re
         Some(Opcode::WizRebirth) => rebirth::handle(session, packet).await,
         Some(Opcode::WizWorldBoss) => world_boss::handle(session, packet).await,
         Some(Opcode::WizSeason) => season::handle(session, packet).await,
+        Some(Opcode::WizRanker) => moraranker::handle(session, packet).await,
         // Special protocol (resource transfer — stub is correct):
         Some(Opcode::WizContinousPacketData) => {
             let native = session.world().get_server_settings()

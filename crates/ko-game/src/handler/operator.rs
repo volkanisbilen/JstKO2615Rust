@@ -379,7 +379,12 @@ pub async fn process_chat_command(
             let world = session.world();
             let pool = session.pool();
             world.reload_user_rankings(pool).await;
-            send_help(session, "+reloadranks: User rankings reloaded from DB.");
+            let moraranker_result = world.reload_moraranker(pool, true).await;
+            if let Err(error) = moraranker_result {
+                send_help(session, &format!("+reloadranks: MORANKER reload failed: {error}"));
+            } else {
+                send_help(session, "+reloadranks: Rankings and MORANKER statues reloaded.");
+            }
             info!("[{}] +reloadranks: rankings reloaded", session.addr());
         }
         // Reload commands — require server restart (hot-reload not yet implemented)

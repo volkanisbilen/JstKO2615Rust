@@ -400,6 +400,8 @@ pub enum Opcode {
     WizWorldBoss = 0xD6,
     /// Season system (v2525 native, inline handler — max GameMain opcode).
     WizSeason = 0xD7,
+    /// Moradon native nation-ranker statues (R..W) and ranker memo UI.
+    WizRanker = 0xD9,
     /// Scrolling notice message (used for merchant wind notice, etc.).
     ///
     /// **WARNING**: Outside v2525 GameMain range (0x06-0xD7), silently dropped.
@@ -691,6 +693,7 @@ impl Opcode {
             0xD5 => Some(Self::WizTerritory),
             0xD6 => Some(Self::WizWorldBoss),
             0xD7 => Some(Self::WizSeason),
+            0xD9 => Some(Self::WizRanker),
             0xDB => Some(Self::WizAddMsg),
             // 0xE0+  Extended
             0xE0 => Some(Self::WizCinderella),
@@ -930,6 +933,7 @@ mod tests {
             (0xD5, Opcode::WizTerritory),
             (0xD6, Opcode::WizWorldBoss),
             (0xD7, Opcode::WizSeason),
+            (0xD9, Opcode::WizRanker),
         ];
         for &(byte, expected) in cases {
             assert_eq!(

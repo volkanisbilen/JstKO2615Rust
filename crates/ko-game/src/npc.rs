@@ -234,9 +234,34 @@ pub fn build_npc_inout(inout_type: u8, npc: &NpcInstance, template: &NpcTemplate
 pub fn write_npc_info(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
     match tmpl.npc_type {
         15 => write_npc_info_type15(pkt, npc, tmpl),
+        82..=87 => write_npc_info_ranker(pkt, npc, tmpl),
         191 => write_npc_info_type191(pkt, npc, tmpl),
         _ => write_npc_info_default(pkt, npc, tmpl),
     }
+}
+
+/// Write the v2615 native MORANKER extension for NPC types R..W (82..=87).
+///
+/// The unpacked client reads a normal GetNpcInfo block followed by a character
+/// name and the appearance values below. Ranker templates are runtime-only and
+/// intentionally store these values in otherwise-unused template fields:
+/// group=race, attack=class, act_type=face, exp=hair RGB, magic1..3=body parts,
+/// selling_group=gloves and money=boots. The two weapon fields retain their
+/// normal meaning.
+fn write_npc_info_ranker(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
+    write_npc_info_default(pkt, npc, tmpl);
+    pkt.write_string(&tmpl.name);
+    pkt.write_u8(tmpl.group);
+    pkt.write_u16(tmpl.attack);
+    pkt.write_u8(tmpl.act_type);
+    pkt.write_u32(tmpl.exp);
+    pkt.write_u32(tmpl.magic_1); // chest
+    pkt.write_u32(tmpl.magic_2); // helmet
+    pkt.write_u32(tmpl.magic_3); // trousers
+    pkt.write_u32(tmpl.selling_group); // gloves
+    pkt.write_u32(tmpl.money); // boots
+    pkt.write_u32(tmpl.weapon_1); // right hand
+    pkt.write_u32(tmpl.weapon_2); // left hand
 }
 
 /// Write GetNpcInfo for **type 15** (barracks / pets).
@@ -593,6 +618,46 @@ mod tests {
         // No GetNpcInfo for OUT
         assert_eq!(r.remaining(), 0);
         assert_eq!(pkt.data.len(), 5);
+    }
+
+    #[test]
+    fn test_native_ranker_extension_packet_format() {
+        let mut tmpl = test_template();
+        tmpl.is_monster = false;
+        tmpl.name = "RankOne".to_string();
+        tmpl.npc_type = b'R';
+        tmpl.group = 12; // race
+        tmpl.attack = 106; // class
+        tmpl.act_type = 3; // face
+        tmpl.exp = 0x0011_2233; // hair RGB
+        tmpl.magic_1 = 210_000_000; // chest
+        tmpl.magic_2 = 210_001_000; // helmet
+        tmpl.magic_3 = 210_002_000; // trousers
+        tmpl.selling_group = 210_003_000; // gloves
+        tmpl.money = 210_004_000; // boots
+        tmpl.weapon_1 = 180_000_000;
+        tmpl.weapon_2 = 170_000_000;
+
+        let mut npc = test_instance();
+        npc.is_monster = false;
+        npc.nation = 1;
+        let pkt = build_npc_inout(NPC_IN, &npc, &tmpl);
+
+        // IN header (5) + default GetNpcInfo (43), then the native ranker block.
+        let mut reader = PacketReader::new(&pkt.data[48..]);
+        assert_eq!(reader.read_string().as_deref(), Some("RankOne"));
+        assert_eq!(reader.read_u8(), Some(12));
+        assert_eq!(reader.read_u16(), Some(106));
+        assert_eq!(reader.read_u8(), Some(3));
+        assert_eq!(reader.read_u32(), Some(0x0011_2233));
+        assert_eq!(reader.read_u32(), Some(210_000_000));
+        assert_eq!(reader.read_u32(), Some(210_001_000));
+        assert_eq!(reader.read_u32(), Some(210_002_000));
+        assert_eq!(reader.read_u32(), Some(210_003_000));
+        assert_eq!(reader.read_u32(), Some(210_004_000));
+        assert_eq!(reader.read_u32(), Some(180_000_000));
+        assert_eq!(reader.read_u32(), Some(170_000_000));
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]
