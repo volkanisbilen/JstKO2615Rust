@@ -457,11 +457,16 @@ pub async fn try_handle_akara_altar(
                 warn!("[{}] Akara auction list DB error: {e}", session.addr());
                 Vec::new()
             });
-            let out = akara_auction_list_packet(sub, &rows);
+            // The opening request is sub=1, whose response contract is a
+            // schedule-page delta backed by Special_Auction.tbl. Our altar
+            // catalogue is server-owned, so return the dynamic sub=4 list
+            // contract that accepts arbitrary valid item IDs and opens mode 2.
+            let response_sub = AKARA_AUCTION_ALT_LIST_SUB;
+            let out = akara_auction_list_packet(response_sub, &rows);
             session.send_packet(&out).await?;
             info!(
                 "[{}] Akara auction list: sub={} rows={}",
-                session.addr(), sub, rows.len()
+                session.addr(), response_sub, rows.len()
             );
         }
         AKARA_AUCTION_BID_SUB => {
@@ -1178,11 +1183,11 @@ mod tests {
     #[test]
     fn akara_auction_list_row_matches_v2615_26_byte_contract() {
         let packet = akara_auction_list_packet(
-            1,
+            AKARA_AUCTION_ALT_LIST_SUB,
             &[(0, 810_889_000, 0, 1_000_000, 100_000, 1_700_000_000, 0)],
         );
         assert_eq!(packet.opcode, Opcode::WizCostume as u8);
-        assert_eq!(packet.data[0], 1);
+        assert_eq!(packet.data[0], AKARA_AUCTION_ALT_LIST_SUB);
         assert_eq!(&packet.data[1..3], &[1, 0]);
         assert_eq!(packet.data[3], 1);
         assert_eq!(packet.data.len(), 4 + 26);

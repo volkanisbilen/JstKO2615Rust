@@ -88,6 +88,14 @@ pub async fn handle_npc_event(session: &mut ClientSession, pkt: Packet) -> anyho
         return Ok(());
     }
 
+    // v2615 CUITiketExchange confirms with exactly nine payload bytes:
+    // [u8 sub=6][u32 ticket item][u32 selected reward]. This shares
+    // WIZ_NPC_EVENT with ordinary NPC clicks, so length and sub-opcode must be
+    // separated before the legacy [unknown][npc nid][quest id] parser.
+    if pkt.data.len() == 9 && pkt.data.first() == Some(&6) {
+        return handle_ticket_exchange(session, &pkt).await;
+    }
+
     let mut reader = PacketReader::new(&pkt.data);
     let _unknown = reader.read_u8().unwrap_or(0);
     let npc_nid = match reader.read_u32() {
@@ -98,6 +106,101 @@ pub async fn handle_npc_event(session: &mut ClientSession, pkt: Packet) -> anyho
     let _quest_id = reader.read_u32().unwrap_or(0) as i32;
 
     handle_npc_by_nid(session, npc_nid).await
+}
+
+async fn handle_ticket_exchange(session: &mut ClientSession, pkt: &Packet) -> anyhow::Result<()> {
+    let mut reader = PacketReader::new(&pkt.data);
+    let _sub = reader.read_u8();
+    let ticket_item = reader.read_u32().unwrap_or(0);
+    let reward_item = reader.read_u32().unwrap_or(0);
+
+    // The allow-list is imported from the client's TICKET_EXCHANGE.tbl. The
+    // client controls both IDs on the wire, so never trust the pair without
+    // this server-side lookup.
+    let rule = sqlx::query_as::<_, (i32, i16)>(
+        "SELECT duration_hours, selector FROM native_ticket_exchange_rule \
+         WHERE ticket_item_id = $1 AND reward_item_id = $2 LIMIT 1",
+    )
+    .bind(ticket_item as i32)
+    .bind(reward_item as i32)
+    .fetch_optional(session.pool())
+    .await?;
+
+    let world = session.world().clone();
+    let sid = session.session_id();
+    let nation = world
+        .get_character_info(sid)
+        .map(|character| character.nation)
+        .unwrap_or(0);
+    let selector_allowed = rule.is_some_and(|(_, selector)| match selector {
+        1 => nation == 1, // Karus-only row
+        2 => nation == 2, // El Morad-only row
+        _ => true,
+    });
+    let status = if !selector_allowed || world.get_item(reward_item).is_none() {
+        3u8 // invalid ticket/reward pair
+    } else {
+        let ticket_count: u32 = world
+            .get_inventory(sid)
+            .iter()
+            .filter(|slot| slot.item_id == ticket_item)
+            .map(|slot| slot.count as u32)
+            .sum();
+        if ticket_count == 0 {
+            2u8 // ticket is no longer in inventory
+        } else if !world.check_weight(sid, reward_item, 1) {
+            4u8 // inventory slot or weight failure
+        } else if !world.rob_item(sid, ticket_item, 1) {
+            2u8
+        } else {
+            let hours = rule.map(|(hours, _)| hours).unwrap_or(0).max(0) as u32;
+            let days = hours.div_ceil(24);
+            let given = if days > 0 {
+                world.give_item_with_expiry(sid, reward_item, 1, days)
+            } else {
+                world.give_item(sid, reward_item, 1)
+            };
+            if given {
+                let account = world
+                    .with_session(sid, |h| h.account_id.clone())
+                    .unwrap_or_default();
+                let character = world.get_session_name(sid).unwrap_or_default();
+                let pos = world.get_position(sid);
+                crate::handler::audit_log::log_give_item(
+                    session.pool(),
+                    &account,
+                    &character,
+                    pos.as_ref().map(|p| p.zone_id as i16).unwrap_or(0),
+                    pos.as_ref().map(|p| p.x as i16).unwrap_or(0),
+                    pos.as_ref().map(|p| p.z as i16).unwrap_or(0),
+                    "ticket_exchange",
+                    reward_item,
+                    1,
+                );
+                tracing::info!(
+                    sid,
+                    ticket_item,
+                    reward_item,
+                    duration_hours = hours,
+                    "Ticket Exchange completed"
+                );
+                1u8
+            } else {
+                // Pre-validation should make this exceptional; restore the
+                // consumed ticket if delivery still fails.
+                let _ = world.give_item(sid, ticket_item, 1);
+                5u8
+            }
+        }
+    };
+
+    // sub_807C20 consumes [sub=6][status]. Status 1 is silent success;
+    // statuses 2..5 select the client's native error strings.
+    let mut out = Packet::new(Opcode::WizNpcEvent as u8);
+    out.write_u8(6);
+    out.write_u8(status);
+    session.send_packet(&out).await?;
+    Ok(())
 }
 
 /// Core NPC interaction logic shared by WIZ_CLIENT_EVENT and WIZ_NPC_EVENT.
@@ -606,6 +709,23 @@ mod tests {
         assert_eq!(r.read_u8(), Some(0));
         assert_eq!(r.read_u32(), Some(10042));
         assert_eq!(r.read_u32(), Some(1500));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_ticket_exchange_packet_format() {
+        // CUITiketExchange.cpp sub_71C6B0:
+        // [sub=6][ticket item:u32][selected reward:u32].
+        let mut pkt = Packet::new(Opcode::WizNpcEvent as u8);
+        pkt.write_u8(6);
+        pkt.write_u32(508_056_000);
+        pkt.write_u32(508_013_318);
+        assert_eq!(pkt.data.len(), 9);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u8(), Some(6));
+        assert_eq!(r.read_u32(), Some(508_056_000));
+        assert_eq!(r.read_u32(), Some(508_013_318));
         assert_eq!(r.remaining(), 0);
     }
 
