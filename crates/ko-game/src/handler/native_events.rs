@@ -13,6 +13,7 @@ use rand::Rng;
 use tracing::{debug, info, warn};
 
 use crate::handler::knight_cash;
+use crate::npc_type_constants::MAX_NPC_RANGE;
 use crate::session::{ClientSession, SessionState};
 
 const ROULETTE_FREE_TYPE: i32 = 1;
@@ -28,6 +29,10 @@ const EVENT_HUB_ATTENDANCE_SELECT: u8 = 4;
 const EVENT_HUB_ROULETTE: u8 = 2;
 const EVENT_HUB_JIGSAW: u8 = 3;
 const EVENT_HUB_MARBLE: u8 = 5;
+const BOARD_NPC_PROTO_ID: i16 = 13685;
+const BOARD_REWARD_ITEM_ID: u32 = 811_084_000;
+const BOARD_REPLY_SUB: u8 = 3;
+const BOARD_OPEN_INNER: u8 = 15;
 
 // CUIAttendanceCheck does not treat the i32 in each calendar entry as an item
 // number.  The v2615 client searches its 28 in-memory slot records by this
@@ -95,6 +100,12 @@ pub async fn handle_roulette(session: &mut ClientSession, pkt: Packet) -> anyhow
     if sub == EVENT_HUB_SUB {
         return native_event_hub_open(session, &repo).await;
     }
+    // The unpacked UIEventPostUp client writes exactly:
+    // [sub=3][i32 board_id][u8 text_len][text]. A one-byte sub=3 packet is
+    // still the star hub's Jigsaw selector, so length separates them safely.
+    if sub == BOARD_REPLY_SUB && pkt.data.len() > 1 {
+        return board_reply(session, &repo, &mut reader).await;
+    }
     if matches!(
         sub,
         EVENT_HUB_COIN
@@ -132,12 +143,14 @@ async fn native_event_hub_open(
     session: &mut ClientSession,
     repo: &NativeEventsRepository<'_>,
 ) -> anyhow::Result<()> {
+    session.world().update_session(session.session_id(), |h| {
+        h.native_event_hub_armed = true;
+    });
     // The client renders entries in the order supplied by the server.
     let mut active = Vec::new();
     let candidates = [
         (EVENT_HUB_ATTENDANCE, "attendance"),
         (EVENT_HUB_ROULETTE, "roulette"),
-        (EVENT_HUB_JIGSAW, "jigsaw"),
         (EVENT_HUB_COIN, "coin"),
         (EVENT_HUB_MARBLE, "marble"),
     ];
@@ -164,6 +177,17 @@ async fn native_event_hub_select(
     repo: &NativeEventsRepository<'_>,
     event_id: u8,
 ) -> anyhow::Result<()> {
+    let armed = session
+        .world()
+        .with_session(session.session_id(), |h| h.native_event_hub_armed)
+        .unwrap_or(false);
+    if !armed {
+        debug!("[{}] ignored stale native hub selector id={event_id}", session.addr());
+        return Ok(());
+    }
+    session.world().update_session(session.session_id(), |h| {
+        h.native_event_hub_armed = false;
+    });
     let event_key = match event_id {
         EVENT_HUB_ATTENDANCE | EVENT_HUB_ATTENDANCE_SELECT => "attendance",
         EVENT_HUB_ROULETTE => "roulette",
@@ -204,6 +228,99 @@ async fn native_event_hub_select(
         session.addr(), event_id, event_key
     );
     result
+}
+
+/// Open the v2615 Event Post-Up board after client_event has validated NPC
+/// existence, zone and MAX_NPC_RANGE and stored event_sid=13685.
+pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<()> {
+    let Some(name) = character_name(session) else {
+        return Ok(());
+    };
+    let pool = session.pool().clone();
+    let repo = NativeEventsRepository::new(&pool);
+    let history = repo.board_claim_history(&name).await.unwrap_or_else(|e| {
+        warn!("[{}] native board history DB error: {e}", session.addr());
+        Vec::new()
+    });
+    let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
+    out.write_u8(BOARD_REPLY_SUB);
+    out.write_u8(BOARD_OPEN_INNER);
+    out.write_i32(1); // result: load/show
+    out.write_i16(history.len().min(i16::MAX as usize) as i16);
+    for claimed_at in history.iter().take(i16::MAX as usize) {
+        out.write_u8(0); // normal claim-history row
+        out.write_i32(*claimed_at);
+    }
+    session.send_packet(&out).await?;
+    info!(
+        "[{}] native board opened from npc proto={} history={}",
+        session.addr(),
+        BOARD_NPC_PROTO_ID,
+        history.len()
+    );
+    Ok(())
+}
+
+async fn board_reply(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+    reader: &mut PacketReader<'_>,
+) -> anyhow::Result<()> {
+    let board_id = reader.read_i32().unwrap_or(0);
+    let answer = reader.read_sbyte_string().unwrap_or_default();
+    let normalized = answer.split_whitespace().collect::<Vec<_>>().join(" ");
+    let world = session.world();
+    let sid = session.session_id();
+    let context = world.with_session(sid, |h| (h.event_nid, h.event_sid));
+    let npc_ok = context.is_some_and(|(event_nid, event_sid)| {
+        if event_nid <= 0 || event_sid != BOARD_NPC_PROTO_ID {
+            return false;
+        }
+        let Some(npc) = world.get_npc_instance(event_nid as u32) else {
+            return false;
+        };
+        let Some(pos) = world.get_position(sid) else {
+            return false;
+        };
+        if npc.proto_id as i16 != BOARD_NPC_PROTO_ID
+            || npc.zone_id != pos.zone_id
+            || world.is_npc_dead(event_nid as u32)
+        {
+            return false;
+        }
+        let dx = pos.x - npc.x;
+        let dz = pos.z - npc.z;
+        (dx * dx + dz * dz).sqrt() <= MAX_NPC_RANGE
+    });
+    let correct = normalized.eq_ignore_ascii_case("I Love Knight Online");
+    let Some(name) = character_name(session) else { return Ok(()); };
+
+    let mut result = 0i32;
+    if npc_ok && correct {
+        match repo.reserve_board_claim(&name).await? {
+            Some(claim_id) => {
+                if session.world().give_item(session.session_id(), BOARD_REWARD_ITEM_ID, 1) {
+                    result = 1;
+                } else {
+                    repo.cancel_board_claim(claim_id, &name).await?;
+                    result = 5; // inventory full
+                }
+            }
+            None => result = 101, // weekly limit
+        }
+    }
+
+    let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
+    out.write_u8(BOARD_REPLY_SUB);
+    out.write_u8(BOARD_REPLY_SUB);
+    out.write_i32(board_id);
+    out.write_i32(result);
+    session.send_packet(&out).await?;
+    info!(
+        "[{}] native board reply: character={} board_id={} npc_ok={} correct={} result={}",
+        session.addr(), name, board_id, npc_ok, correct, result
+    );
+    Ok(())
 }
 
 /// Open the v2615 native Attendance panel.
@@ -617,11 +734,10 @@ mod tests {
             (EVENT_HUB_ATTENDANCE, 1),
             (EVENT_HUB_COIN, 1),
             (EVENT_HUB_ROULETTE, 1),
-            (EVENT_HUB_JIGSAW, 1),
             (EVENT_HUB_MARBLE, 1),
         ]);
         assert_eq!(packet.opcode, Opcode::WizContinousPacketData as u8);
-        assert_eq!(packet.data, vec![0xF0, 5, 0, 1, 1, 0, 1, 2, 1, 3, 1, 5, 1]);
+        assert_eq!(packet.data, vec![0xF0, 4, 0, 1, 1, 0, 1, 2, 1, 5, 1]);
     }
 
     #[test]

@@ -170,6 +170,14 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
         h.event_sid = proto_id as i16;
     });
 
+    // The v2615 Event Post-Up/Board is not a Lua dialog. Its reply travels
+    // through WIZ_CONTINOUS_PACKET_DATA (0x9C), so open it directly while the
+    // validated NPC interaction context above is still current.
+    if proto_id == 13685 {
+        super::native_events::open_board_from_npc(session).await?;
+        return Ok(());
+    }
+
     // Look up template for NPC type
     let tmpl = world.get_npc_template(proto_id, npc.is_monster);
 

@@ -324,6 +324,10 @@ pub struct SessionHandle {
     /// Proto ID of the NPC being interacted with (for Lua/quest convenience).
     ///
     pub event_sid: i16,
+    /// True only while the star-button native event selector may dispatch one
+    /// row. It is consumed by the first selection to prevent clicks leaking
+    /// through a panel that the client has left underneath another UIF.
+    pub native_event_hub_armed: bool,
     /// Current quest helper ID for NPC dialog (Lua script).
     ///
     pub quest_helper_id: u32,

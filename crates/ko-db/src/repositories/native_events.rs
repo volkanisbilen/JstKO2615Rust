@@ -48,6 +48,58 @@ impl<'a> NativeEventsRepository<'a> {
         Ok(result.rows_affected())
     }
 
+    /// Reserve one of the three claims allowed in the current ISO week.
+    /// The advisory transaction lock makes simultaneous reply packets for the
+    /// same character serialize before the count is checked.
+    pub async fn reserve_board_claim(&self, character: &str) -> Result<Option<i64>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::BIGINT)")
+            .bind(character)
+            .execute(&mut *tx)
+            .await?;
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM native_board_claim \
+             WHERE character_name=$1 \
+               AND claimed_at >= date_trunc('week', CURRENT_TIMESTAMP)",
+        )
+        .bind(character)
+        .fetch_one(&mut *tx)
+        .await?;
+        if count.0 >= 3 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let row: (i64,) = sqlx::query_as(
+            "INSERT INTO native_board_claim(character_name,item_id) \
+             VALUES($1,811084000) RETURNING id",
+        )
+        .bind(character)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(row.0))
+    }
+
+    pub async fn cancel_board_claim(&self, id: i64, character: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM native_board_claim WHERE id=$1 AND character_name=$2")
+            .bind(id)
+            .bind(character)
+            .execute(self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn board_claim_history(&self, character: &str) -> Result<Vec<i32>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM claimed_at)::INTEGER \
+             FROM native_board_claim WHERE character_name=$1 \
+             ORDER BY claimed_at DESC LIMIT 20",
+        )
+        .bind(character)
+        .fetch_all(self.pool)
+        .await
+    }
+
     pub async fn roulette_rewards(
         &self,
         roulette_type: i16,
