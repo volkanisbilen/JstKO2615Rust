@@ -328,6 +328,10 @@ pub struct SessionHandle {
     /// row. It is consumed by the first selection to prevent clicks leaking
     /// through a panel that the client has left underneath another UIF.
     pub native_event_hub_armed: bool,
+    /// True after Akara's native altar panel is opened. The v2615 client
+    /// reuses WIZ_COSTUME (0xC3) for both costume and special-auction traffic;
+    /// this server-owned context is what safely separates those contracts.
+    pub akara_altar_armed: bool,
     /// Current quest helper ID for NPC dialog (Lua script).
     ///
     pub quest_helper_id: u32,

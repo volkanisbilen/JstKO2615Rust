@@ -89,14 +89,57 @@ impl<'a> NativeEventsRepository<'a> {
         Ok(())
     }
 
-    pub async fn board_claim_history(&self, character: &str) -> Result<Vec<i32>, sqlx::Error> {
-        sqlx::query_scalar(
-            "SELECT EXTRACT(EPOCH FROM claimed_at)::INTEGER \
+    pub async fn board_claim_history(
+        &self,
+        character: &str,
+    ) -> Result<Vec<(String, i32, i32)>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT character_name,item_id,EXTRACT(EPOCH FROM claimed_at)::INTEGER \
              FROM native_board_claim WHERE character_name=$1 \
              ORDER BY claimed_at DESC LIMIT 20",
         )
         .bind(character)
         .fetch_all(self.pool)
+        .await
+    }
+
+    /// Active Akara Altar rows in the exact order used by the v2615 panel.
+    pub async fn akara_auctions(
+        &self,
+    ) -> Result<Vec<(i16, i32, i16, i64, i64, i32, i32)>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT slot,item_id,item_ext,current_bid,min_increment, \
+                    EXTRACT(EPOCH FROM ends_at)::INTEGER,bid_count \
+             FROM native_akara_auction \
+             WHERE enabled=TRUE AND ends_at>CURRENT_TIMESTAMP \
+             ORDER BY slot LIMIT 16",
+        )
+        .fetch_all(self.pool)
+        .await
+    }
+
+    /// Atomically accept a higher bid and return the refreshed row.
+    pub async fn place_akara_bid(
+        &self,
+        slot: i16,
+        item_id: i32,
+        character: &str,
+        offered: i64,
+    ) -> Result<Option<(i64, i64, i32, i32)>, sqlx::Error> {
+        sqlx::query_as(
+            "UPDATE native_akara_auction SET \
+                current_bid=$4,current_bidder=$3,bid_count=bid_count+1,updated_at=NOW() \
+             WHERE slot=$1 AND item_id=$2 AND enabled=TRUE \
+               AND ends_at>CURRENT_TIMESTAMP \
+               AND $4>=current_bid+min_increment \
+             RETURNING current_bid,min_increment, \
+                       EXTRACT(EPOCH FROM ends_at)::INTEGER,bid_count",
+        )
+        .bind(slot)
+        .bind(item_id)
+        .bind(character)
+        .bind(offered)
+        .fetch_optional(self.pool)
         .await
     }
 

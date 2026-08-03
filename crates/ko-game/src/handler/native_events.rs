@@ -40,6 +40,10 @@ const BOARD_REPLY_SUB: u8 = 3;
 // 0x3A -> CUISpecialAuction (Akara Altar), 0x44 -> CUIEventPostUp board 0.
 const AKARA_ALTAR_SELECT_FLAG: u8 = 0x3A;
 const AKARA_POST_UP_SELECT_FLAG: u8 = 0x44;
+const AKARA_AUCTION_LIST_SUB: u8 = 1;
+const AKARA_AUCTION_BID_SUB: u8 = 2;
+const AKARA_AUCTION_ALT_LIST_SUB: u8 = 4;
+const AKARA_AUCTION_CATALOG_SUB: u8 = 7;
 pub(crate) const AKARA_ALTAR_EVENT: i32 = 9_317_741;
 pub(crate) const AKARA_POST_UP_EVENT: i32 = 9_317_742;
 const AKARA_MENU_HEADER_TEXT: i32 = 45_136;
@@ -330,6 +334,7 @@ pub async fn try_open_akara_menu_from_target(
     world.update_session(sid, |state| {
         state.event_nid = target_nid as i16;
         state.event_sid = BOARD_NPC_PROTO_ID as i16;
+        state.akara_altar_armed = false;
     });
 
     let mut button_texts = [-1; 12];
@@ -382,6 +387,9 @@ pub async fn handle_akara_menu_event(
                 &empty,
                 "31774_Akara.lua",
             );
+            session.world().update_session(session.session_id(), |state| {
+                state.akara_altar_armed = true;
+            });
             info!(
                 "[{}] native Akara Altar UIF dispatched: select_flag=0x{:02X}",
                 session.addr(),
@@ -405,6 +413,9 @@ pub async fn handle_akara_menu_event(
                 &empty,
                 "31774_Akara.lua",
             );
+            session.world().update_session(session.session_id(), |state| {
+                state.akara_altar_armed = false;
+            });
             info!(
                 "[{}] native I Love Knight Online UIF dispatched: select_flag=0x{:02X}",
                 session.addr(),
@@ -414,6 +425,154 @@ pub async fn handle_akara_menu_event(
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+/// Handle CUISpecialAuction's 0xC3 traffic while the server-validated Akara
+/// panel is active. Returns false for ordinary costume packets.
+pub async fn try_handle_akara_altar(
+    session: &mut ClientSession,
+    pkt: &Packet,
+) -> anyhow::Result<bool> {
+    let armed = session
+        .world()
+        .with_session(session.session_id(), |h| h.akara_altar_armed)
+        .unwrap_or(false);
+    if !armed {
+        return Ok(false);
+    }
+    if !validate_akara_context(session) {
+        session.world().update_session(session.session_id(), |h| {
+            h.akara_altar_armed = false;
+        });
+        return Ok(false);
+    }
+
+    let mut reader = PacketReader::new(&pkt.data);
+    let sub = reader.read_u8().unwrap_or(0);
+    match sub {
+        AKARA_AUCTION_LIST_SUB | AKARA_AUCTION_ALT_LIST_SUB => {
+            let pool = session.pool().clone();
+            let repo = NativeEventsRepository::new(&pool);
+            let rows = repo.akara_auctions().await.unwrap_or_else(|e| {
+                warn!("[{}] Akara auction list DB error: {e}", session.addr());
+                Vec::new()
+            });
+            let out = akara_auction_list_packet(sub, &rows);
+            session.send_packet(&out).await?;
+            info!(
+                "[{}] Akara auction list: sub={} rows={}",
+                session.addr(), sub, rows.len()
+            );
+        }
+        AKARA_AUCTION_BID_SUB => {
+            handle_akara_bid(session, &mut reader).await?;
+        }
+        AKARA_AUCTION_CATALOG_SUB => {
+            // sub=7 is the third altar catalogue. A zero count is a complete
+            // v2615 response and, unlike the costume handler, stays inside
+            // CUISpecialAuction.
+            let mut out = Packet::new(Opcode::WizCostume as u8);
+            out.write_u8(AKARA_AUCTION_CATALOG_SUB);
+            out.write_u16(0);
+            session.send_packet(&out).await?;
+        }
+        _ => {
+            debug!(
+                "[{}] Akara auction unknown sub={} bytes={}",
+                session.addr(), sub, pkt.data.len()
+            );
+        }
+    }
+    Ok(true)
+}
+
+async fn handle_akara_bid(
+    session: &mut ClientSession,
+    reader: &mut PacketReader<'_>,
+) -> anyhow::Result<()> {
+    // v2615 sub_DCD290:
+    // [u8 slot][i32 item][u16 ext][u8 digits]
+    // digits * [u32 integrity_tag][u8 digit]
+    // [i64 displayed_bid][i64 offered_bid].
+    let slot = reader.read_u8().unwrap_or(u8::MAX);
+    let item_id = reader.read_i32().unwrap_or(0);
+    let _item_ext = reader.read_u16().unwrap_or(0);
+    let digit_count = reader.read_u8().unwrap_or(0).min(10);
+    for _ in 0..digit_count {
+        let _integrity_tag = reader.read_u32().unwrap_or(0);
+        let _digit = reader.read_u8().unwrap_or(0);
+    }
+    let displayed_bid = reader.read_i64().unwrap_or(0);
+    let offered_bid = reader.read_i64().unwrap_or(0);
+
+    let mut result = -2i16;
+    let Some(name) = character_name(session) else {
+        return Ok(());
+    };
+    if slot < 16 && item_id > 0 && offered_bid > displayed_bid && offered_bid <= u32::MAX as i64 {
+        let has_gold = session
+            .world()
+            .get_character_info(session.session_id())
+            .is_some_and(|ch| ch.gold >= offered_bid as u32);
+        if has_gold {
+            let pool = session.pool().clone();
+            let repo = NativeEventsRepository::new(&pool);
+            if repo
+                .place_akara_bid(slot as i16, item_id, &name, offered_bid)
+                .await?
+                .is_some()
+            {
+                if session
+                    .world()
+                    .gold_lose(session.session_id(), offered_bid as u32)
+                {
+                    result = 1;
+                } else {
+                    result = -3;
+                }
+            } else {
+                result = -3;
+            }
+        } else {
+            result = -4;
+        }
+    }
+
+    let mut out = Packet::new(Opcode::WizCostume as u8);
+    out.write_u8(AKARA_AUCTION_BID_SUB);
+    out.write_i16(result);
+    out.write_i16(0);
+    session.send_packet(&out).await?;
+    info!(
+        "[{}] Akara auction bid: character={} slot={} item={} displayed={} offered={} result={}",
+        session.addr(), name, slot, item_id, displayed_bid, offered_bid, result
+    );
+    Ok(())
+}
+
+fn akara_auction_list_packet(
+    sub: u8,
+    rows: &[(i16, i32, i16, i64, i64, i32, i32)],
+) -> Packet {
+    let mut out = Packet::new(Opcode::WizCostume as u8);
+    out.write_u8(sub);
+    out.write_u16(1); // load result
+    out.write_u8(rows.len().min(16) as u8);
+    for &(slot, item_id, item_ext, current_bid, _increment, ends_at, bid_count) in
+        rows.iter().take(16)
+    {
+        // Exact 26-byte row consumed by v2615 sub_DCDE70.
+        out.write_i32(slot as i32 + 1); // auction row id
+        out.write_u8((bid_count > 0) as u8);
+        out.write_u8(slot as u8);
+        out.write_i32(item_id);
+        out.write_u16(item_ext as u16);
+        out.write_i32(ends_at);
+        out.write_u8(0);
+        out.write_i64(current_bid);
+        out.write_u8(1); // active altar item
+    }
+    out
 }
 
 fn validate_akara_context(session: &ClientSession) -> bool {
@@ -493,7 +652,15 @@ async fn board_reply(
         }
     }
 
-    let out = board_reply_packet(board_id, result);
+    let history = if result == 1 {
+        repo.board_claim_history(&name).await.unwrap_or_else(|e| {
+            warn!("[{}] native board refresh DB error: {e}", session.addr());
+            Vec::new()
+        })
+    } else {
+        Vec::new()
+    };
+    let out = board_reply_packet(board_id, result, &history);
     session.send_packet(&out).await?;
     info!(
         "[{}] native board reply: character={} board_id={} npc_ok={} correct={} result={}",
@@ -502,7 +669,7 @@ async fn board_reply(
     Ok(())
 }
 
-fn board_open_packet(board_id: i32, history: &[i32]) -> Packet {
+fn board_open_packet(board_id: i32, history: &[(String, i32, i32)]) -> Packet {
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
     // v2615 CUIEventPostUp dispatches sub=2 to sub_ADAC20 (load/open) and
     // sub=3 to sub_ADAF40 (reply result). The open body begins with the board
@@ -510,25 +677,43 @@ fn board_open_packet(board_id: i32, history: &[i32]) -> Packet {
     // A zero-row payload is a complete, valid panel-open response.
     out.write_u8(BOARD_OPEN_SUB);
     out.write_i32(board_id);
-    out.write_i32(0); // load result: success
+    // sub_ADAC20 calls the body parser only when this value is non-zero.
+    out.write_i32(1); // load result: success
+    write_board_body(&mut out, history);
+    out
+}
+
+fn write_board_body(out: &mut Packet, history: &[(String, i32, i32)]) {
     out.write_i32(0); // event/start header
     out.write_i32(0); // event/end header
     out.write_i32(0); // display/start timestamp
     out.write_i32(0); // display/end timestamp
-    out.write_i16(0); // post/history row count
-
-    // Claim history is enforced server-side. Its v2615 display-row structure
-    // contains four strings plus a timestamp per row, not the old guessed
-    // u8+i32 layout, so do not serialize malformed rows into the panel.
-    let _ = history;
-    out
+    out.write_i16(history.len().min(100) as i16);
+    // v2615 sub_AD9FB0 consumes exactly three SByte strings and one Unix
+    // timestamp for every history row.
+    for (character, item_id, claimed_at) in history.iter().take(100) {
+        out.write_sbyte_string(character);
+        out.write_sbyte_string("I Love Knight Online");
+        out.write_sbyte_string(&item_id.to_string());
+        out.write_i32(*claimed_at);
+    }
 }
 
-fn board_reply_packet(board_id: i32, result: i32) -> Packet {
+fn board_reply_packet(
+    board_id: i32,
+    result: i32,
+    history: &[(String, i32, i32)],
+) -> Packet {
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
     out.write_u8(BOARD_REPLY_SUB);
     out.write_i32(board_id);
     out.write_i32(result);
+    // sub_ADAF40 dispatches result=1 into the same AD9FB0 body parser used by
+    // the open response. Appending the refreshed rows makes the successful
+    // reply update immediately instead of clearing the panel state.
+    if result == 1 {
+        write_board_body(&mut out, history);
+    }
     out
 }
 
@@ -951,13 +1136,13 @@ mod tests {
 
     #[test]
     fn board_packets_match_unpacked_v2615_open_and_reply_dispatch() {
-        let open = board_open_packet(7, &[1_700_000_000]);
+        let open = board_open_packet(7, &[]);
         assert_eq!(
             open.data,
             vec![
                 2, // load/open dispatch
                 7, 0, 0, 0, // requested board id
-                0, 0, 0, 0, // success
+                1, 0, 0, 0, // success
                 0, 0, 0, 0, // event/start header
                 0, 0, 0, 0, // event/end header
                 0, 0, 0, 0, // display/start timestamp
@@ -966,8 +1151,41 @@ mod tests {
             ]
         );
 
-        let reply = board_reply_packet(7, 1);
-        assert_eq!(reply.data, vec![3, 7, 0, 0, 0, 1, 0, 0, 0]);
+        let reply = board_reply_packet(7, 1, &[]);
+        assert_eq!(reply.data.len(), 9 + 18);
+        assert_eq!(&reply.data[..9], &[3, 7, 0, 0, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn board_history_rows_match_three_strings_and_timestamp() {
+        let open = board_open_packet(
+            0,
+            &[("a".to_string(), 811_084_000, 1_700_000_000)],
+        );
+        assert_eq!(&open.data[25..27], &[1, 0]);
+        assert_eq!(
+            &open.data[27..],
+            &[
+                1, b'a',
+                20, b'I', b' ', b'L', b'o', b'v', b'e', b' ', b'K', b'n', b'i', b'g',
+                b'h', b't', b' ', b'O', b'n', b'l', b'i', b'n', b'e',
+                9, b'8', b'1', b'1', b'0', b'8', b'4', b'0', b'0', b'0',
+                0, 241, 83, 101,
+            ]
+        );
+    }
+
+    #[test]
+    fn akara_auction_list_row_matches_v2615_26_byte_contract() {
+        let packet = akara_auction_list_packet(
+            1,
+            &[(0, 810_889_000, 0, 1_000_000, 100_000, 1_700_000_000, 0)],
+        );
+        assert_eq!(packet.opcode, Opcode::WizCostume as u8);
+        assert_eq!(packet.data[0], 1);
+        assert_eq!(&packet.data[1..3], &[1, 0]);
+        assert_eq!(packet.data[3], 1);
+        assert_eq!(packet.data.len(), 4 + 26);
     }
 
     #[test]

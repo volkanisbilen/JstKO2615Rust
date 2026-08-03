@@ -125,6 +125,7 @@ impl WorldState {
                 event_nid: -1,
                 event_sid: -1,
                 native_event_hub_armed: false,
+                akara_altar_armed: false,
                 quest_helper_id: 0,
                 by_selected_reward: -1,
                 select_msg_flag: 0,
