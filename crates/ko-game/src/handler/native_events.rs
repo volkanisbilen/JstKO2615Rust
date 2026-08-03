@@ -32,7 +32,7 @@ const EVENT_HUB_MARBLE: u8 = 5;
 // The Board belongs to <Goddess Akara Statue>. K_NPCPOS2369/NPC spawn data
 // uses 31774 as the NPC proto ID. Runtime NIDs are allocated dynamically and
 // must never be compared with this value.
-const BOARD_NPC_PROTO_ID: i16 = 31774;
+const BOARD_NPC_PROTO_ID: u16 = 31774;
 const BOARD_REWARD_ITEM_ID: u32 = 811_084_000;
 const BOARD_REPLY_SUB: u8 = 3;
 
@@ -255,6 +255,47 @@ pub async fn open_board_from_npc(session: &mut ClientSession) -> anyhow::Result<
     Ok(())
 }
 
+/// Open the Board for clients which expose Akara Statue as a targetable statue
+/// and only send WIZ_TARGET_HP when it is right-clicked. Unlike normal NPCs,
+/// this client object does not send WIZ_CLIENT_EVENT/WIZ_NPC_EVENT.
+///
+/// The target NID is resolved server-side and all normal NPC interaction
+/// guards are applied before establishing the reply context.
+pub async fn try_open_board_from_target(
+    session: &mut ClientSession,
+    target_nid: u32,
+) -> anyhow::Result<bool> {
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    let Some(npc) = world.get_npc_instance(target_nid) else {
+        return Ok(false);
+    };
+    if npc.proto_id != BOARD_NPC_PROTO_ID || world.is_npc_dead(target_nid) {
+        return Ok(false);
+    }
+
+    let Some(pos) = world.get_position(sid) else {
+        return Ok(false);
+    };
+    if npc.zone_id != pos.zone_id {
+        return Ok(false);
+    }
+
+    let dx = pos.x - npc.x;
+    let dz = pos.z - npc.z;
+    if (dx * dx + dz * dz).sqrt() > MAX_NPC_RANGE {
+        return Ok(false);
+    }
+
+    world.update_session(sid, |state| {
+        state.event_nid = target_nid as i16;
+        state.event_sid = BOARD_NPC_PROTO_ID as i16;
+    });
+    open_board_from_npc(session).await?;
+    Ok(true)
+}
+
 async fn board_reply(
     session: &mut ClientSession,
     repo: &NativeEventsRepository<'_>,
@@ -267,7 +308,7 @@ async fn board_reply(
     let sid = session.session_id();
     let context = world.with_session(sid, |h| (h.event_nid, h.event_sid));
     let npc_ok = context.is_some_and(|(event_nid, event_sid)| {
-        if event_nid <= 0 || event_sid != BOARD_NPC_PROTO_ID {
+        if event_nid <= 0 || event_sid != BOARD_NPC_PROTO_ID as i16 {
             return false;
         }
         let Some(npc) = world.get_npc_instance(event_nid as u32) else {
@@ -276,7 +317,7 @@ async fn board_reply(
         let Some(pos) = world.get_position(sid) else {
             return false;
         };
-        if npc.proto_id as i16 != BOARD_NPC_PROTO_ID
+        if npc.proto_id != BOARD_NPC_PROTO_ID
             || npc.zone_id != pos.zone_id
             || world.is_npc_dead(event_nid as u32)
         {
