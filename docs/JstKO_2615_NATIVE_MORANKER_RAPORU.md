@@ -43,17 +43,20 @@ Client EXE değiştirilmedi.
 - Not güncellemesinde heykel sahibi sunucu tarafında doğrulanır; başka bir
   karakterin notu değiştirilemez. Not üst sınırı 500 bayttır.
 - Heykeller non-monster ve AI'sızdır; saldırı/hedef botu nesnesi değildir.
+- 2026-08-04 kalibrasyonu: heykeller kaide merkez hattına alındı ve iki tarafın
+  bakış yönleri karşıya bakacak şekilde ters çevrildi. Sunucu logunda artık
+  her MORANKER yüklemesinde `x`, `z` ve `direction` alanları da görünür.
 
 ## Yerleşim
 
-| Yuva | Irk | Sıra | X | Z | Ölçek |
-|---|---:|---:|---:|---:|---:|
-| R | Karus | 1 | 800.0 | 562.0 | 130% |
-| S | Karus | 2 | 788.5 | 562.0 | 130% |
-| T | Karus | 3 | 777.0 | 562.0 | 130% |
-| U | Human | 1 | 833.0 | 562.0 | 130% |
-| V | Human | 2 | 844.5 | 562.0 | 130% |
-| W | Human | 3 | 856.0 | 562.0 | 130% |
+| Yuva | Irk | Sıra | X | Z | Direction | Ölçek |
+|---|---:|---:|---:|---:|---:|---:|
+| R | Karus | 1 | 800.0 | 566.0 | 6 | 130% |
+| S | Karus | 2 | 788.5 | 566.0 | 6 | 130% |
+| T | Karus | 3 | 777.0 | 566.0 | 6 | 130% |
+| U | Human | 1 | 833.0 | 566.0 | 2 | 130% |
+| V | Human | 2 | 844.5 | 566.0 | 2 | 130% |
+| W | Human | 3 | 856.0 | 566.0 | 2 | 130% |
 
 ## Test kabul kriterleri
 
