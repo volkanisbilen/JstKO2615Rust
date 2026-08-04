@@ -249,7 +249,8 @@ pub fn write_npc_info(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
 /// selling_group=gloves and money=boots. The two weapon fields retain their
 /// normal meaning.
 fn write_npc_info_ranker(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
-    write_npc_info_default(pkt, npc, tmpl);
+    let display_direction = npc.direction.wrapping_add(192);
+    write_npc_info_default_with_direction(pkt, npc, tmpl, display_direction);
     pkt.write_string(&tmpl.name);
     pkt.write_u8(tmpl.group);
     pkt.write_u16(tmpl.attack);
@@ -375,6 +376,15 @@ fn is_csw_door(proto_id: u16, npc_type: u8) -> bool {
 /// [u16 0] [u32 gateOpen] [u8 objectType] [u16 0] [u16 0] [i16 direction]
 /// ```
 fn write_npc_info_default(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
+    write_npc_info_default_with_direction(pkt, npc, tmpl, npc.direction);
+}
+
+fn write_npc_info_default_with_direction(
+    pkt: &mut Packet,
+    npc: &NpcInstance,
+    tmpl: &NpcTemplate,
+    direction: u8,
+) {
     // Proto ID
     pkt.write_u16(tmpl.s_sid);
 
@@ -461,7 +471,7 @@ fn write_npc_info_default(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplat
     pkt.write_u16(0);
 
     // IDA-verified: direction(u8) + nation2(u8) — two separate fields
-    pkt.write_u8(npc.direction as u8);
+    pkt.write_u8(direction);
     pkt.write_u8(nation); // nation2 — used for NPC color comparison with player nation
 }
 
@@ -641,7 +651,13 @@ mod tests {
         let mut npc = test_instance();
         npc.is_monster = false;
         npc.nation = 1;
+        npc.direction = 2;
         let pkt = build_npc_inout(NPC_IN, &npc, &tmpl);
+
+        // Runtime MORANKER placement keeps the normal 0..7 compass direction,
+        // but the native R..W character model needs the client-facing byte.
+        assert_eq!(pkt.data[46], 194);
+        assert_eq!(pkt.data[47], 1);
 
         // IN header (5) + default GetNpcInfo (43), then the native ranker block.
         let mut reader = PacketReader::new(&pkt.data[48..]);
