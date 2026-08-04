@@ -16,6 +16,7 @@ pub const MORANKER_TYPE_FIRST: u8 = b'R';
 pub const MORANKER_TYPE_LAST: u8 = b'W';
 
 const MORANKER_PROTO_BASE: u16 = 31_882;
+const MORANKER_PROTO_LAST: u16 = MORANKER_PROTO_BASE + 5;
 
 #[derive(Clone, Copy)]
 struct StatueSlot {
@@ -75,6 +76,11 @@ const STATUE_SLOTS: [StatueSlot; 6] = [
         direction: 6,
     },
 ];
+
+fn is_moraranker_template(template: &NpcTemplate) -> bool {
+    (MORANKER_PROTO_BASE..=MORANKER_PROTO_LAST).contains(&template.s_sid)
+        && (MORANKER_TYPE_FIRST..=MORANKER_TYPE_LAST).contains(&template.npc_type)
+}
 
 fn item_at(items: &HashMap<(String, i16), u32>, name: &str, slot: i16) -> u32 {
     items
@@ -173,9 +179,7 @@ impl WorldState {
             .filter_map(|entry| {
                 let instance = entry.value().clone();
                 let template = self.get_npc_template(instance.proto_id, instance.is_monster)?;
-                (MORANKER_TYPE_FIRST..=MORANKER_TYPE_LAST)
-                    .contains(&template.npc_type)
-                    .then_some((instance, template))
+                is_moraranker_template(&template).then_some((instance, template))
             })
             .collect();
 
@@ -198,9 +202,8 @@ impl WorldState {
             self.npc_hp.remove(&instance.nid);
             self.npc_ai.remove(&instance.nid);
         }
-        self.npc_templates.retain(|_, template| {
-            !(MORANKER_TYPE_FIRST..=MORANKER_TYPE_LAST).contains(&template.npc_type)
-        });
+        self.npc_templates
+            .retain(|_, template| !is_moraranker_template(template));
 
         let by_nation: HashMap<u8, Vec<&MorankerCharacterRow>> = [1_u8, 2_u8]
             .into_iter()
