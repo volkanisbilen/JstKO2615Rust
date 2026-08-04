@@ -44,19 +44,20 @@ Client EXE değiştirilmedi.
   karakterin notu değiştirilemez. Not üst sınırı 500 bayttır.
 - Heykeller non-monster ve AI'sızdır; saldırı/hedef botu nesnesi değildir.
 - 2026-08-04 son kalibrasyonu: heykeller client pedestal koordinatlarına
-  sabitlendi (`A1..A6`) ve iki tarafın bakış yönü 180 derece çevrildi. Sunucu
-  logunda her MORANKER yüklemesinde `x`, `z` ve `direction` alanları görünür.
+  sabitlendi (`A1..A6`) ve R..W ranker modelleri icin direction byte'i 180
+  derece cevrildi (`+128`). Sunucu logunda her MORANKER yuklemesinde `x`, `z`
+  ve `direction` alanlari gorunur.
 
 ## Yerleşim
 
 | Yuva | Heykel | Irk | Sıra | X | Z | Direction | Ölçek |
 |---|---|---:|---:|---:|---:|---:|---:|
-| R | A4 | Karus | 1 | 790.0 | 561.0 | 2 | 130% |
-| S | A5 | Karus | 2 | 782.0 | 561.0 | 2 | 130% |
-| T | A6 | Karus | 3 | 773.0 | 561.0 | 2 | 130% |
-| U | A1 | Human | 1 | 842.0 | 561.0 | 6 | 130% |
-| V | A2 | Human | 2 | 849.0 | 561.0 | 6 | 130% |
-| W | A3 | Human | 3 | 858.0 | 561.0 | 6 | 130% |
+| R | A4 | Karus | 1 | 790.0 | 561.0 | 130 | 130% |
+| S | A5 | Karus | 2 | 782.0 | 561.0 | 130 | 130% |
+| T | A6 | Karus | 3 | 773.0 | 561.0 | 130 | 130% |
+| U | A1 | Human | 1 | 842.0 | 561.0 | 134 | 130% |
+| V | A2 | Human | 2 | 849.0 | 561.0 | 134 | 130% |
+| W | A3 | Human | 3 | 858.0 | 561.0 | 134 | 130% |
 
 ## Test kabul kriterleri
 
