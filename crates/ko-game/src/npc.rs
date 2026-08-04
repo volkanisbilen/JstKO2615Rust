@@ -237,6 +237,15 @@ pub fn write_npc_info(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
         return;
     }
 
+    write_npc_info_base(pkt, npc, tmpl);
+}
+
+/// Write the fixed-size/base GetNpcInfo block used inside multi-NPC lists.
+///
+/// `WIZ_REQ_NPCIN` has no per-NPC length marker, so native MORANKER character
+/// extension bytes must not be written there or subsequent NPCs are parsed at
+/// the wrong offset by the client.
+pub fn write_npc_info_base(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
     match tmpl.npc_type {
         15 => write_npc_info_type15(pkt, npc, tmpl),
         191 => write_npc_info_type191(pkt, npc, tmpl),
@@ -244,7 +253,7 @@ pub fn write_npc_info(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
     }
 }
 
-fn is_native_moraranker_template(tmpl: &NpcTemplate) -> bool {
+pub fn is_native_moraranker_template(tmpl: &NpcTemplate) -> bool {
     (31_882..=31_887).contains(&tmpl.s_sid) && (b'R'..=b'W').contains(&tmpl.npc_type)
 }
 
@@ -258,8 +267,6 @@ fn is_native_moraranker_template(tmpl: &NpcTemplate) -> bool {
 /// normal meaning.
 fn write_npc_info_ranker(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
     write_npc_info_default(pkt, npc, tmpl);
-    let direction_index = pkt.data.len() - 2;
-    pkt.data[direction_index] = npc.direction.wrapping_add(128);
     pkt.write_string(&tmpl.name);
     pkt.write_u8(tmpl.group);
     pkt.write_u16(tmpl.attack);
@@ -655,9 +662,10 @@ mod tests {
         npc.direction = 2;
         let pkt = build_npc_inout(NPC_IN, &npc, &tmpl);
 
-        // Runtime MORANKER placement keeps the normal 0..7 compass direction,
-        // but the native R..W character model needs the client-facing byte.
-        assert_eq!(pkt.data[46], 130);
+        // Runtime MORANKER placement and the default model direction byte stay
+        // in the normal 0..7 compass range; only the extra character block is
+        // MORANKER-specific.
+        assert_eq!(pkt.data[46], 2);
         assert_eq!(pkt.data[47], 1);
 
         // IN header (5) + default GetNpcInfo (43), then the native ranker block.
@@ -675,6 +683,28 @@ mod tests {
         assert_eq!(reader.read_u32(), Some(180_000_000));
         assert_eq!(reader.read_u32(), Some(170_000_000));
         assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn test_native_ranker_base_info_stays_fixed_size_for_req_npcin() {
+        let mut tmpl = test_template();
+        tmpl.is_monster = false;
+        tmpl.s_sid = 31_882;
+        tmpl.npc_type = b'R';
+
+        let mut npc = test_instance();
+        npc.is_monster = false;
+        npc.nation = 1;
+        npc.direction = 2;
+
+        let mut pkt = Packet::new(Opcode::WizReqNpcIn as u8);
+        pkt.write_u16(1);
+        pkt.write_u32(npc.nid);
+        write_npc_info_base(&mut pkt, &npc, &tmpl);
+
+        assert_eq!(pkt.data.len(), 2 + 4 + 43);
+        assert_eq!(pkt.data[48], 2);
+        assert_eq!(pkt.data[49], 1);
     }
 
     #[test]
