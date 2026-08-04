@@ -232,12 +232,20 @@ pub fn build_npc_inout(inout_type: u8, npc: &NpcInstance, template: &NpcTemplate
 /// Dispatches to type-specific serialization for type 15 and type 191 NPCs.
 /// All other NPCs use the default 43-byte format.
 pub fn write_npc_info(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
+    if is_native_moraranker_template(tmpl) {
+        write_npc_info_ranker(pkt, npc, tmpl);
+        return;
+    }
+
     match tmpl.npc_type {
         15 => write_npc_info_type15(pkt, npc, tmpl),
-        82..=87 => write_npc_info_ranker(pkt, npc, tmpl),
         191 => write_npc_info_type191(pkt, npc, tmpl),
         _ => write_npc_info_default(pkt, npc, tmpl),
     }
+}
+
+fn is_native_moraranker_template(tmpl: &NpcTemplate) -> bool {
+    (31_882..=31_887).contains(&tmpl.s_sid) && (b'R'..=b'W').contains(&tmpl.npc_type)
 }
 
 /// Write the v2615 native MORANKER extension for NPC types R..W (82..=87).
@@ -249,8 +257,9 @@ pub fn write_npc_info(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
 /// selling_group=gloves and money=boots. The two weapon fields retain their
 /// normal meaning.
 fn write_npc_info_ranker(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
-    let display_direction = npc.direction.wrapping_add(192);
-    write_npc_info_default_with_direction(pkt, npc, tmpl, display_direction);
+    write_npc_info_default(pkt, npc, tmpl);
+    let direction_index = pkt.data.len() - 2;
+    pkt.data[direction_index] = npc.direction.wrapping_add(128);
     pkt.write_string(&tmpl.name);
     pkt.write_u8(tmpl.group);
     pkt.write_u16(tmpl.attack);
@@ -376,15 +385,6 @@ fn is_csw_door(proto_id: u16, npc_type: u8) -> bool {
 /// [u16 0] [u32 gateOpen] [u8 objectType] [u16 0] [u16 0] [i16 direction]
 /// ```
 fn write_npc_info_default(pkt: &mut Packet, npc: &NpcInstance, tmpl: &NpcTemplate) {
-    write_npc_info_default_with_direction(pkt, npc, tmpl, npc.direction);
-}
-
-fn write_npc_info_default_with_direction(
-    pkt: &mut Packet,
-    npc: &NpcInstance,
-    tmpl: &NpcTemplate,
-    direction: u8,
-) {
     // Proto ID
     pkt.write_u16(tmpl.s_sid);
 
@@ -471,7 +471,7 @@ fn write_npc_info_default_with_direction(
     pkt.write_u16(0);
 
     // IDA-verified: direction(u8) + nation2(u8) — two separate fields
-    pkt.write_u8(direction);
+    pkt.write_u8(npc.direction as u8);
     pkt.write_u8(nation); // nation2 — used for NPC color comparison with player nation
 }
 
@@ -634,6 +634,7 @@ mod tests {
     fn test_native_ranker_extension_packet_format() {
         let mut tmpl = test_template();
         tmpl.is_monster = false;
+        tmpl.s_sid = 31_882;
         tmpl.name = "RankOne".to_string();
         tmpl.npc_type = b'R';
         tmpl.group = 12; // race
@@ -656,7 +657,7 @@ mod tests {
 
         // Runtime MORANKER placement keeps the normal 0..7 compass direction,
         // but the native R..W character model needs the client-facing byte.
-        assert_eq!(pkt.data[46], 194);
+        assert_eq!(pkt.data[46], 130);
         assert_eq!(pkt.data[47], 1);
 
         // IN header (5) + default GetNpcInfo (43), then the native ranker block.
@@ -674,6 +675,25 @@ mod tests {
         assert_eq!(reader.read_u32(), Some(180_000_000));
         assert_eq!(reader.read_u32(), Some(170_000_000));
         assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn test_regular_npc_type_r_does_not_use_ranker_extension() {
+        let mut tmpl = test_template();
+        tmpl.is_monster = false;
+        tmpl.s_sid = 150;
+        tmpl.npc_type = b'R';
+
+        let mut npc = test_instance();
+        npc.is_monster = false;
+        npc.nation = 1;
+        npc.direction = 2;
+
+        let pkt = build_npc_inout(NPC_IN, &npc, &tmpl);
+
+        assert_eq!(pkt.data.len(), 48);
+        assert_eq!(pkt.data[46], 2);
+        assert_eq!(pkt.data[47], 1);
     }
 
     #[test]
