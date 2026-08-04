@@ -1364,7 +1364,7 @@ impl WorldState {
                     x,
                     y: 0.0,
                     z,
-                    direction: (spawn.direction as u8) % 8,
+                    direction: spawn.direction.rem_euclid(256) as u8,
                     region_x,
                     region_z,
                     gate_open: 0,
