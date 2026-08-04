@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ko_db::repositories::moraranker::{MorankerCharacterRow, MorankerRepository};
+use ko_db::repositories::moraranker::{
+    MorankerCharacterRow, MorankerRepository, MorankerStatueSlotRow,
+};
 use ko_db::DbPool;
 
 use crate::npc::{build_npc_inout, NpcInstance, NpcTemplate, NPC_IN, NPC_OUT};
@@ -28,54 +30,62 @@ struct StatueSlot {
 }
 
 // Existing Moradon MORANKER pedestals. R/S/T are Karus rank 1..3 and
-// U/V/W are El Morad rank 1..3. Coordinates are calibrated against the
-// client-side A1..A6 pedestal positions; direction values stay in the same
-// 0..7 compass range used by normal NPC instances. The native R..W ranker
-// model-facing byte is adjusted only while serializing its packet.
-const STATUE_SLOTS: [StatueSlot; 6] = [
+// U/V/W are El Morad rank 1..3. DB rows from `moraranker_statue_slot` override
+// these fallback coordinates/directions.
+const FALLBACK_STATUE_SLOTS: [StatueSlot; 6] = [
     StatueSlot {
         npc_type: b'R',
         nation: 1,
         x: 790.0,
         z: 561.0,
-        direction: 2,
+        direction: 130,
     },
     StatueSlot {
         npc_type: b'S',
         nation: 1,
         x: 782.0,
         z: 561.0,
-        direction: 2,
+        direction: 130,
     },
     StatueSlot {
         npc_type: b'T',
         nation: 1,
         x: 773.0,
         z: 561.0,
-        direction: 2,
+        direction: 130,
     },
     StatueSlot {
         npc_type: b'U',
         nation: 2,
         x: 842.0,
         z: 561.0,
-        direction: 6,
+        direction: 134,
     },
     StatueSlot {
         npc_type: b'V',
         nation: 2,
         x: 849.0,
         z: 561.0,
-        direction: 6,
+        direction: 134,
     },
     StatueSlot {
         npc_type: b'W',
         nation: 2,
         x: 858.0,
         z: 561.0,
-        direction: 6,
+        direction: 134,
     },
 ];
+
+fn slot_from_row(row: MorankerStatueSlotRow) -> Option<StatueSlot> {
+    Some(StatueSlot {
+        npc_type: u8::try_from(row.npc_type).ok()?,
+        nation: u8::try_from(row.nation).ok()?,
+        x: row.x,
+        z: row.z,
+        direction: row.direction.rem_euclid(256) as u8,
+    })
+}
 
 fn is_moraranker_template(template: &NpcTemplate) -> bool {
     (MORANKER_PROTO_BASE..=MORANKER_PROTO_LAST).contains(&template.s_sid)
@@ -161,6 +171,30 @@ impl WorldState {
     pub async fn reload_moraranker(&self, pool: &DbPool, broadcast: bool) -> anyhow::Result<()> {
         let repo = MorankerRepository::new(pool);
         let ranked = repo.load_top_six().await?;
+        let statue_slots = match repo.load_statue_slots().await {
+            Ok(rows) if rows.len() == 6 => {
+                let slots: Vec<_> = rows.into_iter().filter_map(slot_from_row).collect();
+                if slots.len() == 6 {
+                    slots
+                } else {
+                    FALLBACK_STATUE_SLOTS.to_vec()
+                }
+            }
+            Ok(rows) => {
+                tracing::warn!(
+                    rows = rows.len(),
+                    "MORANKER statue slot table did not return six rows; using fallback slots"
+                );
+                FALLBACK_STATUE_SLOTS.to_vec()
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "MORANKER statue slot table unavailable; using fallback slots"
+                );
+                FALLBACK_STATUE_SLOTS.to_vec()
+            }
+        };
         let names: Vec<&str> = ranked.iter().map(|row| row.str_user_id.as_str()).collect();
         let equipped = repo.load_equipment(&names).await?;
         let item_map: HashMap<(String, i16), u32> = equipped
@@ -219,7 +253,7 @@ impl WorldState {
             })
             .collect();
 
-        for (slot_index, slot) in STATUE_SLOTS.into_iter().enumerate() {
+        for (slot_index, slot) in statue_slots.into_iter().enumerate() {
             let nation_rank = if slot.nation == 1 {
                 slot_index
             } else {
