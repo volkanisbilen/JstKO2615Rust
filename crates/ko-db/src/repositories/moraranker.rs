@@ -22,6 +22,16 @@ pub struct MorankerEquipmentRow {
     pub item_id: i32,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct MorankerStatueSlotRow {
+    pub slot_index: i16,
+    pub npc_type: i32,
+    pub nation: i16,
+    pub x: f32,
+    pub z: f32,
+    pub direction: i16,
+}
+
 pub struct MorankerRepository<'a> {
     pool: &'a PgPool,
 }
@@ -68,6 +78,16 @@ impl<'a> MorankerRepository<'a> {
         )
         .bind(names)
         .bind(&[1_i16, 4, 6, 8, 10, 12, 13][..])
+        .fetch_all(self.pool)
+        .await
+    }
+
+    pub async fn load_statue_slots(&self) -> Result<Vec<MorankerStatueSlotRow>, sqlx::Error> {
+        sqlx::query_as::<_, MorankerStatueSlotRow>(
+            "SELECT slot_index, ASCII(npc_type) AS npc_type, nation, x, z, direction
+               FROM moraranker_statue_slot
+              ORDER BY slot_index",
+        )
         .fetch_all(self.pool)
         .await
     }
