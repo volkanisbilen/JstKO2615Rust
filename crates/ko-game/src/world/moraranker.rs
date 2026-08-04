@@ -28,50 +28,51 @@ struct StatueSlot {
 
 // Existing Moradon MORANKER pedestals. R/S/T are Karus rank 1..3 and
 // U/V/W are El Morad rank 1..3. Coordinates are calibrated against the
-// client-side A1..A6 pedestal positions. R..W ranker models interpret the
-// direction byte as a 0..255 angle, so +64 is a 90 degree turn.
+// client-side A1..A6 pedestal positions; direction values stay in the same
+// 0..7 compass range used by normal NPC instances. The native R..W ranker
+// model-facing byte is adjusted only while serializing its packet.
 const STATUE_SLOTS: [StatueSlot; 6] = [
     StatueSlot {
         npc_type: b'R',
         nation: 1,
         x: 790.0,
         z: 561.0,
-        direction: 194,
+        direction: 2,
     },
     StatueSlot {
         npc_type: b'S',
         nation: 1,
         x: 782.0,
         z: 561.0,
-        direction: 194,
+        direction: 2,
     },
     StatueSlot {
         npc_type: b'T',
         nation: 1,
         x: 773.0,
         z: 561.0,
-        direction: 194,
+        direction: 2,
     },
     StatueSlot {
         npc_type: b'U',
         nation: 2,
         x: 842.0,
         z: 561.0,
-        direction: 198,
+        direction: 6,
     },
     StatueSlot {
         npc_type: b'V',
         nation: 2,
         x: 849.0,
         z: 561.0,
-        direction: 198,
+        direction: 6,
     },
     StatueSlot {
         npc_type: b'W',
         nation: 2,
         x: 858.0,
         z: 561.0,
-        direction: 198,
+        direction: 6,
     },
 ];
 
