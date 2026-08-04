@@ -27,49 +27,50 @@ struct StatueSlot {
 }
 
 // Existing Moradon MORANKER pedestals. R/S/T are Karus rank 1..3 and
-// U/V/W are El Morad rank 1..3.
+// U/V/W are El Morad rank 1..3. The Z line is nudged onto the pedestal
+// centerline; the direction values are the client's 0..7 compass codes.
 const STATUE_SLOTS: [StatueSlot; 6] = [
     StatueSlot {
         npc_type: b'R',
         nation: 1,
         x: 800.0,
-        z: 562.0,
-        direction: 2,
+        z: 566.0,
+        direction: 6,
     },
     StatueSlot {
         npc_type: b'S',
         nation: 1,
         x: 788.5,
-        z: 562.0,
-        direction: 2,
+        z: 566.0,
+        direction: 6,
     },
     StatueSlot {
         npc_type: b'T',
         nation: 1,
         x: 777.0,
-        z: 562.0,
-        direction: 2,
+        z: 566.0,
+        direction: 6,
     },
     StatueSlot {
         npc_type: b'U',
         nation: 2,
         x: 833.0,
-        z: 562.0,
-        direction: 6,
+        z: 566.0,
+        direction: 2,
     },
     StatueSlot {
         npc_type: b'V',
         nation: 2,
         x: 844.5,
-        z: 562.0,
-        direction: 6,
+        z: 566.0,
+        direction: 2,
     },
     StatueSlot {
         npc_type: b'W',
         nation: 2,
         x: 856.0,
-        z: 562.0,
-        direction: 6,
+        z: 566.0,
+        direction: 2,
     },
 ];
 
@@ -282,6 +283,9 @@ impl WorldState {
                 character = %character.str_user_id,
                 np = character.loyalty,
                 monthly_np = character.loyalty_monthly,
+                x = slot.x,
+                z = slot.z,
+                direction = slot.direction,
                 memo_len = character.str_memo.as_deref().unwrap_or_default().len(),
                 "MORANKER statue loaded"
             );
