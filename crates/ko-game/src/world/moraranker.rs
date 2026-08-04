@@ -27,50 +27,51 @@ struct StatueSlot {
 }
 
 // Existing Moradon MORANKER pedestals. R/S/T are Karus rank 1..3 and
-// U/V/W are El Morad rank 1..3. The Z line is nudged onto the pedestal
-// centerline; the direction values are the client's 0..7 compass codes.
+// U/V/W are El Morad rank 1..3. Coordinates are calibrated against the
+// client-side A1..A6 pedestal positions; direction values are the client's
+// 0..7 compass codes.
 const STATUE_SLOTS: [StatueSlot; 6] = [
     StatueSlot {
         npc_type: b'R',
         nation: 1,
-        x: 800.0,
-        z: 566.0,
-        direction: 6,
+        x: 790.0,
+        z: 561.0,
+        direction: 2,
     },
     StatueSlot {
         npc_type: b'S',
         nation: 1,
-        x: 788.5,
-        z: 566.0,
-        direction: 6,
+        x: 782.0,
+        z: 561.0,
+        direction: 2,
     },
     StatueSlot {
         npc_type: b'T',
         nation: 1,
-        x: 777.0,
-        z: 566.0,
-        direction: 6,
+        x: 773.0,
+        z: 561.0,
+        direction: 2,
     },
     StatueSlot {
         npc_type: b'U',
         nation: 2,
-        x: 833.0,
-        z: 566.0,
-        direction: 2,
+        x: 842.0,
+        z: 561.0,
+        direction: 6,
     },
     StatueSlot {
         npc_type: b'V',
         nation: 2,
-        x: 844.5,
-        z: 566.0,
-        direction: 2,
+        x: 849.0,
+        z: 561.0,
+        direction: 6,
     },
     StatueSlot {
         npc_type: b'W',
         nation: 2,
-        x: 856.0,
-        z: 566.0,
-        direction: 2,
+        x: 858.0,
+        z: 561.0,
+        direction: 6,
     },
 ];
 
