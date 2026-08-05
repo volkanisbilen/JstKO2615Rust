@@ -82,6 +82,27 @@ enum UpgradeResult {
     Rental = 5,
 }
 
+async fn send_upgrade_fail(
+    session: &mut ClientSession,
+    upgrade_type: u8,
+    b_type: u8,
+    result: UpgradeResult,
+    logos: bool,
+    items: &[UpgradeItem],
+    reason: &str,
+) -> anyhow::Result<()> {
+    debug!(
+        "[{}] ItemUpgrade fail: type={} b_type={} result={:?} reason={} items={:?}",
+        session.addr(),
+        upgrade_type,
+        b_type,
+        result,
+        reason,
+        items
+    );
+    send_fail(session, upgrade_type, b_type, result, logos, items).await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i8)]
 enum ScrollType {
@@ -190,38 +211,84 @@ async fn item_upgrade(
     let b_type = reader.read_u8().unwrap_or(0);
     let npc_id = reader.read_u32().unwrap_or(0);
 
-    // NPC range check — must be near an Anvil NPC
-    if !world.is_in_npc_range(sid, npc_id) {
-        send_fail(
+    let selected_npc_id = world
+        .with_session(sid, |h| h.event_nid)
+        .filter(|nid| *nid > 0)
+        .map(|nid| nid as u32);
+    let resolved_npc_id = if world.get_npc_instance(npc_id).is_some() {
+        npc_id
+    } else if let Some(selected_id) = selected_npc_id {
+        selected_id
+    } else {
+        send_upgrade_fail(
             session,
             upgrade_type,
             b_type,
             UpgradeResult::Trading,
             false,
             &[],
+            "npc not found and no selected anvil",
+        )
+        .await?;
+        return Ok(());
+    };
+    let Some(npc_inst) = world.get_npc_instance(resolved_npc_id) else {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::Trading,
+            false,
+            &[],
+            "selected anvil not found",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let npc_type = world
+        .get_npc_template(npc_inst.proto_id, npc_inst.is_monster)
+        .map(|tmpl| tmpl.npc_type)
+        .unwrap_or(0);
+    let selected_anvil_ui = world
+        .with_session(sid, |h| {
+            h.event_nid == resolved_npc_id as i16 && h.event_sid == npc_inst.proto_id as i16
+        })
+        .unwrap_or(false);
+    let is_template_anvil = npc_type == NPC_ANVIL;
+    let is_object_anvil = npc_type == OBJECT_ANVIL || selected_anvil_ui;
+    if !is_template_anvil && !is_object_anvil {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::Trading,
+            false,
+            &[],
+            "npc is not an anvil",
         )
         .await?;
         return Ok(());
     }
 
-    // NPC type check — must be NPC_ANVIL (24)
-    {
-        let is_anvil = world
-            .get_npc_instance(npc_id)
-            .and_then(|inst| world.get_npc_template(inst.proto_id, inst.is_monster))
-            .is_some_and(|tmpl| tmpl.npc_type == NPC_ANVIL);
-        if !is_anvil {
-            send_fail(
-                session,
-                upgrade_type,
-                b_type,
-                UpgradeResult::Trading,
-                false,
-                &[],
-            )
-            .await?;
-            return Ok(());
-        }
+    // Static object anvils are opened via WIZ_OBJECT_EVENT, which already checks
+    // object_event_pos range. Some object NPC instance coordinates differ from
+    // that object position, so allow the immediate upgrade packet only if this
+    // session opened the same anvil UI.
+    let in_npc_range = world.is_in_npc_range(sid, resolved_npc_id);
+    let selected_object_anvil = is_object_anvil && selected_anvil_ui;
+    if !in_npc_range && !selected_object_anvil {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::Trading,
+            false,
+            &[],
+            "npc out of range",
+        )
+        .await?;
+        return Ok(());
     }
 
     // Read 10 items from the client
@@ -242,6 +309,16 @@ async fn item_upgrade(
         }
     }
 
+    debug!(
+        "[{}] ItemUpgrade request: type={} b_type={} npc={} raw_items={:?} parsed_items={:?}",
+        session.addr(),
+        upgrade_type,
+        b_type,
+        npc_id,
+        raw_items,
+        items
+    );
+
     // ── Validation checks (matching C++ order) ──
 
     // Check player state: dead, trading, store open, merchanting, mining
@@ -251,13 +328,44 @@ async fn item_upgrade(
         || world.is_merchanting(sid)
         || world.is_mining(sid)
     {
-        send_fail(
+        send_upgrade_fail(
             session,
             upgrade_type,
             b_type,
             UpgradeResult::Trading,
             false,
             &[],
+            "blocked player state",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // bType must be 1 (execute) or 2 (preview)
+    if !(UPGRADE_TYPE_NORMAL..=UPGRADE_TYPE_PREVIEW).contains(&b_type) {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::NoMatch,
+            false,
+            &[],
+            "invalid b_type",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Must have at least one item
+    if items.is_empty() {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::NoMatch,
+            false,
+            &[],
+            "empty item list",
         )
         .await?;
         return Ok(());
@@ -278,13 +386,14 @@ async fn item_upgrade(
             })
             .unwrap_or(true);
         if blocked {
-            send_fail(
+            send_upgrade_fail(
                 session,
                 upgrade_type,
                 b_type,
                 UpgradeResult::Trading,
                 false,
                 &[],
+                "rate limit",
             )
             .await?;
             return Ok(());
@@ -294,34 +403,6 @@ async fn item_upgrade(
             h.last_upgrade_time = std::time::Instant::now();
             h.upgrade_count = h.upgrade_count.saturating_add(1);
         });
-    }
-
-    // bType must be 1 (execute) or 2 (preview)
-    if !(UPGRADE_TYPE_NORMAL..=UPGRADE_TYPE_PREVIEW).contains(&b_type) {
-        send_fail(
-            session,
-            upgrade_type,
-            b_type,
-            UpgradeResult::NoMatch,
-            false,
-            &[],
-        )
-        .await?;
-        return Ok(());
-    }
-
-    // Must have at least one item
-    if items.is_empty() {
-        send_fail(
-            session,
-            upgrade_type,
-            b_type,
-            UpgradeResult::NoMatch,
-            false,
-            &[],
-        )
-        .await?;
-        return Ok(());
     }
 
     // Validate all items exist in inventory and are not bound/sealed/rented/duplicate
@@ -1698,7 +1779,8 @@ async fn item_disassemble(
     let mut total_result_weight: i32 = 0;
     for res in &results {
         if let Some(p) = world.get_item(res.item_id) {
-            total_result_weight = total_result_weight.saturating_add((p.weight.unwrap_or(0) as i32).saturating_mul(res.count as i32));
+            total_result_weight = total_result_weight
+                .saturating_add((p.weight.unwrap_or(0) as i32).saturating_mul(res.count as i32));
         }
     }
     if let Some(ch) = world.get_character_info(sid) {
@@ -1986,28 +2068,56 @@ async fn bifrost_piece_exchange(
         return bifrost_send_fail(session, error_code).await;
     }
 
-    // Find a slot for the reward item
+    // Verify that the reward can fit before consuming the piece. The final
+    // slot must be resolved again after consumption: when the last piece in
+    // the source stack is removed, that newly-empty slot may become the first
+    // valid destination for the reward.
+    if world.find_slot_for_item(sid, reward_item_id, 1).is_none() {
+        return bifrost_send_fail(session, error_code).await;
+    }
+
+    // Remove exactly one piece from the client-selected source slot. Capture
+    // the authoritative remaining count so it can be sent after the exchange
+    // result; the result packet alone is not sufficient to keep v2615's
+    // inventory cache synchronized after repeated exchanges.
+    let mut consumed_slot: Option<(u32, u16)> = None;
+    let consumed = world.update_inventory(sid, |inv| {
+        if actual_slot >= inv.len()
+            || inv[actual_slot].item_id != piece_item_id
+            || inv[actual_slot].count == 0
+        {
+            return false;
+        }
+
+        inv[actual_slot].count -= 1;
+        let remaining = inv[actual_slot].count;
+        let durability = inv[actual_slot].durability.max(0) as u16;
+        if remaining == 0 {
+            inv[actual_slot] = Default::default();
+        }
+        consumed_slot = Some((remaining as u32, durability));
+        true
+    });
+    if !consumed {
+        return bifrost_send_fail(session, error_code).await;
+    }
+
+    // Resolve the actual reward slot after consuming the source item. This
+    // prevents reporting a stale slot when the consumed stack became empty.
     let reward_slot = match world.find_slot_for_item(sid, reward_item_id, 1) {
         Some(s) => s,
-        None => return bifrost_send_fail(session, error_code).await,
-    };
-
-    // Remove 1 piece from inventory
-    world.update_inventory(sid, |inv| {
-        if actual_slot < inv.len() && inv[actual_slot].item_id == piece_item_id {
-            if inv[actual_slot].count > 1 {
-                inv[actual_slot].count -= 1;
-            } else {
-                inv[actual_slot] = Default::default();
-            }
-            true
-        } else {
-            false
+        None => {
+            // The pre-check succeeded and session packets are processed
+            // serially, so this is defensive rollback for unexpected state.
+            let _ = world.give_item(sid, piece_item_id, 1);
+            return bifrost_send_fail(session, error_code).await;
         }
-    });
+    };
 
     // Give reward item
     if !world.give_item(sid, reward_item_id, 1) {
+        // Do not consume a piece when reward delivery unexpectedly fails.
+        let _ = world.give_item(sid, piece_item_id, 1);
         return bifrost_send_fail(session, 0).await;
     }
 
@@ -2041,6 +2151,22 @@ async fn bifrost_piece_exchange(
     result.write_u8(effect_type as u8);
     session.send_packet(&result).await?;
 
+    // Send the exact remaining source count after the exchange response. This
+    // is authoritative and corrects the client's local decrement/cache state.
+    if let Some((remaining, durability)) = consumed_slot {
+        let mut count_pkt = Packet::new(Opcode::WizItemCountChange as u8);
+        count_pkt.write_u16(1); // count_type
+        count_pkt.write_u8(1); // slot_section: inventory
+        count_pkt.write_u8(src_pos as u8);
+        count_pkt.write_u32(piece_item_id);
+        count_pkt.write_u32(remaining);
+        count_pkt.write_u8(0); // bNewItem = false (consumption)
+        count_pkt.write_u16(durability);
+        count_pkt.write_u32(0); // reserved
+        count_pkt.write_u32(0); // expiration
+        world.send_to_session_owned(sid, count_pkt);
+    }
+
     // Broadcast artifact effect to region (3×3 grid)
     let mut artifact_pkt = Packet::new(Opcode::WizObjectEvent as u8);
     artifact_pkt.write_u8(OBJECT_ARTIFACT);
@@ -2061,7 +2187,11 @@ async fn bifrost_piece_exchange(
     if reward_item_type == 4 || reward_item_id == 379_068_000 {
         let (char_name, personal_rank) = world
             .with_session(sid, |h| {
-                let name = h.character.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+                let name = h
+                    .character
+                    .as_ref()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
                 (name, h.personal_rank)
             })
             .unwrap_or_default();
@@ -4030,7 +4160,12 @@ mod tests {
         assert_eq!(ITEM_MIDDLE_CLASS_TRINA, 352900000);
         assert_eq!(ITEM_RING_TRINA, 354000000);
         // All distinct
-        let trinas = [ITEM_TRINA, ITEM_LOW_CLASS_TRINA, ITEM_MIDDLE_CLASS_TRINA, ITEM_RING_TRINA];
+        let trinas = [
+            ITEM_TRINA,
+            ITEM_LOW_CLASS_TRINA,
+            ITEM_MIDDLE_CLASS_TRINA,
+            ITEM_RING_TRINA,
+        ];
         for i in 0..trinas.len() {
             for j in (i + 1)..trinas.len() {
                 assert_ne!(trinas[i], trinas[j]);
@@ -4121,8 +4256,12 @@ mod tests {
         assert_eq!(UpgradeResult::Rental as u8, 5);
         // 6 distinct result codes
         let results = [
-            UpgradeResult::Failed, UpgradeResult::Succeeded, UpgradeResult::Trading,
-            UpgradeResult::NeedCoins, UpgradeResult::NoMatch, UpgradeResult::Rental,
+            UpgradeResult::Failed,
+            UpgradeResult::Succeeded,
+            UpgradeResult::Trading,
+            UpgradeResult::NeedCoins,
+            UpgradeResult::NoMatch,
+            UpgradeResult::Rental,
         ];
         assert_eq!(results.len(), 6);
     }
@@ -4151,10 +4290,17 @@ mod tests {
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
         // All distinct
-        let subs = [ITEM_BIFROST_REQ, ITEM_BIFROST_EXCHANGE, PET_HATCHING, ITEM_SEAL,
-                     PET_IMAGE_TRANSFORM, SPECIAL_PART_SEWING, ITEM_OLDMAN_EXCHANGE];
+        let subs = [
+            ITEM_BIFROST_REQ,
+            ITEM_BIFROST_EXCHANGE,
+            PET_HATCHING,
+            ITEM_SEAL,
+            PET_IMAGE_TRANSFORM,
+            SPECIAL_PART_SEWING,
+            ITEM_OLDMAN_EXCHANGE,
+        ];
         for i in 0..subs.len() {
-            for j in (i+1)..subs.len() {
+            for j in (i + 1)..subs.len() {
                 assert_ne!(subs[i], subs[j]);
             }
         }
