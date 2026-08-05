@@ -38,42 +38,42 @@ const FALLBACK_STATUE_SLOTS: [StatueSlot; 6] = [
         nation: 1,
         x: 790.0,
         z: 561.0,
-        direction: 130,
+        direction: 194,
     },
     StatueSlot {
         npc_type: b'S',
         nation: 1,
         x: 782.0,
         z: 561.0,
-        direction: 130,
+        direction: 194,
     },
     StatueSlot {
         npc_type: b'T',
         nation: 1,
         x: 773.0,
         z: 561.0,
-        direction: 130,
+        direction: 194,
     },
     StatueSlot {
         npc_type: b'U',
         nation: 2,
         x: 842.0,
         z: 561.0,
-        direction: 134,
+        direction: 198,
     },
     StatueSlot {
         npc_type: b'V',
         nation: 2,
         x: 849.0,
         z: 561.0,
-        direction: 134,
+        direction: 198,
     },
     StatueSlot {
         npc_type: b'W',
         nation: 2,
         x: 858.0,
         z: 561.0,
-        direction: 134,
+        direction: 198,
     },
 ];
 
@@ -150,6 +150,21 @@ fn ranker_template(
         money: item_at(items, &name, 13),
         item_table: 0,
         area_range: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FALLBACK_STATUE_SLOTS;
+
+    #[test]
+    fn fallback_statue_slots_are_rotated_another_90_degrees() {
+        let directions: Vec<u8> = FALLBACK_STATUE_SLOTS
+            .iter()
+            .map(|slot| slot.direction)
+            .collect();
+
+        assert_eq!(directions, vec![194, 194, 194, 198, 198, 198]);
     }
 }
 
