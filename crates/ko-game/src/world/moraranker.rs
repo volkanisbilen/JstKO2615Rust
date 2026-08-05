@@ -38,42 +38,42 @@ const FALLBACK_STATUE_SLOTS: [StatueSlot; 6] = [
         nation: 1,
         x: 790.0,
         z: 561.0,
-        direction: 194,
+        direction: 66,
     },
     StatueSlot {
         npc_type: b'S',
         nation: 1,
         x: 782.0,
         z: 561.0,
-        direction: 194,
+        direction: 66,
     },
     StatueSlot {
         npc_type: b'T',
         nation: 1,
         x: 773.0,
         z: 561.0,
-        direction: 194,
+        direction: 66,
     },
     StatueSlot {
         npc_type: b'U',
         nation: 2,
         x: 842.0,
         z: 561.0,
-        direction: 198,
+        direction: 70,
     },
     StatueSlot {
         npc_type: b'V',
         nation: 2,
         x: 849.0,
         z: 561.0,
-        direction: 198,
+        direction: 70,
     },
     StatueSlot {
         npc_type: b'W',
         nation: 2,
         x: 858.0,
         z: 561.0,
-        direction: 198,
+        direction: 70,
     },
 ];
 
@@ -158,13 +158,13 @@ mod tests {
     use super::FALLBACK_STATUE_SLOTS;
 
     #[test]
-    fn fallback_statue_slots_are_rotated_another_90_degrees() {
+    fn fallback_statue_slots_are_rotated_180_degrees_from_current_db_facing() {
         let directions: Vec<u8> = FALLBACK_STATUE_SLOTS
             .iter()
             .map(|slot| slot.direction)
             .collect();
 
-        assert_eq!(directions, vec![194, 194, 194, 198, 198, 198]);
+        assert_eq!(directions, vec![66, 66, 66, 70, 70, 70]);
     }
 }
 
