@@ -182,6 +182,11 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
         Some(ObjectType::Anvil) => {
             // Anvil: open upgrade UI
+            world.update_session(sid, |h| {
+                h.event_nid = nid as i16;
+                h.event_sid = event.s_index;
+            });
+
             let mut result = Packet::new(Opcode::WizItemUpgrade as u8);
             result.write_u8(1); // ITEM_UPGRADE_REQ opcode
             result.write_u16(nid);

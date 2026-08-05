@@ -1174,6 +1174,19 @@ fn broadcast_juraid_active_notice(world: &WorldState, assigned_users: usize) {
     world.broadcast_to_all(Arc::new(pkt), None);
 }
 
+pub fn broadcast_juraid_force_start_notice(world: &WorldState, signed_users: usize) {
+    let msg = if signed_users == 0 {
+        "Juraid Mountain countdown skipped. No registered players yet.".to_string()
+    } else {
+        format!(
+            "Juraid Mountain countdown skipped. Starting with {} registered player(s).",
+            signed_users
+        )
+    };
+    let pkt = crate::systems::timed_notice::build_notice_packet(8, &msg);
+    world.broadcast_to_all(Arc::new(pkt), None);
+}
+
 fn juraid_registration_notice_message(remaining_secs: u16) -> String {
     let minutes = ((remaining_secs as u32) + 59) / 60;
     if minutes > 0 {

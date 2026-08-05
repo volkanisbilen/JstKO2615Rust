@@ -211,8 +211,52 @@ async fn item_upgrade(
     let b_type = reader.read_u8().unwrap_or(0);
     let npc_id = reader.read_u32().unwrap_or(0);
 
-    // NPC range check — must be near an Anvil NPC
-    if !world.is_in_npc_range(sid, npc_id) {
+    let Some(npc_inst) = world.get_npc_instance(npc_id) else {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::Trading,
+            false,
+            &[],
+            "npc not found",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let npc_type = world
+        .get_npc_template(npc_inst.proto_id, npc_inst.is_monster)
+        .map(|tmpl| tmpl.npc_type)
+        .unwrap_or(0);
+    let selected_anvil_ui = world
+        .with_session(sid, |h| {
+            h.event_nid == npc_id as i16 && h.event_sid == npc_inst.proto_id as i16
+        })
+        .unwrap_or(false);
+    let is_template_anvil = npc_type == NPC_ANVIL;
+    let is_object_anvil = npc_type == OBJECT_ANVIL || selected_anvil_ui;
+    if !is_template_anvil && !is_object_anvil {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::Trading,
+            false,
+            &[],
+            "npc is not an anvil",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Static object anvils are opened via WIZ_OBJECT_EVENT, which already checks
+    // object_event_pos range. Some object NPC instance coordinates differ from
+    // that object position, so allow the immediate upgrade packet only if this
+    // session opened the same anvil UI.
+    let in_npc_range = world.is_in_npc_range(sid, npc_id);
+    let selected_object_anvil = is_object_anvil && selected_anvil_ui;
+    if !in_npc_range && !selected_object_anvil {
         send_upgrade_fail(
             session,
             upgrade_type,
@@ -224,35 +268,6 @@ async fn item_upgrade(
         )
         .await?;
         return Ok(());
-    }
-
-    // NPC type check: accept both template anvils and static object anvils.
-    {
-        let is_anvil = world
-            .get_npc_instance(npc_id)
-            .and_then(|inst| world.get_npc_template(inst.proto_id, inst.is_monster))
-            .is_some_and(|tmpl| tmpl.npc_type == NPC_ANVIL);
-        if !is_anvil {
-            let npc_type = world
-                .get_npc_instance(npc_id)
-                .and_then(|inst| world.get_npc_template(inst.proto_id, inst.is_monster))
-                .map(|tmpl| tmpl.npc_type)
-                .unwrap_or(0);
-            let is_object_anvil = npc_type == OBJECT_ANVIL;
-            if !is_object_anvil {
-                send_upgrade_fail(
-                    session,
-                    upgrade_type,
-                    b_type,
-                    UpgradeResult::Trading,
-                    false,
-                    &[],
-                    "npc is not an anvil",
-                )
-                .await?;
-                return Ok(());
-            }
-        }
     }
 
     // Read 10 items from the client

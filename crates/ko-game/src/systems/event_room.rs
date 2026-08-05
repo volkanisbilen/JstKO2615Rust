@@ -867,7 +867,7 @@ pub struct SpawnEventNpcParams {
 /// Broadcast the event counter (sign-up counts) to all signed-up users.
 ///   - BDW: `TemplEventBDWSendJoinScreenUpdate()` — sends karus + elmo counts
 ///   - Chaos: `TemplEventChaosSendJoinScreenUpdate()` — sends total count only
-///   - Juraid: `TemplEventJuraidSendJoinScreenUpdate()` — sends via WIZ_EXT_HOOK
+///   - Juraid: `TemplEventJuraidSendJoinScreenUpdate()` — sends EXT_HOOK and v2615 WIZ_EVENT
 /// Called when a user joins/leaves the event.
 /// Returns the built packet so the caller can also send it to a specific user.
 pub fn broadcast_event_counter(world: &WorldState) -> Option<Packet> {
@@ -909,6 +909,16 @@ pub fn broadcast_event_counter(world: &WorldState) -> Option<Packet> {
     let arc_counter = Arc::new(counter_pkt.clone());
     for user in users.iter() {
         world.send_to_session_arc(user.session_id, Arc::clone(&arc_counter));
+    }
+    if active_event == TempleEventType::JuraidMountain as i16 {
+        let arc_event_counter = Arc::new(build_juraid_event_counter_packet(
+            karus_count,
+            elmo_count,
+            sign_remain,
+        ));
+        for user in users.iter() {
+            world.send_to_session_arc(user.session_id, Arc::clone(&arc_event_counter));
+        }
     }
 
     Some(counter_pkt)
@@ -1251,9 +1261,26 @@ pub fn send_active_event_time(world: &WorldState, sid: SessionId) {
             world.send_to_session_owned(sid, pkt);
         }
         100 => {
-            // Juraid: WIZ_EXT_HOOK + u8(JURAID) + u16(karus) + u16(elmo) + u16(remaining)
-            // Note: Only for older client versions (#if __VERSION < 2369)
-            // Most modern clients don't need this, but sending it doesn't hurt.
+            let (k_count, e_count, remain) = erm.read_temple_event(|te| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let remain = if te.sign_remain_seconds > now {
+                    (te.sign_remain_seconds - now) as u16
+                } else {
+                    0
+                };
+                (te.karus_user_count, te.elmorad_user_count, remain)
+            });
+            world.send_to_session_owned(
+                sid,
+                build_juraid_event_counter_packet(k_count, e_count, remain),
+            );
+            world.send_to_session_owned(
+                sid,
+                build_juraid_counter_packet(k_count, e_count, remain),
+            );
         }
         _ => {}
     }
@@ -1312,6 +1339,22 @@ pub fn build_juraid_counter_packet(
 ) -> Packet {
     let mut pkt = Packet::new(Opcode::EXT_HOOK_S2C);
     pkt.write_u8(0xE2); // ExtSub::JURAID
+    pkt.write_u16(karus_count);
+    pkt.write_u16(elmo_count);
+    pkt.write_u16(remaining_secs);
+    pkt
+}
+
+/// Build a v2615-compatible WIZ_EVENT Juraid join counter packet.
+/// Packet format: `[0x5F] [u8:16] [u16:100] [u16:karus] [u16:elmo] [u16:remaining_secs]`
+pub fn build_juraid_event_counter_packet(
+    karus_count: u16,
+    elmo_count: u16,
+    remaining_secs: u16,
+) -> Packet {
+    let mut pkt = Packet::new(Opcode::WizEvent as u8);
+    pkt.write_u8(16); // TEMPLE_EVENT_COUNTER sub-opcode
+    pkt.write_u16(TempleEventType::JuraidMountain as u16);
     pkt.write_u16(karus_count);
     pkt.write_u16(elmo_count);
     pkt.write_u16(remaining_secs);
@@ -2605,6 +2648,19 @@ mod tests {
         assert_eq!(r.read_u16(), Some(6)); // elmo count
         assert_eq!(r.read_u16(), Some(180)); // remaining seconds
         assert!(r.read_u8().is_none()); // no more data
+    }
+
+    #[test]
+    fn test_build_juraid_event_counter_packet() {
+        let pkt = build_juraid_event_counter_packet(4, 6, 180);
+        assert_eq!(pkt.opcode, Opcode::WizEvent as u8);
+        let mut r = ko_protocol::PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u8(), Some(16)); // TEMPLE_EVENT_COUNTER
+        assert_eq!(r.read_u16(), Some(100)); // Juraid
+        assert_eq!(r.read_u16(), Some(4)); // karus count
+        assert_eq!(r.read_u16(), Some(6)); // elmo count
+        assert_eq!(r.read_u16(), Some(180)); // remaining seconds
+        assert!(r.read_u8().is_none());
     }
 
     #[test]

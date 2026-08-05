@@ -361,6 +361,7 @@ pub async fn process_chat_command(
         "borderopen" => handle_temple_event_open(session, TempleEventKind::Bdw)?,
         "borderclose" => handle_temple_event_close(session, TempleEventKind::Bdw)?,
         "juraidopen" => handle_temple_event_open(session, TempleEventKind::Juraid)?,
+        "juraidstart" => handle_juraid_event_start(session)?,
         "juraidclose" => handle_temple_event_close(session, TempleEventKind::Juraid)?,
         "manesopen" => handle_manes_survival_open(session)?,
         "manesstart" => handle_manes_survival_start(session)?,
@@ -1518,7 +1519,7 @@ fn handle_help(session: &mut ClientSession) -> anyhow::Result<()> {
         "cswstart/close - Castle siege",
         "chaosopen/close - Chaos dungeon",
         "borderopen/close - BDW",
-        "juraidopen/close - Juraid",
+        "juraidopen/start/close - Juraid",
         "ftopen/close - Forgotten Temple",
         "cindopen/close - Cinderella",
         "cropen/close - Collection Race",
@@ -1656,21 +1657,27 @@ fn handle_war_open(session: &mut ClientSession, args: &[&str]) -> anyhow::Result
         const EXCLUDED_ZONES: &[u16] = &[81, 82, 83, 84, 85, 87, 92];
         world.broadcast_to_all_excluding_zones(Arc::new(start_pkt), EXCLUDED_ZONES);
 
-        // Also send a chat notice
-        let sid = session.session_id();
-        if let Some(char_info) = world.get_character_info(sid) {
-            let notice_msg = format!("War event '{}' registration open!", war_type);
-            let pkt = super::chat::build_chat_packet(
-                8, // WAR_SYSTEM_CHAT
-                char_info.nation,
-                sid,
-                &char_info.name,
-                &notice_msg,
-                0,
-                0,
-                0,
+        if event_type == crate::systems::event_room::TempleEventType::JuraidMountain {
+            crate::systems::event_system::broadcast_juraid_registration_notice(
+                &world,
+                sign_secs as u16,
             );
-            world.broadcast_to_all(Arc::new(pkt), None);
+        } else {
+            let sid = session.session_id();
+            if let Some(char_info) = world.get_character_info(sid) {
+                let notice_msg = format!("War event '{}' registration open!", war_type);
+                let pkt = super::chat::build_chat_packet(
+                    8, // WAR_SYSTEM_CHAT
+                    char_info.nation,
+                    sid,
+                    &char_info.name,
+                    &notice_msg,
+                    0,
+                    0,
+                    0,
+                );
+                world.broadcast_to_all(Arc::new(pkt), None);
+            }
         }
     }
 
@@ -6134,6 +6141,59 @@ fn handle_temple_event_open(
         kind.name(),
         opts.sign,
         opts.play
+    );
+
+    Ok(())
+}
+
+/// +juraidstart — skip the Juraid registration countdown and enter on next event tick.
+fn handle_juraid_event_start(session: &mut ClientSession) -> anyhow::Result<()> {
+    use crate::systems::event_room::TempleEventType;
+
+    let world = session.world().clone();
+    let erm = &world.event_room_manager;
+    let Some(opts) = erm.get_vroom_opt(TempleEventKind::Juraid.vroom_index()) else {
+        send_help(session, "Juraid Mountain: timer options not loaded.");
+        return Ok(());
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let sign_secs = (opts.sign.max(0) as u64) * 60;
+    let play_secs = (opts.play.max(0) as u64) * 60;
+
+    let updated = erm.update_temple_event(|s| {
+        if s.active_event != TempleEventType::JuraidMountain as i16 {
+            return false;
+        }
+        if s.is_active {
+            return false;
+        }
+
+        s.start_time = now.saturating_sub(sign_secs);
+        s.sign_remain_seconds = now;
+        s.closed_time = now + play_secs;
+        true
+    });
+
+    if !updated {
+        send_help(session, "Juraid Mountain is not in registration phase.");
+        return Ok(());
+    }
+
+    let signed = erm.signed_up_count();
+    crate::systems::event_room::broadcast_event_counter(&world);
+    crate::systems::event_system::broadcast_juraid_force_start_notice(&world, signed);
+    send_help(
+        session,
+        "Juraid Mountain countdown skipped. Event will start on the next tick.",
+    );
+    info!(
+        "[{}] +juraidstart: countdown skipped (signed={})",
+        session.addr(),
+        signed
     );
 
     Ok(())
