@@ -46,6 +46,7 @@ const MAX_ITEMS_REQ: usize = 8;
 const ITEM_UPGRADE: u8 = 2;
 const ITEM_ACCESSORIES: u8 = 3;
 const ITEM_UPGRADE_REBIRTH: u8 = 7;
+const ITEM_UPGRADE_REVERSE: u8 = 14;
 const ITEM_BIFROST_REQ: u8 = 4;
 const ITEM_BIFROST_EXCHANGE: u8 = 5;
 const SPECIAL_PART_SEWING: u8 = 11;
@@ -174,7 +175,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let upgrade_type = reader.read_u8().unwrap_or(0);
 
     match upgrade_type {
-        ITEM_UPGRADE | ITEM_ACCESSORIES | ITEM_UPGRADE_REBIRTH => {
+        ITEM_UPGRADE | ITEM_ACCESSORIES | ITEM_UPGRADE_REBIRTH | ITEM_UPGRADE_REVERSE => {
             item_upgrade(session, &mut reader, upgrade_type).await
         }
         ITEM_BIFROST_REQ => bifrost_piece_req(session).await,
@@ -488,6 +489,12 @@ async fn item_upgrade(
     }
 
     if user_scroll_type == ScrollType::Invalid {
+        debug!(
+            "[{}] ItemUpgrade fail: type={} reason=no recognized scroll raw_items={:?}",
+            session.addr(),
+            upgrade_type,
+            raw_items
+        );
         send_fail(
             session,
             upgrade_type,
@@ -598,6 +605,14 @@ async fn item_upgrade(
 
     // Validate scroll type compatibility (C++ scroll class matching logic)
     if !is_scroll_compatible(item_scroll_type, user_scroll_type) {
+        debug!(
+            "[{}] ItemUpgrade fail: type={} reason=incompatible scroll item_class={} item_scroll={:?} user_scroll={:?}",
+            session.addr(),
+            upgrade_type,
+            item_class,
+            item_scroll_type,
+            user_scroll_type
+        );
         send_fail(
             session,
             upgrade_type,
@@ -739,6 +754,15 @@ async fn item_upgrade(
     }
 
     if !recipe_found || new_item_id == 0 {
+        debug!(
+            "[{}] ItemUpgrade fail: type={} reason=recipe not found origin={} scroll={:?} raw_items={:?} recipe_count={}",
+            session.addr(),
+            upgrade_type,
+            origin_item_id,
+            user_scroll_type,
+            raw_items,
+            recipes.len()
+        );
         send_fail(
             session,
             upgrade_type,
@@ -3579,6 +3603,7 @@ mod tests {
         assert_eq!(ITEM_UPGRADE, 2);
         assert_eq!(ITEM_ACCESSORIES, 3);
         assert_eq!(ITEM_UPGRADE_REBIRTH, 7);
+        assert_eq!(ITEM_UPGRADE_REVERSE, 14);
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
     }
