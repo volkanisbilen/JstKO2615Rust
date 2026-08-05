@@ -211,7 +211,15 @@ async fn item_upgrade(
     let b_type = reader.read_u8().unwrap_or(0);
     let npc_id = reader.read_u32().unwrap_or(0);
 
-    let Some(npc_inst) = world.get_npc_instance(npc_id) else {
+    let selected_npc_id = world
+        .with_session(sid, |h| h.event_nid)
+        .filter(|nid| *nid > 0)
+        .map(|nid| nid as u32);
+    let resolved_npc_id = if world.get_npc_instance(npc_id).is_some() {
+        npc_id
+    } else if let Some(selected_id) = selected_npc_id {
+        selected_id
+    } else {
         send_upgrade_fail(
             session,
             upgrade_type,
@@ -219,7 +227,20 @@ async fn item_upgrade(
             UpgradeResult::Trading,
             false,
             &[],
-            "npc not found",
+            "npc not found and no selected anvil",
+        )
+        .await?;
+        return Ok(());
+    };
+    let Some(npc_inst) = world.get_npc_instance(resolved_npc_id) else {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::Trading,
+            false,
+            &[],
+            "selected anvil not found",
         )
         .await?;
         return Ok(());
@@ -231,7 +252,7 @@ async fn item_upgrade(
         .unwrap_or(0);
     let selected_anvil_ui = world
         .with_session(sid, |h| {
-            h.event_nid == npc_id as i16 && h.event_sid == npc_inst.proto_id as i16
+            h.event_nid == resolved_npc_id as i16 && h.event_sid == npc_inst.proto_id as i16
         })
         .unwrap_or(false);
     let is_template_anvil = npc_type == NPC_ANVIL;
@@ -254,7 +275,7 @@ async fn item_upgrade(
     // object_event_pos range. Some object NPC instance coordinates differ from
     // that object position, so allow the immediate upgrade packet only if this
     // session opened the same anvil UI.
-    let in_npc_range = world.is_in_npc_range(sid, npc_id);
+    let in_npc_range = world.is_in_npc_range(sid, resolved_npc_id);
     let selected_object_anvil = is_object_anvil && selected_anvil_ui;
     if !in_npc_range && !selected_object_anvil {
         send_upgrade_fail(
@@ -1758,7 +1779,8 @@ async fn item_disassemble(
     let mut total_result_weight: i32 = 0;
     for res in &results {
         if let Some(p) = world.get_item(res.item_id) {
-            total_result_weight = total_result_weight.saturating_add((p.weight.unwrap_or(0) as i32).saturating_mul(res.count as i32));
+            total_result_weight = total_result_weight
+                .saturating_add((p.weight.unwrap_or(0) as i32).saturating_mul(res.count as i32));
         }
     }
     if let Some(ch) = world.get_character_info(sid) {
@@ -2165,7 +2187,11 @@ async fn bifrost_piece_exchange(
     if reward_item_type == 4 || reward_item_id == 379_068_000 {
         let (char_name, personal_rank) = world
             .with_session(sid, |h| {
-                let name = h.character.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+                let name = h
+                    .character
+                    .as_ref()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
                 (name, h.personal_rank)
             })
             .unwrap_or_default();
@@ -4134,7 +4160,12 @@ mod tests {
         assert_eq!(ITEM_MIDDLE_CLASS_TRINA, 352900000);
         assert_eq!(ITEM_RING_TRINA, 354000000);
         // All distinct
-        let trinas = [ITEM_TRINA, ITEM_LOW_CLASS_TRINA, ITEM_MIDDLE_CLASS_TRINA, ITEM_RING_TRINA];
+        let trinas = [
+            ITEM_TRINA,
+            ITEM_LOW_CLASS_TRINA,
+            ITEM_MIDDLE_CLASS_TRINA,
+            ITEM_RING_TRINA,
+        ];
         for i in 0..trinas.len() {
             for j in (i + 1)..trinas.len() {
                 assert_ne!(trinas[i], trinas[j]);
@@ -4225,8 +4256,12 @@ mod tests {
         assert_eq!(UpgradeResult::Rental as u8, 5);
         // 6 distinct result codes
         let results = [
-            UpgradeResult::Failed, UpgradeResult::Succeeded, UpgradeResult::Trading,
-            UpgradeResult::NeedCoins, UpgradeResult::NoMatch, UpgradeResult::Rental,
+            UpgradeResult::Failed,
+            UpgradeResult::Succeeded,
+            UpgradeResult::Trading,
+            UpgradeResult::NeedCoins,
+            UpgradeResult::NoMatch,
+            UpgradeResult::Rental,
         ];
         assert_eq!(results.len(), 6);
     }
@@ -4255,10 +4290,17 @@ mod tests {
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
         // All distinct
-        let subs = [ITEM_BIFROST_REQ, ITEM_BIFROST_EXCHANGE, PET_HATCHING, ITEM_SEAL,
-                     PET_IMAGE_TRANSFORM, SPECIAL_PART_SEWING, ITEM_OLDMAN_EXCHANGE];
+        let subs = [
+            ITEM_BIFROST_REQ,
+            ITEM_BIFROST_EXCHANGE,
+            PET_HATCHING,
+            ITEM_SEAL,
+            PET_IMAGE_TRANSFORM,
+            SPECIAL_PART_SEWING,
+            ITEM_OLDMAN_EXCHANGE,
+        ];
         for i in 0..subs.len() {
-            for j in (i+1)..subs.len() {
+            for j in (i + 1)..subs.len() {
                 assert_ne!(subs[i], subs[j]);
             }
         }
