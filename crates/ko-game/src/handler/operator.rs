@@ -6122,6 +6122,9 @@ fn handle_temple_event_open(
         remaining_secs,
     );
     world.broadcast_to_all(Arc::new(pkt), None);
+    if matches!(kind, TempleEventKind::Juraid) {
+        crate::systems::event_system::broadcast_juraid_registration_notice(&world, remaining_secs);
+    }
 
     send_help(session, &format!("{} event started.", kind.name()));
     info!(

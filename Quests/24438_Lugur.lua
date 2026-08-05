@@ -23,7 +23,7 @@ end
 
 if (EVENT == 3013) then
 JURADTIME = CheckJuraidMountainTime(UID);
-if (JURADTIME == true) then
+if (JURADTIME == true or JURADTIME == 1) then
 	JoinEvent(UID);
 	SaveEvent(UID, 695);
 else
@@ -39,4 +39,3 @@ end
 if (EVENT == 3005) then
 	SaveEvent(UID, 694);
 end
-

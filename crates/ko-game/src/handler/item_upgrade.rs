@@ -82,6 +82,27 @@ enum UpgradeResult {
     Rental = 5,
 }
 
+async fn send_upgrade_fail(
+    session: &mut ClientSession,
+    upgrade_type: u8,
+    b_type: u8,
+    result: UpgradeResult,
+    logos: bool,
+    items: &[UpgradeItem],
+    reason: &str,
+) -> anyhow::Result<()> {
+    debug!(
+        "[{}] ItemUpgrade fail: type={} b_type={} result={:?} reason={} items={:?}",
+        session.addr(),
+        upgrade_type,
+        b_type,
+        result,
+        reason,
+        items
+    );
+    send_fail(session, upgrade_type, b_type, result, logos, items).await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i8)]
 enum ScrollType {
@@ -192,35 +213,45 @@ async fn item_upgrade(
 
     // NPC range check — must be near an Anvil NPC
     if !world.is_in_npc_range(sid, npc_id) {
-        send_fail(
+        send_upgrade_fail(
             session,
             upgrade_type,
             b_type,
             UpgradeResult::Trading,
             false,
             &[],
+            "npc out of range",
         )
         .await?;
         return Ok(());
     }
 
-    // NPC type check — must be NPC_ANVIL (24)
+    // NPC type check: accept both template anvils and static object anvils.
     {
         let is_anvil = world
             .get_npc_instance(npc_id)
             .and_then(|inst| world.get_npc_template(inst.proto_id, inst.is_monster))
             .is_some_and(|tmpl| tmpl.npc_type == NPC_ANVIL);
         if !is_anvil {
-            send_fail(
-                session,
-                upgrade_type,
-                b_type,
-                UpgradeResult::Trading,
-                false,
-                &[],
-            )
-            .await?;
-            return Ok(());
+            let npc_type = world
+                .get_npc_instance(npc_id)
+                .and_then(|inst| world.get_npc_template(inst.proto_id, inst.is_monster))
+                .map(|tmpl| tmpl.npc_type)
+                .unwrap_or(0);
+            let is_object_anvil = npc_type == OBJECT_ANVIL;
+            if !is_object_anvil {
+                send_upgrade_fail(
+                    session,
+                    upgrade_type,
+                    b_type,
+                    UpgradeResult::Trading,
+                    false,
+                    &[],
+                    "npc is not an anvil",
+                )
+                .await?;
+                return Ok(());
+            }
         }
     }
 
@@ -242,6 +273,16 @@ async fn item_upgrade(
         }
     }
 
+    debug!(
+        "[{}] ItemUpgrade request: type={} b_type={} npc={} raw_items={:?} parsed_items={:?}",
+        session.addr(),
+        upgrade_type,
+        b_type,
+        npc_id,
+        raw_items,
+        items
+    );
+
     // ── Validation checks (matching C++ order) ──
 
     // Check player state: dead, trading, store open, merchanting, mining
@@ -251,13 +292,44 @@ async fn item_upgrade(
         || world.is_merchanting(sid)
         || world.is_mining(sid)
     {
-        send_fail(
+        send_upgrade_fail(
             session,
             upgrade_type,
             b_type,
             UpgradeResult::Trading,
             false,
             &[],
+            "blocked player state",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // bType must be 1 (execute) or 2 (preview)
+    if !(UPGRADE_TYPE_NORMAL..=UPGRADE_TYPE_PREVIEW).contains(&b_type) {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::NoMatch,
+            false,
+            &[],
+            "invalid b_type",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Must have at least one item
+    if items.is_empty() {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::NoMatch,
+            false,
+            &[],
+            "empty item list",
         )
         .await?;
         return Ok(());
@@ -278,13 +350,14 @@ async fn item_upgrade(
             })
             .unwrap_or(true);
         if blocked {
-            send_fail(
+            send_upgrade_fail(
                 session,
                 upgrade_type,
                 b_type,
                 UpgradeResult::Trading,
                 false,
                 &[],
+                "rate limit",
             )
             .await?;
             return Ok(());
@@ -294,34 +367,6 @@ async fn item_upgrade(
             h.last_upgrade_time = std::time::Instant::now();
             h.upgrade_count = h.upgrade_count.saturating_add(1);
         });
-    }
-
-    // bType must be 1 (execute) or 2 (preview)
-    if !(UPGRADE_TYPE_NORMAL..=UPGRADE_TYPE_PREVIEW).contains(&b_type) {
-        send_fail(
-            session,
-            upgrade_type,
-            b_type,
-            UpgradeResult::NoMatch,
-            false,
-            &[],
-        )
-        .await?;
-        return Ok(());
-    }
-
-    // Must have at least one item
-    if items.is_empty() {
-        send_fail(
-            session,
-            upgrade_type,
-            b_type,
-            UpgradeResult::NoMatch,
-            false,
-            &[],
-        )
-        .await?;
-        return Ok(());
     }
 
     // Validate all items exist in inventory and are not bound/sealed/rented/duplicate

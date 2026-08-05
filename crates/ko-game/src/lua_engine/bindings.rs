@@ -4845,16 +4845,32 @@ fn lua_join_event(lua: &Lua, uid: i32) -> LuaResult<i32> {
     // Add to signed-up users list
     let result = w
         .event_room_manager
-        .add_signed_up_user(char_name, sid, nation);
+        .add_signed_up_user(char_name.clone(), sid, nation);
 
     match result {
         Some(_order) => {
+            w.event_room_manager.update_temple_event(|s| {
+                if nation == 1 {
+                    s.karus_user_count = s.karus_user_count.saturating_add(1);
+                } else {
+                    s.elmorad_user_count = s.elmorad_user_count.saturating_add(1);
+                }
+                s.all_user_count = s.karus_user_count + s.elmorad_user_count;
+            });
+
             // Send join confirmation: WIZ_EVENT + TEMPLE_EVENT_JOIN(8) + success(1) + event_id(100)
             let mut pkt = Packet::new(Opcode::WizEvent as u8);
             pkt.write_u8(TEMPLE_EVENT_JOIN);
             pkt.write_u8(1); // success
             pkt.write_i16(TEMPLE_EVENT_JURAD_MOUNTAIN);
             w.send_to_session_owned(sid, pkt);
+            crate::systems::event_room::broadcast_event_counter(&w);
+            tracing::info!(
+                "Lua JoinEvent: '{}' joined Juraid Mountain (nation={}, total signed up={})",
+                char_name,
+                nation,
+                w.event_room_manager.signed_up_count()
+            );
             Ok(1)
         }
         None => {

@@ -69,6 +69,9 @@ pub fn start_event_system_task(
                     );
                     const EXCLUDED_ZONES: &[u16] = &[81, 82, 83, 84, 85, 87, 92];
                     world.broadcast_to_all_excluding_zones(Arc::new(start_pkt), EXCLUDED_ZONES);
+                    if event_type == TempleEventType::JuraidMountain {
+                        broadcast_juraid_registration_notice(&world, sign_secs as u16);
+                    }
                 }
             }
 
@@ -130,7 +133,7 @@ pub fn start_event_system_task(
                         broadcast_to_bdw_room(&world, room_id, &respawn_pkt);
                     }
                 }
-                EventTickAction::TransitionedToActive(_assigned) => {
+                EventTickAction::TransitionedToActive(assigned) => {
                     // Teleport all room-assigned users into the event zone,
                     // send timer overlay packets, and create parties.
                     //
@@ -138,6 +141,10 @@ pub fn start_event_system_task(
                         event_room::TempleEventType::from_i16(s.active_event)
                     });
                     if let Some(et) = event_type {
+                        if et == TempleEventType::JuraidMountain {
+                            broadcast_juraid_active_notice(&world, *assigned);
+                        }
+
                         // Teleport users + send timer overlay packets
                         event_room::teleport_users_to_event(&world, et);
 
@@ -1145,6 +1152,38 @@ pub fn start_event_system_task(
             }
         }
     })
+}
+
+/// Broadcast the in-game Juraid registration notice alongside the native event UI.
+pub fn broadcast_juraid_registration_notice(world: &WorldState, remaining_secs: u16) {
+    let msg = juraid_registration_notice_message(remaining_secs);
+    let pkt = crate::systems::timed_notice::build_notice_packet(8, &msg);
+    world.broadcast_to_all(Arc::new(pkt), None);
+}
+
+fn broadcast_juraid_active_notice(world: &WorldState, assigned_users: usize) {
+    let msg = if assigned_users == 0 {
+        "Juraid Mountain registration has ended. No players registered.".to_string()
+    } else {
+        format!(
+            "Juraid Mountain has started. {} player(s) have been assigned.",
+            assigned_users
+        )
+    };
+    let pkt = crate::systems::timed_notice::build_notice_packet(8, &msg);
+    world.broadcast_to_all(Arc::new(pkt), None);
+}
+
+fn juraid_registration_notice_message(remaining_secs: u16) -> String {
+    let minutes = ((remaining_secs as u32) + 59) / 60;
+    if minutes > 0 {
+        format!(
+            "Juraid Mountain registration has started. Registration closes in {} minute(s).",
+            minutes
+        )
+    } else {
+        "Juraid Mountain registration has started.".to_string()
+    }
 }
 
 /// Broadcast a packet to all active users in a BDW room.
