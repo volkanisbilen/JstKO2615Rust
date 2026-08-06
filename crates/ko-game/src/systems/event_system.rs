@@ -35,6 +35,64 @@ use ko_db::models::event_schedule::EventRewardRow;
 /// Event tick interval in seconds.
 const EVENT_TICK_INTERVAL_SECS: u64 = 1;
 
+fn spawn_juraid_room_npcs(world: &WorldState) {
+    let rooms = world
+        .event_room_manager
+        .list_rooms(TempleEventType::JuraidMountain);
+    for room_id in rooms {
+        let family = 20 + room_id as i16;
+        let rows = world.get_juraid_respawn_family(family);
+        if rows.is_empty() {
+            tracing::warn!(
+                room_id,
+                family,
+                "Juraid spawn skipped: no monster_juraid_respawn_list rows"
+            );
+            continue;
+        }
+
+        world.despawn_room_npcs(juraid::ZONE_JURAID, room_id as u16);
+
+        let mut bridge_trap = 1u8;
+        let mut spawned = 0usize;
+        for row in rows {
+            let count = row.s_count.max(1) as u16;
+            let is_monster = row.b_type == 0;
+            let trap_number = if row.s_sid == 8110 {
+                let trap = bridge_trap;
+                bridge_trap = bridge_trap.saturating_add(1);
+                trap
+            } else {
+                0
+            };
+
+            let ids = world.spawn_event_npc_ex(
+                row.s_sid as u16,
+                is_monster,
+                juraid::ZONE_JURAID,
+                row.x as f32,
+                row.z as f32,
+                count,
+                room_id as u16,
+                0,
+            );
+            if trap_number > 0 {
+                for nid in &ids {
+                    world.update_npc_trap_number(*nid, trap_number as i16);
+                }
+            }
+            spawned += ids.len();
+        }
+
+        tracing::info!(
+            room_id,
+            family,
+            spawned,
+            "Juraid room NPCs spawned from monster_juraid_respawn_list"
+        );
+    }
+}
+
 /// Start the event system background task.
 /// Spawns a tokio task that calls [`event_tick_at`] every second,
 /// processing BDW, Juraid, and other room-based event state machines.
@@ -147,6 +205,10 @@ pub fn start_event_system_task(
 
                         // Teleport users + send timer overlay packets
                         event_room::teleport_users_to_event(&world, et);
+
+                        if et == TempleEventType::JuraidMountain {
+                            spawn_juraid_room_npcs(&world);
+                        }
 
                         // Create auto-parties for BDW and Juraid (Chaos is FFA).
                         // after TeleportUsers for BDW and Juraid only.
