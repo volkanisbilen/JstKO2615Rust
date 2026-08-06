@@ -78,6 +78,9 @@ const DEFAULT_MELEE_RANGE: f32 = 15.0;
 /// GM weapon item ID — bypasses delay checks.
 const GM_WEAPON_ID: u32 = 389158000;
 
+/// GM test damage override for normal R-attacks.
+const GM_FIXED_DAMAGE: i16 = 30000;
+
 /// Minimum weapon power for bare-hand attacks.
 const MIN_WEAPON_POWER: u16 = 3;
 
@@ -1248,6 +1251,9 @@ fn handle_player_attack(
 
     // ── MAX_DAMAGE cap ─────────────────────────────────────────────────
     damage = damage.min(crate::attack_constants::MAX_DAMAGE as i16);
+    if attacker.authority == 0 {
+        damage = GM_FIXED_DAMAGE;
+    }
 
     // ── Apply damage ───────────────────────────────────────────────────
     if damage <= 0 {
@@ -1743,7 +1749,11 @@ async fn handle_npc_attack(
         }
 
         // Cap at MAX_DAMAGE
-        let damage = damage.min(crate::attack_constants::MAX_DAMAGE as i16);
+        let damage = if is_gm {
+            GM_FIXED_DAMAGE
+        } else {
+            damage.min(crate::attack_constants::MAX_DAMAGE as i16)
+        };
 
         if damage <= 0 {
             broadcast_attack_result(&world, attacker_sid, b_type, ATTACK_FAIL, npc_id, unknown);
@@ -2117,7 +2127,11 @@ async fn handle_npc_attack(
     };
 
     // Cap damage at MAX_DAMAGE — matches player attack path
-    let damage = damage.min(crate::attack_constants::MAX_DAMAGE as i16);
+    let damage = if is_gm {
+        GM_FIXED_DAMAGE
+    } else {
+        damage.min(crate::attack_constants::MAX_DAMAGE as i16)
+    };
 
     if damage <= 0 {
         broadcast_attack_result(&world, attacker_sid, b_type, ATTACK_FAIL, npc_id, unknown);
