@@ -35,6 +35,9 @@ const ITEM_MIDDLE_CLASS_TRINA: u32 = 352900000;
 const ITEM_BLESSING_LOGOS: u32 = 890092000;
 /// Accessory trina piece.
 const ITEM_RING_TRINA: u32 = 354000000;
+const ACCESSORY_UPGRADE_SCROLLS: [i32; 6] = [
+    379159000, 379160000, 379161000, 379162000, 379163000, 379164000,
+];
 const ITEM_BLESSED_ELEMENTAL_SCROLL: u32 = 379025000;
 
 const NPC_ANVIL: u8 = 24;
@@ -1768,6 +1771,85 @@ async fn item_disassemble(
             }
         }
         None => return send_smash_fail(session, response_type, SmashError::Item).await,
+    }
+
+    if response_type == ITEM_ACCESSORY_DISASSEMBLE {
+        let Some(recipe) = world.find_upgrade_recipe_by_new_number_and_req_items(
+            item_id as i32,
+            &ACCESSORY_UPGRADE_SCROLLS,
+        ) else {
+            debug!(
+                "[{}] ItemDisassemble accessory fail: no reverse recipe for item_id={}",
+                session.addr(),
+                item_id
+            );
+            return send_smash_fail(session, response_type, SmashError::Item).await;
+        };
+
+        let reward_item_id = recipe.origin_number as u32;
+        if reward_item_id == 0 || world.get_item(reward_item_id).is_none() {
+            return send_smash_fail(session, response_type, SmashError::Item).await;
+        }
+
+        let reward_count: u16 = 3;
+        let mut free_slots = 1u8; // the source slot becomes free after removal
+        for i in 0..HAVE_MAX {
+            if let Some(inv_slot) = world.get_inventory_slot(sid, SLOT_MAX + i) {
+                if inv_slot.item_id == 0 {
+                    free_slots += 1;
+                    if free_slots >= reward_count as u8 {
+                        break;
+                    }
+                }
+            }
+        }
+        if free_slots < reward_count as u8 {
+            return send_smash_fail(session, response_type, SmashError::Inventory).await;
+        }
+
+        let reward_weight = world
+            .get_item(reward_item_id)
+            .map(|p| (p.weight.unwrap_or(0) as i32).saturating_mul(reward_count as i32))
+            .unwrap_or(0);
+        if let Some(ch) = world.get_character_info(sid) {
+            if ch.item_weight + reward_weight > ch.max_weight {
+                return send_smash_fail(session, response_type, SmashError::Item).await;
+            }
+        }
+
+        if !world.gold_lose(sid, req_coins) {
+            return send_smash_fail(session, response_type, SmashError::Item).await;
+        }
+
+        world.update_inventory(sid, |inv| {
+            if actual_idx < inv.len() {
+                inv[actual_idx] = Default::default();
+                true
+            } else {
+                false
+            }
+        });
+
+        let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+        pkt.write_u8(response_type);
+        pkt.write_u16(SmashError::Success as u16);
+        pkt.write_u32(item_id);
+        pkt.write_u8(slot);
+        pkt.write_u16(reward_count);
+
+        for _ in 0..reward_count {
+            if let Some(slot_idx) = world.find_slot_for_item(sid, reward_item_id, 1) {
+                if slot_idx >= SLOT_MAX && world.give_item(sid, reward_item_id, 1) {
+                    pkt.write_u32(reward_item_id);
+                    pkt.write_u8((slot_idx - SLOT_MAX) as u8);
+                    pkt.write_u16(1);
+                }
+            }
+        }
+
+        session.send_packet(&pkt).await?;
+        world.set_user_ability(sid);
+        return Ok(());
     }
 
     // Determine index range for the item class
