@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use crate::session::{ClientSession, SessionState};
 use crate::systems::bdw;
-use crate::systems::event_room::TempleEventType;
+use crate::systems::event_room::{self, TempleEventType};
 use crate::world::types::{
     ZONE_BATTLE6, ZONE_CAITHAROS_ARENA, ZONE_CHAOS_DUNGEON, ZONE_DELOS_CASTELLAN,
     ZONE_DESPERATION_ABYSS, ZONE_DRAGON_CAVE, ZONE_DRAKI_TOWER, ZONE_DUNGEON_DEFENCE,
@@ -959,7 +959,7 @@ pub fn rob_chaos_skill_items(world: &WorldState, sid: SessionId) {
 /// nation in the appropriate Juraid room.
 /// This is a public helper that other handlers can call. The actual wiring in
 /// attack.rs::handle_npc_death should call this when the NPC dies in zone 87.
-pub fn track_juraid_monster_kill(world: &WorldState, killer_sid: SessionId) {
+pub fn track_juraid_monster_kill(world: &WorldState, killer_sid: SessionId, killed_npc_sid: u16) {
     // Check if Juraid is active
     let is_juraid_active = world
         .event_room_manager
@@ -990,26 +990,83 @@ pub fn track_juraid_monster_kill(world: &WorldState, killer_sid: SessionId) {
             .is_some_and(|room| room.get_user(&killer_name).is_some());
 
         if found {
-            // We need to update both the EventRoom scores and the JuraidRoomState
-            if let Some(mut room) = world
-                .event_room_manager
-                .get_room_mut(TempleEventType::JuraidMountain, room_id)
-            {
+            let (k_score, e_score) = {
+                let Some(mut room) = world
+                    .event_room_manager
+                    .get_room_mut(TempleEventType::JuraidMountain, room_id)
+                else {
+                    return;
+                };
+                if room.finish_packet_sent {
+                    return;
+                }
                 // Update EventRoom scores directly
                 if killer_nation == 1 {
                     room.karus_score += 1;
                 } else {
                     room.elmorad_score += 1;
                 }
+                (room.karus_score, room.elmorad_score)
+            };
+
+            // Broadcast TEMPLE_SCREEN scoreboard to room users after every monster kill.
+            let arc_screen = Arc::new(event_room::build_temple_screen_packet(k_score, e_score));
+            if let Some(room) = world
+                .event_room_manager
+                .get_room(TempleEventType::JuraidMountain, room_id)
+            {
+                for u in room.karus_users.values().filter(|u| !u.logged_out) {
+                    world.send_to_session_arc(u.session_id, Arc::clone(&arc_screen));
+                }
+                for u in room.elmorad_users.values().filter(|u| !u.logged_out) {
+                    world.send_to_session_arc(u.session_id, Arc::clone(&arc_screen));
+                }
+            }
+
+            // Fast progression for 2615 Juraid rooms: GM/test kills can clear a room
+            // much faster than the original 20/30/40 minute bridge timers.
+            let nation_score = if killer_nation == 1 { k_score } else { e_score };
+            for (bridge_idx, threshold) in [4, 8, 12].iter().enumerate() {
+                if nation_score >= *threshold {
+                    let mut bridge_state = world
+                        .get_juraid_bridge_state(room_id)
+                        .unwrap_or_default();
+                    let opened_k = bridge_state.open_bridge(bridge_idx, 1);
+                    let opened_e = bridge_state.open_bridge(bridge_idx, 2);
+                    if opened_k || opened_e {
+                        world.set_juraid_bridge_state(room_id, bridge_state);
+                        world.broadcast_juraid_bridge_open(bridge_idx, room_id as u16);
+                        tracing::info!(
+                            "Juraid room {} bridge {} opened by kill threshold score={}",
+                            room_id,
+                            bridge_idx,
+                            nation_score,
+                        );
+                    }
+                }
+            }
+
+            // Deva Bird death ends Juraid. Use the existing manual-close path so the
+            // event tick performs winner calculation, cleanup and teleport handling.
+            if killed_npc_sid == 8106 {
+                world.event_room_manager.update_temple_event(|s| {
+                    s.manual_close = true;
+                    s.manual_closed_time = 0;
+                });
+                tracing::info!(
+                    "Juraid Deva Bird killed by '{}'; event finish requested",
+                    killer_name,
+                );
+            }
+
                 tracing::info!(
                     "Juraid kill: player '{}' (nation={}) killed monster in room {}, scores: K={} E={}",
                     killer_name,
                     killer_nation,
                     room_id,
-                    room.karus_score,
-                    room.elmorad_score,
+                    k_score,
+                    e_score,
                 );
-            }
             return;
         }
     }
