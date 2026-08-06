@@ -879,6 +879,20 @@ impl WorldState {
 
         spawned_ids
     }
+
+    /// Update an event NPC trap number, used by Juraid bridge gates.
+    pub fn update_npc_trap_number(&self, nid: NpcId, trap_number: i16) {
+        if let Some(entry) = self.npc_instances.get(&nid) {
+            let old = entry.value().clone();
+            let updated = Arc::new(NpcInstance {
+                trap_number,
+                ..(*old).clone()
+            });
+            drop(entry);
+            self.npc_instances.insert(nid, updated);
+        }
+    }
+
     /// Set duration (auto-death timer) on a spawned NPC.
     ///
     /// After `duration_secs` elapses, the NPC AI tick will automatically kill it.
