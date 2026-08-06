@@ -202,7 +202,9 @@ mod tests {
     fn test_req_userin_c2s_data_length() {
         let mut pkt = Packet::new(Opcode::WizReqUserIn as u8);
         pkt.write_u16(4);
-        for i in 0..4u32 { pkt.write_u32(i + 1); }
+        for i in 0..4u32 {
+            pkt.write_u32(i + 1);
+        }
         assert_eq!(pkt.data.len(), 18); // 2 + 4*4
     }
 

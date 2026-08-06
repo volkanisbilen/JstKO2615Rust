@@ -70,7 +70,11 @@ impl CombatSnapshot {
             6 => self.equipped_stats.poison_r as i32,
             _ => 0,
         };
-        let buff_r = self.buff_elem_r.get(attribute as usize).copied().unwrap_or(0);
+        let buff_r = self
+            .buff_elem_r
+            .get(attribute as usize)
+            .copied()
+            .unwrap_or(0);
         let resistance_bonus = self.equipped_stats.resistance_bonus as i32;
         let pct = match attribute {
             1 => self.pct_fire_r,
@@ -1358,7 +1362,11 @@ impl WorldState {
     ///
     /// Same logic as `get_plus_damage` but avoids DashMap session reads by using
     /// item IDs extracted during `snapshot_combat()`.
-    pub fn get_plus_damage_from_item_ids(&self, left_hand_item_id: u32, right_hand_item_id: u32) -> f64 {
+    pub fn get_plus_damage_from_item_ids(
+        &self,
+        left_hand_item_id: u32,
+        right_hand_item_id: u32,
+    ) -> f64 {
         let ds = match self.damage_settings.read().as_ref() {
             Some(ds) => ds.clone(),
             None => return 1.0,
@@ -1668,7 +1676,9 @@ impl WorldState {
             }
 
             // Broadcast to 3x3 region
-            if let Some((pos, sender_event_room)) = self.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, sender_event_room)) =
+                self.with_session(sid, |h| (h.position, h.event_room))
+            {
                 self.broadcast_to_3x3(
                     pos.zone_id,
                     pos.region_x,
@@ -2990,14 +3000,26 @@ mod blink_duration_tests {
             },
             buff_elem_r: [0, 100, 0, 0, 0, 0, 0],
             pct_fire_r: 100,
-            pct_cold_r: 0, pct_lightning_r: 0, pct_magic_r: 0,
-            pct_disease_r: 0, pct_poison_r: 0,
-            attack_amount: 0, player_attack_amount: 0,
-            ac_amount: 0, ac_pct: 0, ac_sour: 0,
-            block_physical: false, dagger_r_amount: 0, bow_r_amount: 0,
-            mirror_damage: false, mirror_damage_type: false, mirror_amount: 0,
-            right_hand_item_id: 0, left_hand_item_id: 0,
-            perk_levels: [0; 13], magic_attack_amount: 0,
+            pct_cold_r: 0,
+            pct_lightning_r: 0,
+            pct_magic_r: 0,
+            pct_disease_r: 0,
+            pct_poison_r: 0,
+            attack_amount: 0,
+            player_attack_amount: 0,
+            ac_amount: 0,
+            ac_pct: 0,
+            ac_sour: 0,
+            block_physical: false,
+            dagger_r_amount: 0,
+            bow_r_amount: 0,
+            mirror_damage: false,
+            mirror_damage_type: false,
+            mirror_amount: 0,
+            right_hand_item_id: 0,
+            left_hand_item_id: 0,
+            perk_levels: [0; 13],
+            magic_attack_amount: 0,
         };
         assert_eq!(snap2.total_resistance(1), 115);
     }
@@ -3066,14 +3088,26 @@ mod blink_duration_tests {
             equipped_stats: es,
             buff_elem_r: [0, 20, 0, 0, 0, 0, 0],
             pct_fire_r: 100,
-            pct_cold_r: 0, pct_lightning_r: 0, pct_magic_r: 0,
-            pct_disease_r: 0, pct_poison_r: 0,
-            attack_amount: 0, player_attack_amount: 0,
-            ac_amount: 0, ac_pct: 0, ac_sour: 0,
-            block_physical: false, dagger_r_amount: 0, bow_r_amount: 0,
-            mirror_damage: false, mirror_damage_type: false, mirror_amount: 0,
-            right_hand_item_id: 0, left_hand_item_id: 0,
-            perk_levels: [0; 13], magic_attack_amount: 0,
+            pct_cold_r: 0,
+            pct_lightning_r: 0,
+            pct_magic_r: 0,
+            pct_disease_r: 0,
+            pct_poison_r: 0,
+            attack_amount: 0,
+            player_attack_amount: 0,
+            ac_amount: 0,
+            ac_pct: 0,
+            ac_sour: 0,
+            block_physical: false,
+            dagger_r_amount: 0,
+            bow_r_amount: 0,
+            mirror_damage: false,
+            mirror_damage_type: false,
+            mirror_amount: 0,
+            right_hand_item_id: 0,
+            left_hand_item_id: 0,
+            perk_levels: [0; 13],
+            magic_attack_amount: 0,
         };
         // (50+20)*100/100 + 10*100/100 = 70 + 10 = 80
         assert_eq!(snap.total_resistance(1), 80);
@@ -3087,14 +3121,27 @@ mod blink_duration_tests {
         let snap = CombatSnapshot {
             equipped_stats: es,
             buff_elem_r: [0; 7],
-            pct_fire_r: 0, pct_cold_r: 50, pct_lightning_r: 0,
-            pct_magic_r: 0, pct_disease_r: 0, pct_poison_r: 0,
-            attack_amount: 0, player_attack_amount: 0,
-            ac_amount: 0, ac_pct: 0, ac_sour: 0,
-            block_physical: false, dagger_r_amount: 0, bow_r_amount: 0,
-            mirror_damage: false, mirror_damage_type: false, mirror_amount: 0,
-            right_hand_item_id: 0, left_hand_item_id: 0,
-            perk_levels: [0; 13], magic_attack_amount: 0,
+            pct_fire_r: 0,
+            pct_cold_r: 50,
+            pct_lightning_r: 0,
+            pct_magic_r: 0,
+            pct_disease_r: 0,
+            pct_poison_r: 0,
+            attack_amount: 0,
+            player_attack_amount: 0,
+            ac_amount: 0,
+            ac_pct: 0,
+            ac_sour: 0,
+            block_physical: false,
+            dagger_r_amount: 0,
+            bow_r_amount: 0,
+            mirror_damage: false,
+            mirror_damage_type: false,
+            mirror_amount: 0,
+            right_hand_item_id: 0,
+            left_hand_item_id: 0,
+            perk_levels: [0; 13],
+            magic_attack_amount: 0,
         };
         // (100+0)*50/100 + 0*50/100 = 50
         assert_eq!(snap.total_resistance(2), 50);
@@ -3106,14 +3153,27 @@ mod blink_duration_tests {
         let snap = CombatSnapshot {
             equipped_stats: EquippedStats::default(),
             buff_elem_r: [0; 7],
-            pct_fire_r: 100, pct_cold_r: 100, pct_lightning_r: 100,
-            pct_magic_r: 100, pct_disease_r: 100, pct_poison_r: 100,
-            attack_amount: 0, player_attack_amount: 0,
-            ac_amount: 0, ac_pct: 0, ac_sour: 0,
-            block_physical: false, dagger_r_amount: 0, bow_r_amount: 0,
-            mirror_damage: false, mirror_damage_type: false, mirror_amount: 0,
-            right_hand_item_id: 0, left_hand_item_id: 0,
-            perk_levels: [0; 13], magic_attack_amount: 0,
+            pct_fire_r: 100,
+            pct_cold_r: 100,
+            pct_lightning_r: 100,
+            pct_magic_r: 100,
+            pct_disease_r: 100,
+            pct_poison_r: 100,
+            attack_amount: 0,
+            player_attack_amount: 0,
+            ac_amount: 0,
+            ac_pct: 0,
+            ac_sour: 0,
+            block_physical: false,
+            dagger_r_amount: 0,
+            bow_r_amount: 0,
+            mirror_damage: false,
+            mirror_damage_type: false,
+            mirror_amount: 0,
+            right_hand_item_id: 0,
+            left_hand_item_id: 0,
+            perk_levels: [0; 13],
+            magic_attack_amount: 0,
         };
         // All 6 elements should be 0 with zero stats
         for attr in 1..=6u8 {
@@ -3149,12 +3209,20 @@ mod blink_duration_tests {
     fn test_is_lockable_scroll_types() {
         let lockable = [1, 2, 4, 6, 7, 48, 171];
         for bt in &lockable {
-            assert!(WorldState::is_lockable_scroll(*bt), "buff_type {} should be lockable", bt);
+            assert!(
+                WorldState::is_lockable_scroll(*bt),
+                "buff_type {} should be lockable",
+                bt
+            );
         }
         // Non-lockable types
         let not_lockable = [0, 3, 5, 8, 13, 14, 19, 22, 100, 170, 172];
         for bt in &not_lockable {
-            assert!(!WorldState::is_lockable_scroll(*bt), "buff_type {} should NOT be lockable", bt);
+            assert!(
+                !WorldState::is_lockable_scroll(*bt),
+                "buff_type {} should NOT be lockable",
+                bt
+            );
         }
     }
 

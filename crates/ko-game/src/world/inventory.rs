@@ -2265,7 +2265,7 @@ mod tests {
         assert_eq!(r.read_u16(), Some(duration as u16)); // durability
         assert_eq!(r.read_u32(), Some(0)); // reserved
         assert_eq!(r.read_u32(), Some(0)); // expiration
-        // v2600: no trailing u16 padding (sniff verified)
+                                           // v2600: no trailing u16 padding (sniff verified)
 
         // Verify WIZ_WEIGHT_CHANGE packet (C++ SendStackChange calls SendItemWeight)
         let weight_pkt = rx.try_recv().expect("should have received weight packet");
@@ -2298,7 +2298,7 @@ mod tests {
         assert_eq!(r.read_u16(), Some(duration as u16)); // durability unchanged
         assert_eq!(r.read_u32(), Some(0)); // reserved
         assert_eq!(r.read_u32(), Some(0)); // expiration
-        // v2600: no trailing u16 padding (sniff verified)
+                                           // v2600: no trailing u16 padding (sniff verified)
 
         // Verify WIZ_WEIGHT_CHANGE packet
         let weight_pkt = rx.try_recv().expect("should have received weight packet");
@@ -5977,8 +5977,16 @@ mod tests {
         let inv = vec![UserItemSlot::default(); INVENTORY_TOTAL];
         world.set_inventory(1, inv);
         world.update_inventory(1, |inv| {
-            inv[14] = UserItemSlot { item_id: 100000, count: 1, ..Default::default() };
-            inv[15] = UserItemSlot { item_id: 200000, count: 1, ..Default::default() };
+            inv[14] = UserItemSlot {
+                item_id: 100000,
+                count: 1,
+                ..Default::default()
+            };
+            inv[15] = UserItemSlot {
+                item_id: 200000,
+                count: 1,
+                ..Default::default()
+            };
             true
         });
         assert_eq!(world.count_free_inventory_slots(1), 26); // 28 - 2
@@ -5991,20 +5999,67 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         world.register_session(1, tx);
         let info = CharacterInfo {
-            session_id: 1, name: "GoldTest".into(), nation: 1, race: 1,
-            class: 101, level: 60, face: 1, hair_rgb: 0, rank: 0, title: 0,
-            max_hp: 500, hp: 500, max_mp: 200, mp: 200, max_sp: 0, sp: 0,
-            equipped_items: [0; 14], bind_zone: 21, bind_x: 0.0, bind_z: 0.0,
-            str: 60, sta: 60, dex: 60, intel: 60, cha: 60, free_points: 0,
-            skill_points: [0u8; 10], gold: 100, loyalty: 0, loyalty_monthly: 0,
-            authority: 1, knights_id: 0, fame: 0, party_id: None,
-            exp: 0, max_exp: 0, exp_seal_status: false, sealed_exp: 0,
-            item_weight: 0, max_weight: 5000, res_hp_type: 0x01,
-            rival_id: -1, rival_expiry_time: 0, anger_gauge: 0,
-            manner_point: 0, rebirth_level: 0, reb_str: 0, reb_sta: 0,
-            reb_dex: 0, reb_intel: 0, reb_cha: 0, cover_title: 0,
+            session_id: 1,
+            name: "GoldTest".into(),
+            nation: 1,
+            race: 1,
+            class: 101,
+            level: 60,
+            face: 1,
+            hair_rgb: 0,
+            rank: 0,
+            title: 0,
+            max_hp: 500,
+            hp: 500,
+            max_mp: 200,
+            mp: 200,
+            max_sp: 0,
+            sp: 0,
+            equipped_items: [0; 14],
+            bind_zone: 21,
+            bind_x: 0.0,
+            bind_z: 0.0,
+            str: 60,
+            sta: 60,
+            dex: 60,
+            intel: 60,
+            cha: 60,
+            free_points: 0,
+            skill_points: [0u8; 10],
+            gold: 100,
+            loyalty: 0,
+            loyalty_monthly: 0,
+            authority: 1,
+            knights_id: 0,
+            fame: 0,
+            party_id: None,
+            exp: 0,
+            max_exp: 0,
+            exp_seal_status: false,
+            sealed_exp: 0,
+            item_weight: 0,
+            max_weight: 5000,
+            res_hp_type: 0x01,
+            rival_id: -1,
+            rival_expiry_time: 0,
+            anger_gauge: 0,
+            manner_point: 0,
+            rebirth_level: 0,
+            reb_str: 0,
+            reb_sta: 0,
+            reb_dex: 0,
+            reb_intel: 0,
+            reb_cha: 0,
+            cover_title: 0,
         };
-        let pos = Position { zone_id: 21, x: 50.0, y: 0.0, z: 50.0, region_x: 0, region_z: 0 };
+        let pos = Position {
+            zone_id: 21,
+            x: 50.0,
+            y: 0.0,
+            z: 50.0,
+            region_x: 0,
+            region_z: 0,
+        };
         world.register_ingame(1, info, pos);
         let inv = vec![UserItemSlot::default(); INVENTORY_TOTAL];
         world.set_inventory(1, inv);
@@ -6025,10 +6080,22 @@ mod tests {
     /// Weapon kind constants: 2H variants are always 1H + 1.
     #[test]
     fn test_weapon_kind_2h_offset() {
-        assert_eq!(WorldState::WEAPON_KIND_2H_SWORD, WorldState::WEAPON_KIND_1H_SWORD + 1);
-        assert_eq!(WorldState::WEAPON_KIND_2H_AXE, WorldState::WEAPON_KIND_1H_AXE + 1);
-        assert_eq!(WorldState::WEAPON_KIND_2H_CLUP, WorldState::WEAPON_KIND_1H_CLUP + 1);
-        assert_eq!(WorldState::WEAPON_KIND_2H_SPEAR, WorldState::WEAPON_KIND_1H_SPEAR + 1);
+        assert_eq!(
+            WorldState::WEAPON_KIND_2H_SWORD,
+            WorldState::WEAPON_KIND_1H_SWORD + 1
+        );
+        assert_eq!(
+            WorldState::WEAPON_KIND_2H_AXE,
+            WorldState::WEAPON_KIND_1H_AXE + 1
+        );
+        assert_eq!(
+            WorldState::WEAPON_KIND_2H_CLUP,
+            WorldState::WEAPON_KIND_1H_CLUP + 1
+        );
+        assert_eq!(
+            WorldState::WEAPON_KIND_2H_SPEAR,
+            WorldState::WEAPON_KIND_1H_SPEAR + 1
+        );
     }
 
     /// Weapon kind range: dagger (11) is lowest, mace (181) is highest.
@@ -6038,11 +6105,16 @@ mod tests {
         assert_eq!(WorldState::WEAPON_KIND_MACE, 181);
         // All weapon kinds are distinct and positive
         let kinds = [
-            WorldState::WEAPON_KIND_DAGGER, WorldState::WEAPON_KIND_1H_SWORD,
-            WorldState::WEAPON_KIND_2H_SWORD, WorldState::WEAPON_KIND_1H_AXE,
-            WorldState::WEAPON_KIND_2H_AXE, WorldState::WEAPON_KIND_BOW,
-            WorldState::WEAPON_KIND_CROSSBOW, WorldState::WEAPON_KIND_STAFF,
-            WorldState::WEAPON_KIND_JAMADHAR, WorldState::WEAPON_KIND_MACE,
+            WorldState::WEAPON_KIND_DAGGER,
+            WorldState::WEAPON_KIND_1H_SWORD,
+            WorldState::WEAPON_KIND_2H_SWORD,
+            WorldState::WEAPON_KIND_1H_AXE,
+            WorldState::WEAPON_KIND_2H_AXE,
+            WorldState::WEAPON_KIND_BOW,
+            WorldState::WEAPON_KIND_CROSSBOW,
+            WorldState::WEAPON_KIND_STAFF,
+            WorldState::WEAPON_KIND_JAMADHAR,
+            WorldState::WEAPON_KIND_MACE,
         ];
         assert!(kinds.iter().all(|&k| k > 0));
     }
@@ -6081,7 +6153,10 @@ mod tests {
         assert_eq!(WorldState::COSP_MAX, 11);
         assert_eq!(WorldState::INVENTORY_MBAG, 53);
         // MBAG = COSP + COSP_MAX
-        assert_eq!(WorldState::INVENTORY_MBAG, WorldState::INVENTORY_COSP + WorldState::COSP_MAX);
+        assert_eq!(
+            WorldState::INVENTORY_MBAG,
+            WorldState::INVENTORY_COSP + WorldState::COSP_MAX
+        );
     }
 
     /// Bag slots 1 and 2 are adjacent at positions 51 and 52.
@@ -6107,7 +6182,10 @@ mod tests {
         assert_eq!(WorldState::ITEM_TYPE_MP_DRAIN, 7);
         assert_eq!(WorldState::ITEM_TYPE_MIRROR_DAMAGE, 8);
         // 8 contiguous types (1-8)
-        assert_eq!(WorldState::ITEM_TYPE_MIRROR_DAMAGE - WorldState::ITEM_TYPE_FIRE, 7);
+        assert_eq!(
+            WorldState::ITEM_TYPE_MIRROR_DAMAGE - WorldState::ITEM_TYPE_FIRE,
+            7
+        );
     }
 
     /// Armor slot indices: Helmet(7), Pauldron(5), Pads(6), Gloves(8), Boots(9).

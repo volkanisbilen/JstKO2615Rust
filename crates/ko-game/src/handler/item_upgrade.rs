@@ -20,7 +20,7 @@ use tracing::{debug, warn};
 
 use crate::session::{ClientSession, SessionState};
 use crate::world::{
-    PetState, ITEM_FLAG_BOUND, ITEM_FLAG_CHAR_SEAL, ITEM_FLAG_DUPLICATE, ITEM_FLAG_NONE,
+    PetState, UserItemSlot, ITEM_FLAG_BOUND, ITEM_FLAG_CHAR_SEAL, ITEM_FLAG_DUPLICATE, ITEM_FLAG_NONE,
     ITEM_FLAG_NOT_BOUND, ITEM_FLAG_RENTED, ITEM_FLAG_SEALED, ZONE_MORADON, ZONE_MORADON2,
     ZONE_MORADON3, ZONE_MORADON4, ZONE_MORADON5,
 };
@@ -51,6 +51,8 @@ const ITEM_BIFROST_EXCHANGE: u8 = 5;
 const SPECIAL_PART_SEWING: u8 = 11;
 const ITEM_OLDMAN_EXCHANGE: u8 = 13;
 const ITEM_SEAL: u8 = 8;
+const ITEM_DISASSEMBLE: u8 = 14;
+const ITEM_REVERSE_RESTORE: u8 = 15;
 
 // ── Item Seal sub-opcodes ────────────────────────────────────────────
 const SEAL_LOCK: u8 = 1;
@@ -114,6 +116,8 @@ enum ScrollType {
     Class = 5,
     HighToRebirth = 15,
     Accessories = 8,
+    AccessoryDisassemble = 16,
+    RebirthRestoration = 17,
 }
 
 // Item flag constants imported from crate::world (ITEM_FLAG_BOUND, ITEM_FLAG_DUPLICATE, ITEM_FLAG_SEALED, ITEM_FLAG_RENTED).
@@ -149,6 +153,9 @@ fn get_scroll_type(scroll_id: u32) -> ScrollType {
 
         379152000 => ScrollType::Class,
 
+        810322000 => ScrollType::RebirthRestoration,
+        810325000 => ScrollType::AccessoryDisassemble,
+
         _ => ScrollType::Invalid,
     }
 }
@@ -177,6 +184,8 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         ITEM_UPGRADE | ITEM_ACCESSORIES | ITEM_UPGRADE_REBIRTH => {
             item_upgrade(session, &mut reader, upgrade_type).await
         }
+        ITEM_DISASSEMBLE => item_disassemble_v2615(session, &mut reader).await,
+        ITEM_REVERSE_RESTORE => item_reverse_restore(session, &mut reader).await,
         ITEM_BIFROST_REQ => bifrost_piece_req(session).await,
         ITEM_BIFROST_EXCHANGE => bifrost_piece_exchange(session, &mut reader).await,
         PET_HATCHING => pet_hatching(session, &mut reader).await,
@@ -2212,6 +2221,467 @@ async fn bifrost_piece_exchange(
         reward_item_id,
         effect_type
     );
+
+    Ok(())
+}
+
+// ── Item Disassemble v2615 (Sub-opcode 14) ──────────────────────────────
+// Disassemble an item using a disassemble scroll (810322000 or 810325000).
+// This is a simplified version that uses the item_smash table for accessories.
+
+async fn item_disassemble_v2615(
+    session: &mut ClientSession,
+    reader: &mut PacketReader<'_>,
+) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    // Parse packet: [u8 bType] [u32 npcID] [10x (i32 itemID, i8 slot)]
+    let b_type = reader.read_u8().unwrap_or(0);
+    let _npc_id = reader.read_u32().unwrap_or(0);
+
+    let mut raw_items = [0u32; 10];
+    let mut slots = [0i8; 10];
+    for i in 0..10 {
+        raw_items[i] = reader.read_u32().unwrap_or(0) as u32;
+        slots[i] = reader.read_i8().unwrap_or(-1);
+    }
+
+    // First item is the target item to disassemble
+    let target_item_id = raw_items[0];
+    let target_slot = slots[0];
+
+    if target_item_id == 0 || target_slot < 0 {
+        debug!(
+            "[{}] ItemDisassemble v2615: invalid target item_id={} slot={}",
+            session.addr(),
+            target_item_id,
+            target_slot
+        );
+        send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+        return Ok(());
+    }
+
+    // Second item is the scroll
+    let scroll_id = raw_items[1];
+    let scroll_type = get_scroll_type(scroll_id);
+
+    if scroll_type == ScrollType::Invalid {
+        debug!(
+            "[{}] ItemDisassemble v2615: unknown scroll_id={}",
+            session.addr(),
+            scroll_id
+        );
+        send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+        return Ok(());
+    }
+
+    // Validate scroll type
+    if scroll_type != ScrollType::AccessoryDisassemble && scroll_type != ScrollType::RebirthRestoration {
+        debug!(
+            "[{}] ItemDisassemble v2615: wrong scroll type {:?} for scroll_id={}",
+            session.addr(),
+            scroll_type,
+            scroll_id
+        );
+        send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+        return Ok(());
+    }
+
+    // Get target item from inventory
+    let actual_idx = SLOT_MAX + target_slot as usize;
+    let target_item = match world.get_inventory_slot(sid, actual_idx) {
+        Some(slot) => slot,
+        None => {
+            debug!(
+                "[{}] ItemDisassemble v2615: target item not found at slot {}",
+                session.addr(),
+                actual_idx
+            );
+            send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+    };
+
+    if target_item.item_id != target_item_id {
+        debug!(
+            "[{}] ItemDisassemble v2615: item mismatch at slot {} (expected {} got {})",
+            session.addr(),
+            actual_idx,
+            target_item_id,
+            target_item.item_id
+        );
+        send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+        return Ok(());
+    }
+
+    // Get target item proto
+    let target_proto = match world.get_item(target_item_id) {
+        Some(p) => p,
+        None => {
+            debug!(
+                "[{}] ItemDisassemble v2615: target item proto not found for id={}",
+                session.addr(),
+                target_item_id
+            );
+            send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+    };
+
+    // For AccessoryDisassemble: use item_smash table (not implemented yet)
+    // For RebirthRestoration: use new_upgrade table with reverse recipes
+    let result_item_id = if scroll_type == ScrollType::AccessoryDisassemble {
+        // TODO: Implement accessory disassembly using item_smash table
+        // For now, return error
+        debug!(
+            "[{}] ItemDisassemble v2615: accessory disassembly not yet implemented",
+            session.addr()
+        );
+        send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+        return Ok(());
+    } else {
+        // RebirthRestoration: reverse the item back to normal
+        // Look up in new_upgrade table for reverse recipes (req_item = 379257000)
+        let recipes = match world.get_upgrade_recipes(target_item_id as i32) {
+            Some(r) => r,
+            None => {
+                debug!(
+                    "[{}] ItemDisassemble v2615: no reverse recipe for item_id={}",
+                    session.addr(),
+                    target_item_id
+                );
+                send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+                return Ok(());
+            }
+        };
+
+        // Filter for reverse recipes (req_item = 379257000 for Rebirth Restoration)
+        let reverse_recipes: Vec<_> = recipes
+            .iter()
+            .filter(|r| r.req_item == 379257000)
+            .collect();
+
+        if reverse_recipes.is_empty() {
+            debug!(
+                "[{}] ItemDisassemble v2615: no reverse recipe (req_item=379257000) for item_id={}",
+                session.addr(),
+                target_item_id
+            );
+            send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+
+        reverse_recipes[0].new_number as u32
+    };
+
+    // Validate result item
+    let result_proto = match world.get_item(result_item_id) {
+        Some(p) => p,
+        None => {
+            debug!(
+                "[{}] ItemDisassemble v2615: result item proto not found for id={}",
+                session.addr(),
+                result_item_id
+            );
+            send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+    };
+
+    // Check weight
+    let result_weight = result_proto.weight.unwrap_or(0) as u32;
+    if let Some(ch) = world.get_character_info(sid) {
+        let current_weight = ch.item_weight as u32;
+        let target_weight = target_item.durability as u32; // Use durability as weight proxy
+        if current_weight + result_weight > ch.max_weight as u32 + target_weight {
+            debug!(
+                "[{}] ItemDisassemble v2615: weight check failed",
+                session.addr()
+            );
+            send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+    }
+
+    // Perform disassembly
+    if b_type == UPGRADE_TYPE_NORMAL {
+        // Remove target item and scroll
+        world.update_inventory(sid, |inv| {
+            if actual_idx < inv.len() {
+                inv[actual_idx] = Default::default();
+                true
+            } else {
+                false
+            }
+        });
+
+        // Remove scroll (find it in inventory)
+        let mut scroll_removed = false;
+        for i in 0..HAVE_MAX {
+            if let Some(slot) = world.get_inventory_slot(sid, i) {
+                if slot.item_id == scroll_id && slot.count > 0 {
+                    world.update_inventory(sid, |inv| {
+                        if i < inv.len() && inv[i].count > 0 {
+                            inv[i].count -= 1;
+                            if inv[i].count == 0 {
+                                inv[i] = Default::default();
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    scroll_removed = true;
+                    break;
+                }
+            }
+        }
+
+        if !scroll_removed {
+            debug!(
+                "[{}] ItemDisassemble v2615: scroll not found in inventory",
+                session.addr()
+            );
+            send_fail(session, ITEM_DISASSEMBLE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+
+        // Add result item
+        if let Some(slot_idx) = world.find_slot_for_item(sid, result_item_id, 1) {
+            world.update_inventory(sid, |inv| {
+                if slot_idx < inv.len() {
+                    if inv[slot_idx].item_id == result_item_id {
+                        inv[slot_idx].count += 1;
+                    } else {
+                        inv[slot_idx] = UserItemSlot {
+                            item_id: result_item_id,
+                            count: 1,
+                            durability: 0,
+                            flag: ITEM_FLAG_NONE,
+                            original_flag: 0,
+                            serial_num: 0,
+                            expire_time: 0,
+                        };
+                    }
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+    }
+
+    // Send success response
+    let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+    pkt.write_u8(ITEM_DISASSEMBLE);
+    pkt.write_u8(b_type);
+    pkt.write_u8(UpgradeResult::Succeeded as u8);
+    pkt.write_i32(result_item_id as i32);
+    pkt.write_i8(target_slot);
+    session.send_packet(&pkt).await?;
+
+    Ok(())
+}
+
+// ── Item Reverse Restore v2615 (Sub-opcode 15) ──────────────────────────
+// Restore a reversed item back to normal using a restoration scroll.
+
+async fn item_reverse_restore(
+    session: &mut ClientSession,
+    reader: &mut PacketReader<'_>,
+) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let sid = session.session_id();
+
+    // Parse packet: [u8 bType] [u32 npcID] [10x (i32 itemID, i8 slot)]
+    let b_type = reader.read_u8().unwrap_or(0);
+    let _npc_id = reader.read_u32().unwrap_or(0);
+
+    let mut raw_items = [0u32; 10];
+    let mut slots = [0i8; 10];
+    for i in 0..10 {
+        raw_items[i] = reader.read_u32().unwrap_or(0) as u32;
+        slots[i] = reader.read_i8().unwrap_or(-1);
+    }
+
+    // First item is the reversed item to restore
+    let target_item_id = raw_items[0];
+    let target_slot = slots[0];
+
+    if target_item_id == 0 || target_slot < 0 {
+        debug!(
+            "[{}] ItemReverseRestore v2615: invalid target item_id={} slot={}",
+            session.addr(),
+            target_item_id,
+            target_slot
+        );
+        send_fail(session, ITEM_REVERSE_RESTORE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+        return Ok(());
+    }
+
+    // Second item is the scroll
+    let scroll_id = raw_items[1];
+    let scroll_type = get_scroll_type(scroll_id);
+
+    if scroll_type != ScrollType::RebirthRestoration {
+        debug!(
+            "[{}] ItemReverseRestore v2615: wrong scroll type {:?} for scroll_id={}",
+            session.addr(),
+            scroll_type,
+            scroll_id
+        );
+        send_fail(session, ITEM_REVERSE_RESTORE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+        return Ok(());
+    }
+
+    // Get target item from inventory
+    let actual_idx = SLOT_MAX + target_slot as usize;
+    let target_item = match world.get_inventory_slot(sid, actual_idx) {
+        Some(slot) => slot,
+        None => {
+            debug!(
+                "[{}] ItemReverseRestore v2615: target item not found at slot {}",
+                session.addr(),
+                actual_idx
+            );
+            send_fail(session, ITEM_REVERSE_RESTORE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+    };
+
+    if target_item.item_id != target_item_id {
+        debug!(
+            "[{}] ItemReverseRestore v2615: item mismatch at slot {} (expected {} got {})",
+            session.addr(),
+            actual_idx,
+            target_item_id,
+            target_item.item_id
+        );
+        send_fail(session, ITEM_REVERSE_RESTORE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+        return Ok(());
+    }
+
+    // Get target item proto
+    let target_proto = match world.get_item(target_item_id) {
+        Some(p) => p,
+        None => {
+            debug!(
+                "[{}] ItemReverseRestore v2615: target item proto not found for id={}",
+                session.addr(),
+                target_item_id
+            );
+            send_fail(session, ITEM_REVERSE_RESTORE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+    };
+
+    // Look up reverse recipe (req_item = 379257000 for Rebirth Restoration)
+    let recipes = match world.get_upgrade_recipes(target_item_id as i32) {
+        Some(r) => r,
+        None => {
+            debug!(
+                "[{}] ItemReverseRestore v2615: no reverse recipe for item_id={}",
+                session.addr(),
+                target_item_id
+            );
+            send_fail(session, ITEM_REVERSE_RESTORE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+    };
+
+    // Filter for reverse recipes (req_item = 379257000)
+    let reverse_recipes: Vec<_> = recipes
+        .iter()
+        .filter(|r| r.req_item == 379257000)
+        .collect();
+
+    if reverse_recipes.is_empty() {
+        debug!(
+            "[{}] ItemReverseRestore v2615: no reverse recipe (req_item=379257000) for item_id={}",
+            session.addr(),
+            target_item_id
+        );
+        send_fail(session, ITEM_REVERSE_RESTORE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+        return Ok(());
+    }
+
+    let result_item_id = reverse_recipes[0].new_number as u32;
+
+    // Validate result item
+    let result_proto = match world.get_item(result_item_id) {
+        Some(p) => p,
+        None => {
+            debug!(
+                "[{}] ItemReverseRestore v2615: result item proto not found for id={}",
+                session.addr(),
+                result_item_id
+            );
+            send_fail(session, ITEM_REVERSE_RESTORE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+    };
+
+    // Perform restoration
+    if b_type == UPGRADE_TYPE_NORMAL {
+        // Replace target item with result item
+        world.update_inventory(sid, |inv| {
+            if actual_idx < inv.len() {
+                inv[actual_idx] = UserItemSlot {
+                    item_id: result_item_id,
+                    count: 1,
+                    durability: 0,
+                    flag: ITEM_FLAG_NONE,
+                    original_flag: 0,
+                    serial_num: 0,
+                    expire_time: 0,
+                };
+                true
+            } else {
+                false
+            }
+        });
+
+        // Remove scroll (find it in inventory)
+        let mut scroll_removed = false;
+        for i in 0..HAVE_MAX {
+            if let Some(slot) = world.get_inventory_slot(sid, i) {
+                if slot.item_id == scroll_id && slot.count > 0 {
+                    world.update_inventory(sid, |inv| {
+                        if i < inv.len() && inv[i].count > 0 {
+                            inv[i].count -= 1;
+                            if inv[i].count == 0 {
+                                inv[i] = Default::default();
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    scroll_removed = true;
+                    break;
+                }
+            }
+        }
+
+        if !scroll_removed {
+            debug!(
+                "[{}] ItemReverseRestore v2615: scroll not found in inventory",
+                session.addr()
+            );
+            send_fail(session, ITEM_REVERSE_RESTORE, b_type, UpgradeResult::NoMatch, false, &[]).await?;
+            return Ok(());
+        }
+    }
+
+    // Send success response
+    let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+    pkt.write_u8(ITEM_REVERSE_RESTORE);
+    pkt.write_u8(b_type);
+    pkt.write_u8(UpgradeResult::Succeeded as u8);
+    pkt.write_i32(result_item_id as i32);
+    pkt.write_i8(target_slot);
+    session.send_packet(&pkt).await?;
 
     Ok(())
 }

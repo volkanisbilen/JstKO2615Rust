@@ -3084,7 +3084,9 @@ mod tests {
         world.set_transformation(1, 1, 500, 600100, 10000, 30000);
         assert!(world.is_transformed(1));
         // Verify fields via with_session
-        let (t_type, t_id) = world.with_session(1, |h| (h.transformation_type, h.transform_id)).unwrap();
+        let (t_type, t_id) = world
+            .with_session(1, |h| (h.transformation_type, h.transform_id))
+            .unwrap();
         assert_eq!(t_type, 1);
         assert_eq!(t_id, 500);
         // Clear
@@ -3101,8 +3103,12 @@ mod tests {
         world.register_session(1, tx1);
         world.register_session(2, tx2);
         // Session 1: blink expires at 100, session 2: blink expires at 200
-        world.update_session(1, |h| { h.blink_expiry_time = 100; });
-        world.update_session(2, |h| { h.blink_expiry_time = 200; });
+        world.update_session(1, |h| {
+            h.blink_expiry_time = 100;
+        });
+        world.update_session(2, |h| {
+            h.blink_expiry_time = 200;
+        });
         // At time 150: session 1 expired, session 2 still active
         let expired = world.collect_expired_blinks(150);
         assert_eq!(expired.len(), 1);
@@ -3117,7 +3123,9 @@ mod tests {
         world.register_session(1, tx);
         assert!(world.can_use_potions(1));
         // Disable potions
-        world.update_session(1, |h| { h.can_use_potions = false; });
+        world.update_session(1, |h| {
+            h.can_use_potions = false;
+        });
         assert!(!world.can_use_potions(1));
         // Nonexistent → true (safe default)
         assert!(world.can_use_potions(999));
@@ -3159,7 +3167,9 @@ mod tests {
             h.is_mining = true;
             h.is_fishing = true;
         });
-        let (mining, fishing) = world.with_session(1, |h| (h.is_mining, h.is_fishing)).unwrap();
+        let (mining, fishing) = world
+            .with_session(1, |h| (h.is_mining, h.is_fishing))
+            .unwrap();
         assert!(mining);
         assert!(fishing);
     }
@@ -3222,7 +3232,12 @@ mod tests {
         world.register_session(1, tx);
         let (pm_id, event_nid, event_sid, reward) = world
             .with_session(1, |h| {
-                (h.gm_send_pm_id, h.event_nid, h.event_sid, h.by_selected_reward)
+                (
+                    h.gm_send_pm_id,
+                    h.event_nid,
+                    h.event_sid,
+                    h.by_selected_reward,
+                )
             })
             .unwrap();
         assert_eq!(pm_id, 0xFFFF);
@@ -3237,9 +3252,7 @@ mod tests {
         let world = WorldState::new();
         let (tx, _rx) = mpsc::unbounded_channel();
         world.register_session(1, tx);
-        let limit = world
-            .with_session(1, |h| h.draki_entrance_limit)
-            .unwrap();
+        let limit = world.with_session(1, |h| h.draki_entrance_limit).unwrap();
         assert_eq!(limit, 3);
     }
 
@@ -3301,7 +3314,11 @@ mod tests {
         assert_eq!(bow, 100);
         // Soul categories: 8 entries, first element = index (0-7), rest zeros
         for i in 0..8 {
-            assert_eq!(soul_cats[i][0], i as i16, "soul_categories[{}][0] should be {}", i, i);
+            assert_eq!(
+                soul_cats[i][0], i as i16,
+                "soul_categories[{}][0] should be {}",
+                i, i
+            );
             assert_eq!(soul_cats[i][1], 0i16);
             assert_eq!(soul_cats[i][2], 0i16);
             assert_eq!(soul_cats[i][3], 0i16);
