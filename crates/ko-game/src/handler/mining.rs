@@ -286,7 +286,9 @@ fn handle_mining_start(session: &mut ClientSession) -> anyhow::Result<()> {
             h.last_mining_attempt = Instant::now();
         });
         pkt.write_u32(sid as u32);
-        let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+        let (pos, event_room) = world
+            .with_session(sid, |h| (h.position, h.event_room))
+            .unwrap_or_default();
         world.broadcast_to_3x3(
             pos.zone_id,
             pos.region_x,
@@ -378,7 +380,9 @@ async fn handle_mining_attempt(session: &mut ClientSession) -> anyhow::Result<()
         if let Some(item_def) = world.get_item(reward_item_id) {
             let weight = item_def.weight.unwrap_or(0) as u32;
             let (current_weight, max_weight) = world
-                .with_session(sid, |h| (h.equipped_stats.item_weight, h.equipped_stats.max_weight))
+                .with_session(sid, |h| {
+                    (h.equipped_stats.item_weight, h.equipped_stats.max_weight)
+                })
                 .unwrap_or((0, 0));
             if current_weight + weight > max_weight {
                 return Ok(());
@@ -420,7 +424,9 @@ async fn handle_mining_attempt(session: &mut ClientSession) -> anyhow::Result<()
     pkt.write_u32(sid as u32);
     pkt.write_u16(effect);
 
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -457,7 +463,9 @@ pub(crate) fn stop_mining_internal(world: &Arc<WorldState>, sid: SessionId) {
     pkt.write_u8(MINING_STOP);
     pkt.write_u16(1);
     pkt.write_u32(sid as u32);
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -519,7 +527,9 @@ fn handle_betting_game(session: &mut ClientSession) -> anyhow::Result<()> {
     pkt.write_u8(npc_rand);
     pkt.write_u16(0);
 
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -607,7 +617,9 @@ fn handle_fishing_start(session: &mut ClientSession) -> anyhow::Result<()> {
             h.last_mining_attempt = Instant::now();
         });
         pkt.write_u32(sid as u32);
-        let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+        let (pos, event_room) = world
+            .with_session(sid, |h| (h.position, h.event_room))
+            .unwrap_or_default();
         world.broadcast_to_3x3(
             pos.zone_id,
             pos.region_x,
@@ -698,7 +710,9 @@ async fn handle_fishing_attempt(session: &mut ClientSession) -> anyhow::Result<(
         if let Some(item_def) = world.get_item(reward_item_id) {
             let weight = item_def.weight.unwrap_or(0) as u32;
             let (current_weight, max_weight) = world
-                .with_session(sid, |h| (h.equipped_stats.item_weight, h.equipped_stats.max_weight))
+                .with_session(sid, |h| {
+                    (h.equipped_stats.item_weight, h.equipped_stats.max_weight)
+                })
                 .unwrap_or((0, 0));
             if current_weight + weight > max_weight {
                 return Ok(());
@@ -742,7 +756,9 @@ async fn handle_fishing_attempt(session: &mut ClientSession) -> anyhow::Result<(
     pkt.write_u32(sid as u32);
     pkt.write_u16(effect);
 
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -779,7 +795,9 @@ pub(crate) fn stop_fishing_internal(world: &Arc<WorldState>, sid: SessionId) {
     pkt.write_u8(FISHING_STOP);
     pkt.write_u16(1);
     pkt.write_u32(sid as u32);
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -829,7 +847,9 @@ async fn handle_soccer_kick(session: &mut ClientSession) -> anyhow::Result<()> {
         world.update_session(sid, |h| {
             h.is_mining = true;
         });
-        let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+        let (pos, event_room) = world
+            .with_session(sid, |h| (h.position, h.event_room))
+            .unwrap_or_default();
         world.broadcast_to_3x3(
             pos.zone_id,
             pos.region_x,

@@ -372,7 +372,10 @@ mod tests {
         pkt.write_u8(0); // reserved u8
 
         let mut r = PacketReader::new(&pkt.data);
-        r.read_u32(); r.read_u8(); r.read_u32(); r.read_u32();
+        r.read_u32();
+        r.read_u8();
+        r.read_u32();
+        r.read_u32();
         assert_eq!(r.read_u32(), Some(0), "damage always 0");
         assert_eq!(r.read_u32(), Some(0), "reserved u32 always 0");
         assert_eq!(r.read_u8(), Some(0), "reserved u8 always 0");

@@ -294,7 +294,9 @@ mod tests {
         pkt.write_u8(1); // flag
         pkt.write_i32(500); // quest_id
         pkt.write_i32(1001); // header_text
-        for _ in 0..12 { pkt.write_i32(-1); }
+        for _ in 0..12 {
+            pkt.write_i32(-1);
+        }
         pkt.write_sbyte_string("test.lua");
         // 4+1+4+4+48+(1+8) = 70
         assert_eq!(pkt.data.len(), 70);
@@ -329,7 +331,10 @@ mod tests {
         pkt.write_sbyte_string("q.lua");
 
         let mut r = PacketReader::new(&pkt.data);
-        r.read_u32(); r.read_u8(); r.read_u32(); r.read_u32();
+        r.read_u32();
+        r.read_u8();
+        r.read_u32();
+        r.read_u32();
         for i in 0..12 {
             assert_eq!(r.read_u32().map(|v| v as i32), Some(200 + i));
         }

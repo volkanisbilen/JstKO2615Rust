@@ -3507,14 +3507,8 @@ fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -
 /// C++ cape logic: flag==1 → cape=-1 (training), otherwise cape=0.
 fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     let mut iter = args.into_iter();
-    let uid: i32 = iter
-        .next()
-        .and_then(|v| lua.unpack(v).ok())
-        .unwrap_or(0);
-    let flag: i16 = iter
-        .next()
-        .and_then(|v| lua.unpack(v).ok())
-        .unwrap_or(2); // default ClanTypePromoted
+    let uid: i32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
+    let flag: i16 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(2); // default ClanTypePromoted
 
     let w = get_world(lua)?;
     let sid = uid as SessionId;
@@ -5320,9 +5314,7 @@ fn lua_send_warp_list(lua: &Lua, uid: i32) -> LuaResult<()> {
     let w = get_world(lua)?;
     let sid = uid as SessionId;
 
-    let zone_id = w
-        .with_session(sid, |h| h.position.zone_id)
-        .unwrap_or(0);
+    let zone_id = w.with_session(sid, |h| h.position.zone_id).unwrap_or(0);
 
     if zone_id == 0 {
         tracing::warn!(sid, "SendWarpList: zone_id=0");

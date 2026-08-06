@@ -658,10 +658,7 @@ async fn handle_skill_title_reset(session: &mut ClientSession) -> anyhow::Result
 /// Send completed achievement notifications on game entry.
 /// Sniffer-verified (session 3, seq 38-39): original server sends
 /// `[sub=1][achieve_id:u16][status:u8]` for each completed achievement.
-pub fn send_achieve_status_on_login(
-    world: &crate::world::WorldState,
-    sid: crate::zone::SessionId,
-) {
+pub fn send_achieve_status_on_login(world: &crate::world::WorldState, sid: crate::zone::SessionId) {
     let achieves: Vec<(u16, u8)> = world
         .with_session(sid, |h| {
             h.achieve_map

@@ -510,9 +510,8 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     if zone_id == crate::world::ZONE_BATTLE6 {
         let is_nation_battle = world.get_battle_state().is_nation_battle();
         let is_gm = snap.authority == 0; // GM_AUTHORITY
-        let terrain = super::terrain_effects::evaluate_terrain(
-            zone_id, is_nation_battle, is_gm, x, z,
-        );
+        let terrain =
+            super::terrain_effects::evaluate_terrain(zone_id, is_nation_battle, is_gm, x, z);
         let pkt = super::terrain_effects::build_terrain_effects_packet(terrain);
         world.send_to_session(sid, &pkt);
     }

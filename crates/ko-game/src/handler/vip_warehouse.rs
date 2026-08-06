@@ -1386,7 +1386,12 @@ mod tests {
     /// build_error produces correct opcode and 2-byte payload.
     #[test]
     fn test_build_error_all_subcodes() {
-        for sub in [VIP_OPEN, VIP_USE_VAULT, VIP_SET_PASSWORD, VIP_ENTER_PASSWORD] {
+        for sub in [
+            VIP_OPEN,
+            VIP_USE_VAULT,
+            VIP_SET_PASSWORD,
+            VIP_ENTER_PASSWORD,
+        ] {
             let pkt = build_error(sub, 1);
             assert_eq!(pkt.opcode, Opcode::WizVipwarehouse as u8);
             assert_eq!(pkt.data[0], sub);
