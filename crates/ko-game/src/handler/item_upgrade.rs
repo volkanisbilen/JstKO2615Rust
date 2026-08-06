@@ -115,6 +115,7 @@ enum ScrollType {
     Class = 5,
     HighToRebirth = 15,
     Accessories = 8,
+    RebirthRestoration = 17,
 }
 
 // Item flag constants imported from crate::world (ITEM_FLAG_BOUND, ITEM_FLAG_DUPLICATE, ITEM_FLAG_SEALED, ITEM_FLAG_RENTED).
@@ -143,6 +144,7 @@ fn get_scroll_type(scroll_id: u32) -> ScrollType {
 
         379256000 => ScrollType::HighToRebirth,
         379257000 => ScrollType::Rebirth,
+        810322000 => ScrollType::RebirthRestoration,
 
         379159000 | 379160000 | 379161000 | 379162000 | 379163000 | 379164000 => {
             ScrollType::Accessories
@@ -1063,7 +1065,7 @@ async fn item_upgrade(
         let mut anvil_pkt = Packet::new(Opcode::WizObjectEvent as u8);
         anvil_pkt.write_u8(OBJECT_ANVIL);
         anvil_pkt.write_u8(b_result as u8);
-        anvil_pkt.write_u32(npc_id);
+        anvil_pkt.write_u32(resolved_npc_id);
 
         if let Some(pos) = world.get_position(sid) {
             world.broadcast_to_zone(pos.zone_id, Arc::new(anvil_pkt), Some(sid));
@@ -1107,13 +1109,17 @@ fn is_scroll_compatible(item_class: ScrollType, user_scroll: ScrollType) -> bool
         ),
         ScrollType::Rebirth => matches!(
             user_scroll,
-            ScrollType::Rebirth | ScrollType::HighToRebirth | ScrollType::HighClass
+            ScrollType::Rebirth
+                | ScrollType::HighToRebirth
+                | ScrollType::HighClass
+                | ScrollType::RebirthRestoration
         ),
         ScrollType::Accessories => user_scroll == ScrollType::Accessories,
         ScrollType::HighToRebirth => matches!(
             user_scroll,
             ScrollType::HighToRebirth | ScrollType::HighClass
         ),
+        ScrollType::RebirthRestoration => user_scroll == ScrollType::RebirthRestoration,
         ScrollType::Invalid => false,
         _ => false,
     }
@@ -3105,6 +3111,10 @@ mod tests {
             ScrollType::HighToRebirth as i8
         );
         assert_eq!(get_scroll_type(379257000) as i8, ScrollType::Rebirth as i8);
+        assert_eq!(
+            get_scroll_type(810322000) as i8,
+            ScrollType::RebirthRestoration as i8
+        );
         assert_eq!(get_scroll_type(379152000) as i8, ScrollType::Class as i8);
 
         // Accessories scrolls
@@ -4166,6 +4176,7 @@ mod tests {
         assert_eq!(PET_IMAGE_TRANSFORM, 10);
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
+        assert_eq!(ITEM_UPGRADE_REVERSE, 14);
     }
 
     /// Seal sub-opcodes are sequential 1-4.
@@ -4235,7 +4246,7 @@ mod tests {
         assert_eq!(UPGRADE_TYPE_PREVIEW - UPGRADE_TYPE_NORMAL, 1);
     }
 
-    /// ScrollType enum covers 7 named variants plus Invalid.
+    /// ScrollType enum covers the known upgrade scroll classes plus Invalid.
     #[test]
     fn test_scroll_type_coverage() {
         assert_eq!(ScrollType::Invalid as i8, -1);
@@ -4246,6 +4257,7 @@ mod tests {
         assert_eq!(ScrollType::Class as i8, 5);
         assert_eq!(ScrollType::Accessories as i8, 8);
         assert_eq!(ScrollType::HighToRebirth as i8, 15);
+        assert_eq!(ScrollType::RebirthRestoration as i8, 17);
     }
 
     /// NPC_ANVIL, ITEM_KARIVDIS, and ITEM_BLESSING_LOGOS are correct C++ values.
