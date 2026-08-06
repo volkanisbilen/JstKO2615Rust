@@ -35,6 +35,7 @@ const ITEM_MIDDLE_CLASS_TRINA: u32 = 352900000;
 const ITEM_BLESSING_LOGOS: u32 = 890092000;
 /// Accessory trina piece.
 const ITEM_RING_TRINA: u32 = 354000000;
+const ITEM_BLESSED_ELEMENTAL_SCROLL: u32 = 379025000;
 
 const NPC_ANVIL: u8 = 24;
 
@@ -51,6 +52,7 @@ const ITEM_BIFROST_REQ: u8 = 4;
 const ITEM_BIFROST_EXCHANGE: u8 = 5;
 const SPECIAL_PART_SEWING: u8 = 11;
 const ITEM_OLDMAN_EXCHANGE: u8 = 13;
+const ITEM_ACCESSORY_DISASSEMBLE: u8 = 15;
 const ITEM_SEAL: u8 = 8;
 
 // ── Item Seal sub-opcodes ────────────────────────────────────────────
@@ -186,7 +188,9 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         ITEM_SEAL => item_seal_process(session, &mut reader).await,
         PET_IMAGE_TRANSFORM => pet_image_transform(session, &mut reader).await,
         SPECIAL_PART_SEWING => shozin_exchange(session, &mut reader).await,
-        ITEM_OLDMAN_EXCHANGE => item_disassemble(session, &mut reader).await,
+        ITEM_OLDMAN_EXCHANGE | ITEM_ACCESSORY_DISASSEMBLE => {
+            item_disassemble(session, &mut reader, upgrade_type).await
+        }
         super::character_seal::ITEM_CHARACTER_SEAL => {
             super::character_seal::handle(session, &mut reader).await
         }
@@ -480,12 +484,12 @@ async fn item_upgrade(
 
     // Find the scroll in the items list
     let mut user_scroll_type = ScrollType::Invalid;
-    let mut _scroll_id: u32 = 0;
+    let mut scroll_id: u32 = 0;
     for item in &items {
         let st = get_scroll_type(item.item_id);
         if st != ScrollType::Invalid {
             user_scroll_type = st;
-            _scroll_id = item.item_id;
+            scroll_id = item.item_id;
             break;
         }
     }
@@ -718,6 +722,8 @@ async fn item_upgrade(
 
     // Find matching recipe: check scroll number match
     let mut new_item_id: u32 = 0;
+    let mut matched_req_item: i32 = 0;
+    let mut matched_recipe_grade: i16 = -1;
     let mut recipe_found = false;
 
     for recipe in &recipes {
@@ -751,6 +757,8 @@ async fn item_upgrade(
         }
 
         new_item_id = recipe.new_number as u32;
+        matched_req_item = recipe.req_item;
+        matched_recipe_grade = recipe.grade;
         recipe_found = true;
         break;
     }
@@ -798,8 +806,13 @@ async fn item_upgrade(
         } else {
             raw_items[2] as i32
         };
+        let settings_grade = if matched_recipe_grade >= 0 {
+            matched_recipe_grade
+        } else {
+            by_grade
+        };
 
-        if let Some(setting) = world.find_upgrade_setting(item_type, by_grade, req1, req2) {
+        if let Some(setting) = world.find_upgrade_setting(item_type, settings_grade, req1, req2) {
             gen_rate = setting.success_rate as u32;
             if gen_rate > 10000 {
                 gen_rate = 10000;
@@ -823,9 +836,40 @@ async fn item_upgrade(
                 settings_found = false;
             }
         }
+
+        if !settings_found
+            && scroll_id == ITEM_BLESSED_ELEMENTAL_SCROLL
+            && matched_req_item == ITEM_BLESSED_ELEMENTAL_SCROLL as i32
+            && settings_grade == 0
+        {
+            gen_rate = 10000;
+            req_coins = 500_000;
+            settings_found = true;
+            debug!(
+                "[{}] ItemUpgrade settings fallback: Blessed Elemental +0 origin={} new_item={} item_type={} grade={}",
+                session.addr(),
+                origin_item_id,
+                new_item_id,
+                item_type,
+                settings_grade
+            );
+        }
     }
 
     if !settings_found || gen_rate == 0 {
+        debug!(
+            "[{}] ItemUpgrade fail: type={} reason=settings not found origin={} new_item={} scroll={} scroll_type={:?} item_type={} grade={} recipe_grade={} matched_req={}",
+            session.addr(),
+            upgrade_type,
+            origin_item_id,
+            new_item_id,
+            scroll_id,
+            user_scroll_type,
+            item_type,
+            by_grade,
+            matched_recipe_grade,
+            matched_req_item
+        );
         send_fail(
             session,
             upgrade_type,
@@ -976,12 +1020,13 @@ async fn item_upgrade(
     // ── Build response packet ──
     let mut result = Packet::new(Opcode::WizItemUpgrade as u8);
     result.write_u8(upgrade_type);
-    result.write_u8(b_type);
-    result.write_u8(b_result as u8);
-
-    if b_result == UpgradeResult::Failed && upgrade_type != ITEM_ACCESSORIES {
+    if b_result == UpgradeResult::Failed {
+        // C++ fail_return places the logos flag before bType/result. Keeping
+        // this order prevents the client from rolling failed upgrades back.
         result.write_u8(if has_logos { 1 } else { 0 });
     }
+    result.write_u8(b_type);
+    result.write_u8(b_result as u8);
 
     for item in &result_items {
         result.write_i32(item.item_id as i32);
@@ -1206,9 +1251,13 @@ async fn send_crafting_fail(
 }
 
 /// Send an item smash failure packet.
-async fn send_smash_fail(session: &mut ClientSession, error: SmashError) -> anyhow::Result<()> {
+async fn send_smash_fail(
+    session: &mut ClientSession,
+    response_type: u8,
+    error: SmashError,
+) -> anyhow::Result<()> {
     let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-    pkt.write_u8(ITEM_OLDMAN_EXCHANGE);
+    pkt.write_u8(response_type);
     pkt.write_u16(error as u16);
     session.send_packet(&pkt).await
 }
@@ -1636,6 +1685,7 @@ async fn shozin_exchange(
 async fn item_disassemble(
     session: &mut ClientSession,
     reader: &mut PacketReader<'_>,
+    response_type: u8,
 ) -> anyhow::Result<()> {
     let world = session.world().clone();
     let sid = session.session_id();
@@ -1654,32 +1704,32 @@ async fn item_disassemble(
         || world.is_mining(sid)
         || world.is_fishing(sid)
     {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Must be in Moradon
     let pos = match world.get_position(sid) {
         Some(p) => p,
-        None => return send_smash_fail(session, SmashError::Npc).await,
+        None => return send_smash_fail(session, response_type, SmashError::Npc).await,
     };
     if !is_moradon(pos.zone_id) {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Validate slot
     if slot as usize >= HAVE_MAX {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Look up item definition
     let proto = match world.get_item(item_id) {
         Some(p) => p,
-        None => return send_smash_fail(session, SmashError::Npc).await,
+        None => return send_smash_fail(session, response_type, SmashError::Npc).await,
     };
 
     // Item must not be countable, kind must not be 255
     if proto.countable.unwrap_or(0) != 0 || proto.kind.unwrap_or(0) == ITEM_KIND_UNIQUE {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Validate item class (C++ ItemClass check)
@@ -1688,7 +1738,7 @@ async fn item_disassemble(
         item_class,
         3 | 4 | 5 | 8 | 31 | 32 | 33 | 34 | 35 | 37 | 38 | 21 | 22
     ) {
-        return send_smash_fail(session, SmashError::Item).await;
+        return send_smash_fail(session, response_type, SmashError::Item).await;
     }
 
     // Gold cost: 10000 (normal) or 100000 (type 4/12 items)
@@ -1702,7 +1752,7 @@ async fn item_disassemble(
     // Check gold
     let player_gold = world.get_character_info(sid).map(|ch| ch.gold).unwrap_or(0);
     if player_gold < req_coins {
-        return send_smash_fail(session, SmashError::Item).await;
+        return send_smash_fail(session, response_type, SmashError::Item).await;
     }
 
     // Validate the item in inventory
@@ -1714,10 +1764,10 @@ async fn item_disassemble(
                 || inv_slot.flag == ITEM_FLAG_DUPLICATE
                 || inv_slot.flag == ITEM_FLAG_RENTED
             {
-                return send_smash_fail(session, SmashError::Item).await;
+                return send_smash_fail(session, response_type, SmashError::Item).await;
             }
         }
-        None => return send_smash_fail(session, SmashError::Item).await,
+        None => return send_smash_fail(session, response_type, SmashError::Item).await,
     }
 
     // Determine index range for the item class
@@ -1726,12 +1776,12 @@ async fn item_disassemble(
         32 | 33 | 34 | 35 | 37 | 38 => (3_000_000, 4_000_000),
         21 => (4_000_000, 5_000_000),
         31 | 22 => (5_000_000, 6_000_000),
-        _ => return send_smash_fail(session, SmashError::Npc).await,
+        _ => return send_smash_fail(session, response_type, SmashError::Npc).await,
     };
 
     let smash_list = world.get_item_smash_in_range(range_start, range_end);
     if smash_list.is_empty() {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Determine roll count based on item class
@@ -1757,7 +1807,7 @@ async fn item_disassemble(
         }
     }
     if free_slots < roll_count as u8 {
-        return send_smash_fail(session, SmashError::Inventory).await;
+        return send_smash_fail(session, response_type, SmashError::Inventory).await;
     }
 
     // ── Weighted random selection for each roll ──
@@ -1781,7 +1831,7 @@ async fn item_disassemble(
         }
 
         if total_weight == 0 || weighted.is_empty() {
-            return send_smash_fail(session, SmashError::Item).await;
+            return send_smash_fail(session, response_type, SmashError::Item).await;
         }
 
         let roll = rand_range(0, total_weight);
@@ -1802,7 +1852,7 @@ async fn item_disassemble(
     }
 
     if results.is_empty() {
-        return send_smash_fail(session, SmashError::Item).await;
+        return send_smash_fail(session, response_type, SmashError::Item).await;
     }
 
     // Weight check for all resulting items
@@ -1815,13 +1865,13 @@ async fn item_disassemble(
     }
     if let Some(ch) = world.get_character_info(sid) {
         if ch.item_weight + total_result_weight > ch.max_weight {
-            return send_smash_fail(session, SmashError::Item).await;
+            return send_smash_fail(session, response_type, SmashError::Item).await;
         }
     }
 
     // Deduct gold
     if !world.gold_lose(sid, req_coins) {
-        return send_smash_fail(session, SmashError::Item).await;
+        return send_smash_fail(session, response_type, SmashError::Item).await;
     }
 
     // Remove the original item
@@ -1836,7 +1886,7 @@ async fn item_disassemble(
 
     // Build response packet
     let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-    pkt.write_u8(ITEM_OLDMAN_EXCHANGE);
+    pkt.write_u8(response_type);
     pkt.write_u16(SmashError::Success as u16);
     pkt.write_u32(item_id);
     pkt.write_u8(slot);
@@ -3307,6 +3357,7 @@ mod tests {
     fn test_special_part_sewing_opcode() {
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
+        assert_eq!(ITEM_ACCESSORY_DISASSEMBLE, 15);
     }
 
     #[test]
@@ -3616,6 +3667,7 @@ mod tests {
         assert_eq!(ITEM_UPGRADE_REVERSE, 14);
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
+        assert_eq!(ITEM_ACCESSORY_DISASSEMBLE, 15);
     }
 
     #[test]
@@ -3735,7 +3787,7 @@ mod tests {
 
     #[test]
     fn test_upgrade_result_packet_format() {
-        // Verify packet layout: [u8 upgradeType] [u8 bType] [u8 result] [optional logos] [items]
+        // Success layout: [u8 upgradeType] [u8 bType] [u8 result] [items]
         let upgrade_type: u8 = ITEM_UPGRADE;
         let b_type: u8 = UPGRADE_TYPE_PREVIEW;
         let result: u8 = UpgradeResult::Succeeded as u8;
@@ -3751,6 +3803,20 @@ mod tests {
 
         // Verify packet starts with the right opcode
         assert!(pkt.data.len() >= 3);
+    }
+
+    #[test]
+    fn test_upgrade_failure_packet_has_logos_before_result() {
+        let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+        pkt.write_u8(ITEM_UPGRADE);
+        pkt.write_u8(0); // logos flag
+        pkt.write_u8(UPGRADE_TYPE_NORMAL);
+        pkt.write_u8(UpgradeResult::Failed as u8);
+
+        assert_eq!(pkt.data[0], ITEM_UPGRADE);
+        assert_eq!(pkt.data[1], 0);
+        assert_eq!(pkt.data[2], UPGRADE_TYPE_NORMAL);
+        assert_eq!(pkt.data[3], UpgradeResult::Failed as u8);
     }
 
     #[test]
@@ -4177,6 +4243,7 @@ mod tests {
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
         assert_eq!(ITEM_UPGRADE_REVERSE, 14);
+        assert_eq!(ITEM_ACCESSORY_DISASSEMBLE, 15);
     }
 
     /// Seal sub-opcodes are sequential 1-4.
@@ -4326,6 +4393,7 @@ mod tests {
         assert_eq!(PET_IMAGE_TRANSFORM, 10);
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
+        assert_eq!(ITEM_ACCESSORY_DISASSEMBLE, 15);
         // All distinct
         let subs = [
             ITEM_BIFROST_REQ,
@@ -4335,6 +4403,7 @@ mod tests {
             PET_IMAGE_TRANSFORM,
             SPECIAL_PART_SEWING,
             ITEM_OLDMAN_EXCHANGE,
+            ITEM_ACCESSORY_DISASSEMBLE,
         ];
         for i in 0..subs.len() {
             for j in (i + 1)..subs.len() {
