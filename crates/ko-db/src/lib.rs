@@ -36,9 +36,16 @@ pub async fn create_pool(database_url: &str) -> Result<DbPool, sqlx::Error> {
 ///
 /// Uses runtime file-based migration instead of compile-time embedding
 /// to avoid inflating the binary with 300+ MB of SQL seed data.
-/// The `migrations/` directory must be present relative to the working directory.
+/// Defaults to the repository root `migrations/` directory; `MIGRATIONS_DIR`
+/// can override it for packaged deployments.
 pub async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::migrate::MigrateError> {
-    sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
+    let migration_dir = std::env::var_os("MIGRATIONS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../migrations")
+        });
+
+    sqlx::migrate::Migrator::new(migration_dir)
         .await?
         .run(pool)
         .await

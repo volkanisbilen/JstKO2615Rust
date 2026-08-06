@@ -24,11 +24,11 @@ PG_HOST = os.environ.get("PG_HOST", "localhost")
 PG_PORT = int(os.environ.get("PG_PORT", "5432"))
 PG_DB = os.environ.get("PG_DB", "ko_server")
 PG_USER = os.environ.get("PG_USER", "koserver")
-PG_PASS = os.environ.get("PG_PASS", "changeme")
+PG_PASS = os.environ.get("PG_PASS", "koserver123")
 
-MIGRATIONS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "crates", "ko-db", "migrations"
+MIGRATIONS_DIR = os.environ.get(
+    "MIGRATIONS_DIR",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "migrations"),
 )
 
 

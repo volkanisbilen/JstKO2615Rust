@@ -9,6 +9,7 @@ $env:BASE_PORT = "15100"
 $env:GAME_SERVER_IP = "127.0.0.1"
 $env:GAME_SERVER_PORT = "15001"
 $env:MAP_DIR = "./Map"
+$env:MIGRATIONS_DIR = Join-Path $repo "migrations"
 $env:RUST_LOG = "ko_game=debug,ko_server=debug,ko_protocol=debug,info"
 $env:KO_VERSION_MODE = "99"
 
