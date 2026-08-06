@@ -59,6 +59,9 @@ use crate::state_change_constants::{STATE_CHANGE_ABNORMAL, STATE_CHANGE_WEAPONS_
 /// Snow Battle event snowball skill — only this skill is allowed during Snow Battle.
 const SNOW_EVENT_SKILL: u32 = 490077;
 
+/// GM test damage override for direct skill hits.
+const GM_FIXED_DAMAGE: i16 = 30000;
+
 use crate::npc::NPC_BAND;
 
 use crate::magic_constants::{TRANSFORMATION_MONSTER, TRANSFORMATION_NPC, TRANSFORMATION_SIEGE};
@@ -96,6 +99,17 @@ impl MagicInstance {
     /// Build a MAGIC_FAIL packet to send back to the caster.
     fn build_fail_packet(&self) -> Packet {
         self.build_packet(MAGIC_FAIL)
+    }
+}
+
+fn gm_fixed_skill_damage(world: &WorldState, caster_sid: SessionId, damage: i16) -> i16 {
+    if world
+        .get_character_info(caster_sid)
+        .is_some_and(|ch| ch.authority == 0)
+    {
+        GM_FIXED_DAMAGE
+    } else {
+        damage
     }
 }
 
@@ -1705,6 +1719,7 @@ async fn execute_type1_aoe(
                 100
             };
         }
+        damage = gm_fixed_skill_damage(world, caster_sid, damage);
         if damage <= 0 {
             continue;
         }
@@ -1861,6 +1876,7 @@ async fn execute_type1_aoe(
             };
         }
         damage = super::attack::scale_manes_magic_damage(world, caster_sid, &npc, damage);
+        damage = gm_fixed_skill_damage(world, caster_sid, damage);
 
         if damage <= 0 {
             continue;
@@ -3001,11 +3017,19 @@ async fn execute_type3(
                         &aoe_player_ctx,
                         &mut aoe_rng,
                     );
-                    d = apply_magic_class_bonus(d, &caster, &target, world, caster_sid, target_sid);
+                    d = apply_magic_class_bonus(
+                        d,
+                        &caster,
+                        &target,
+                        world,
+                        caster_sid,
+                        target_sid,
+                    );
                     d
                 } else {
                     (-first_damage).max(0) as i16
                 };
+                let damage = gm_fixed_skill_damage(world, caster_sid, damage);
                 aoe_target_damage = damage as i32;
                 let new_hp = (target.hp - damage).max(0);
                 world.update_character_hp(target_sid, new_hp);
@@ -3310,6 +3334,7 @@ async fn execute_type3(
                     &npc,
                     npc_damage,
                 );
+                let npc_damage = gm_fixed_skill_damage(world, caster_sid, npc_damage);
 
                 // Apply damage to NPC
                 let new_hp = (npc_hp - npc_damage as i32).max(0);
@@ -5672,6 +5697,7 @@ async fn apply_skill_damage(
         None => return,
     };
 
+    let damage = gm_fixed_skill_damage(world, caster_sid, damage);
     if damage <= 0 {
         // Broadcast effect with 0 damage
         let pkt = instance.build_packet(MAGIC_EFFECTING);
@@ -5779,6 +5805,7 @@ async fn apply_skill_damage(
         }
     }
 
+    effective_damage = gm_fixed_skill_damage(world, caster_sid, effective_damage);
     let new_hp = (target.hp - effective_damage).max(0);
     world.update_character_hp(target_sid, new_hp);
 
@@ -5792,8 +5819,8 @@ async fn apply_skill_damage(
     crate::handler::party::broadcast_party_hp(world, target_sid);
 
     // ── Equipment durability loss ─────────────────────────────────────
-    world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, damage as i32);
-    world.item_wore_out(target_sid, WORE_TYPE_DEFENCE, damage as i32);
+    world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, effective_damage as i32);
+    world.item_wore_out(target_sid, WORE_TYPE_DEFENCE, effective_damage as i32);
 
     try_reflect_damage(world, caster_sid, target_sid, damage).await;
 
@@ -5952,14 +5979,14 @@ async fn apply_skill_damage(
     broadcast_to_caster_region(world, caster_sid, &pkt);
 
     // Send HP update
-    send_target_hp_update(world, caster_sid, target_sid, damage as i32);
+    send_target_hp_update(world, caster_sid, target_sid, effective_damage as i32);
 
     tracing::debug!(
         "[sid={}] MagicProcess: skill={} target={} damage={} new_hp={}",
         caster_sid,
         instance.skill_id,
         target_sid,
-        damage,
+        effective_damage,
         new_hp
     );
 }
@@ -6127,6 +6154,8 @@ async fn apply_skill_damage_to_npc(
             return;
         }
 
+        let damage = gm_fixed_skill_damage(world, caster_sid, damage);
+
         // Apply damage — clamp to [0, max_hp]
         let new_hp = (bot.hp - damage).max(0);
         world.update_bot(npc_id, |b| {
@@ -6266,6 +6295,7 @@ async fn apply_skill_damage_to_npc(
         _ => return,
     };
 
+    let damage = gm_fixed_skill_damage(world, caster_sid, damage);
     if damage <= 0 {
         let pkt = instance.build_packet(MAGIC_EFFECTING);
         broadcast_to_caster_region(world, caster_sid, &pkt);
