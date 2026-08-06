@@ -1,4 +1,4 @@
-﻿-- Manes Survival (zone 96) monster templates and verified spawn layout.
+-- Manes Survival (zone 96) monster templates and verified spawn layout.
 -- New event SIDs clone existing server-side combat/AI templates; only SID/name/PID are overridden.
 
 CREATE TABLE IF NOT EXISTS manes_survival_spawn (
