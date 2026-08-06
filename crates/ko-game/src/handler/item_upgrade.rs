@@ -1704,6 +1704,7 @@ async fn item_disassemble(
             let npc_id = reader.read_u32().unwrap_or(0);
             let mut selected: Option<(u32, u8)> = None;
             let mut material: Option<(u32, u8)> = None;
+            let mut candidates: Vec<(u32, u8)> = Vec::new();
 
             for _ in 0..4 {
                 let candidate_item_id = reader.read_u32().unwrap_or(0);
@@ -1711,15 +1712,25 @@ async fn item_disassemble(
                 if candidate_item_id == 0 || candidate_slot as usize >= HAVE_MAX {
                     continue;
                 }
+                candidates.push((candidate_item_id, candidate_slot));
 
-                if selected.is_none()
-                    && world
-                        .find_upgrade_recipe_by_new_number_and_req_items(
-                            candidate_item_id as i32,
-                            &ACCESSORY_UPGRADE_SCROLLS,
-                        )
-                        .is_some()
-                {
+                let is_reverseable = world
+                    .find_upgrade_recipe_by_new_number_and_req_items(
+                        candidate_item_id as i32,
+                        &ACCESSORY_UPGRADE_SCROLLS,
+                    )
+                    .is_some();
+                let looks_like_upgraded_accessory = candidate_item_id % 10 > 0
+                    && world.get_item(candidate_item_id).is_some_and(|proto| {
+                        proto.countable.unwrap_or(0) == 0
+                            && proto.kind.unwrap_or(0) != ITEM_KIND_UNIQUE
+                            && matches!(
+                                proto.item_class.unwrap_or(0) as i16,
+                                21 | 22 | 31 | 32 | 33 | 34 | 35 | 37 | 38
+                            )
+                    });
+
+                if selected.is_none() && (is_reverseable || looks_like_upgraded_accessory) {
                     selected = Some((candidate_item_id, candidate_slot));
                 } else if material.is_none() {
                     material = Some((candidate_item_id, candidate_slot));
@@ -1730,8 +1741,10 @@ async fn item_disassemble(
                 Some(v) => v,
                 None => {
                     debug!(
-                        "[{}] ItemDisassemble accessory fail: no reverseable item in type=15 payload",
-                        session.addr()
+                        "[{}] ItemDisassemble accessory fail: no reverseable item in type=15 payload npc_id={} candidates={:?}",
+                        session.addr(),
+                        npc_id,
+                        candidates
                     );
                     return send_smash_fail(session, response_type, SmashError::Item).await;
                 }
@@ -1821,19 +1834,31 @@ async fn item_disassemble(
     }
 
     if response_type == ITEM_ACCESSORY_DISASSEMBLE {
-        let Some(recipe) = world.find_upgrade_recipe_by_new_number_and_req_items(
-            item_id as i32,
-            &ACCESSORY_UPGRADE_SCROLLS,
-        ) else {
+        let reward_item_id = if let Some(recipe) =
+            world.find_upgrade_recipe_by_new_number_and_req_items(
+                item_id as i32,
+                &ACCESSORY_UPGRADE_SCROLLS,
+            )
+        {
+            recipe.origin_number as u32
+        } else if item_id % 10 > 0 {
+            let fallback = item_id - 1;
             debug!(
-                "[{}] ItemDisassemble accessory fail: no reverse recipe for item_id={}",
+                "[{}] ItemDisassemble accessory fallback: item_id={} reward_item_id={}",
+                session.addr(),
+                item_id,
+                fallback
+            );
+            fallback
+        } else {
+            debug!(
+                "[{}] ItemDisassemble accessory fail: no reverse recipe/fallback for item_id={}",
                 session.addr(),
                 item_id
             );
             return send_smash_fail(session, response_type, SmashError::Item).await;
         };
 
-        let reward_item_id = recipe.origin_number as u32;
         if reward_item_id == 0 || world.get_item(reward_item_id).is_none() {
             return send_smash_fail(session, response_type, SmashError::Item).await;
         }
