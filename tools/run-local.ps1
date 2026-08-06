@@ -21,4 +21,4 @@ $logFile = Join-Path $logDir "ko-server_$timestamp.log"
 
 Write-Host "Log file: $logFile" -ForegroundColor Yellow
 
-cmd /d /s /c "cargo run -p ko-server 2>&1" | Tee-Object -FilePath $logFile
+cmd /d /s /c "cargo run -p ko-server --release 2>&1" | Tee-Object -FilePath $logFile
