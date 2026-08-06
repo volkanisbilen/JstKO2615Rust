@@ -1,4 +1,4 @@
-﻿-- Server mirror of the v2615 client Data\TICKET_EXCHANGE.tbl.
+-- Server mirror of the v2615 client Data\TICKET_EXCHANGE.tbl.
 -- The client sends ticket/reward IDs, but GameServer owns validation,
 -- consumption, duration and reward delivery. duration_hours is converted to
 -- expiry days only when the value is non-zero.

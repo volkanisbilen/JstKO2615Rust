@@ -1,4 +1,4 @@
-﻿-- Official Manes Survival client zone mapping.
+-- Official Manes Survival client zone mapping.
 -- Client Zones.tbl stores 570/580/590/600; game-server zone IDs are 57/58/59/60.
 
 BEGIN;

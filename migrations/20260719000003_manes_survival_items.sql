@@ -1,4 +1,4 @@
-﻿-- Manes Survival event items for PostgreSQL.
+-- Manes Survival event items for PostgreSQL.
 -- Idempotent: safe to run repeatedly from DBeaver or psql.
 
 INSERT INTO item (

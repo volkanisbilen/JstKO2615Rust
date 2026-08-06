@@ -1,4 +1,4 @@
-﻿-- Force the server-side Attendance rewards to the v2615 client baseline.
+-- Force the server-side Attendance rewards to the v2615 client baseline.
 -- The original seed used ON CONFLICT DO NOTHING, leaving existing databases
 -- with stale reward rows even after the server source was updated.
 

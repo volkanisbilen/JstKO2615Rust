@@ -1,4 +1,4 @@
-﻿-- Restore Moradon NPC facing through database values.
+-- Restore Moradon NPC facing through database values.
 --
 -- The 2615 client reads GetNpcInfo direction as a byte angle. The server now
 -- preserves npc_spawn.direction as 0..255, so this migration can rotate the

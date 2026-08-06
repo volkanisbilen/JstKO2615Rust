@@ -1,4 +1,4 @@
-﻿-- Restore the sniffer-verified v2615 Akara identity and make it a friendly
+-- Restore the sniffer-verified v2615 Akara identity and make it a friendly
 -- Moradon NPC. The earlier reconstructed 31774 row left by_group at 0; the
 -- client consequently classified the statue as an attack target and skipped
 -- the WIZ_NPC_EVENT right-click dispatch.

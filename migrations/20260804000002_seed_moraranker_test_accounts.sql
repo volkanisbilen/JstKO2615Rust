@@ -1,4 +1,4 @@
-﻿-- Moradon MORANKER statue/ranking test accounts.
+-- Moradon MORANKER statue/ranking test accounts.
 --
 -- The 2615 client sends the password value in the same encoded form stored in
 -- tb_user.str_passwd. Copying the value inside PostgreSQL avoids exposing or

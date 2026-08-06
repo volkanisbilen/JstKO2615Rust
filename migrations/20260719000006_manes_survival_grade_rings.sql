@@ -1,4 +1,4 @@
-﻿-- Grade-ring layout derived from the user-approved outer map bounds.
+-- Grade-ring layout derived from the user-approved outer map bounds.
 -- Outer low anchors use X 260..728 / Z 207..644; higher grades move inward.
 
 BEGIN;

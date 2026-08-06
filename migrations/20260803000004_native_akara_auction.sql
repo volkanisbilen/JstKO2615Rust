@@ -1,4 +1,4 @@
-﻿-- Server-owned Akara Altar catalogue for the native v2615
+-- Server-owned Akara Altar catalogue for the native v2615
 -- CUISpecialAuction panel. Item numbers are existing Akara accessories from
 -- the repository's checked item table seed.
 

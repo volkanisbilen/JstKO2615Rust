@@ -1,4 +1,4 @@
-﻿-- Rotate regular Moradon NPC facing 90 degrees from the current DB value.
+-- Rotate regular Moradon NPC facing 90 degrees from the current DB value.
 --
 -- MORANKER statue facing is intentionally left untouched. Only the requested
 -- A2/A6 pedestal coordinates are fixed below.

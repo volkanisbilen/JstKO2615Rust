@@ -1,4 +1,4 @@
-﻿-- Rotate Moradon NPC and MORANKER statue facing 180 degrees from the current
+-- Rotate Moradon NPC and MORANKER statue facing 180 degrees from the current
 -- DB-driven orientation. Direction is a 0..255 byte angle, so 180 degrees is
 -- +128.
 

@@ -1,4 +1,4 @@
-﻿-- Synchronize the server packet with the exact 28 reward rows in the
+-- Synchronize the server packet with the exact 28 reward rows in the
 -- v2615 Data/Attendance.tbl supplied with the client.
 --
 -- This intentionally uses a new migration version. The earlier Attendance

@@ -1,4 +1,4 @@
-﻿-- Exact Manes Survival castle and high-grade ring coordinates.
+-- Exact Manes Survival castle and high-grade ring coordinates.
 -- User-verified map coordinates, 2026-07-19.
 
 BEGIN;

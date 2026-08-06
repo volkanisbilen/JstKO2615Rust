@@ -1,4 +1,4 @@
-﻿-- Rotate Moradon NPC and MORANKER statue facing 90 degrees further in the
+-- Rotate Moradon NPC and MORANKER statue facing 90 degrees further in the
 -- same byte-angle direction as the previous DB-driven facing migration.
 
 UPDATE npc_spawn

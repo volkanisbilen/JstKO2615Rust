@@ -1,4 +1,4 @@
-﻿-- Native v2615 client events: Roulette, Jigsaw Puzzle, Coin and Knight Marble.
+-- Native v2615 client events: Roulette, Jigsaw Puzzle, Coin and Knight Marble.
 -- All mutable player state is kept server-side; client payloads are never trusted
 -- for reward selection or quantities.
 
