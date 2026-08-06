@@ -1693,10 +1693,57 @@ async fn item_disassemble(
     let world = session.world().clone();
     let sid = session.session_id();
 
-    // Parse packet
-    let item_id = reader.read_u32().unwrap_or(0);
-    let slot = reader.read_u8().unwrap_or(0xff);
-    let _npc_id_raw = reader.read_u32().unwrap_or(0);
+    // Parse packet. Old Man Exchange (13) uses the legacy compact format:
+    // [u32 itemID] [u8 slot] [u32 npcID].
+    //
+    // Accessory disassemble (15) in the 2615 client sends the anvil-style
+    // payload: [u32 npcID] [4 x (u32 itemID, u8 slot)]. Pick the entry whose
+    // upgraded item can be reversed through NEW_UPGRADE.
+    let (item_id, slot, _npc_id_raw, consume_item): (u32, u8, u32, Option<(u32, u8)>) =
+        if response_type == ITEM_ACCESSORY_DISASSEMBLE && reader.remaining() >= 24 {
+            let npc_id = reader.read_u32().unwrap_or(0);
+            let mut selected: Option<(u32, u8)> = None;
+            let mut material: Option<(u32, u8)> = None;
+
+            for _ in 0..4 {
+                let candidate_item_id = reader.read_u32().unwrap_or(0);
+                let candidate_slot = reader.read_u8().unwrap_or(0xff);
+                if candidate_item_id == 0 || candidate_slot as usize >= HAVE_MAX {
+                    continue;
+                }
+
+                if selected.is_none()
+                    && world
+                        .find_upgrade_recipe_by_new_number_and_req_items(
+                            candidate_item_id as i32,
+                            &ACCESSORY_UPGRADE_SCROLLS,
+                        )
+                        .is_some()
+                {
+                    selected = Some((candidate_item_id, candidate_slot));
+                } else if material.is_none() {
+                    material = Some((candidate_item_id, candidate_slot));
+                }
+            }
+
+            let (selected_item_id, selected_slot) = match selected {
+                Some(v) => v,
+                None => {
+                    debug!(
+                        "[{}] ItemDisassemble accessory fail: no reverseable item in type=15 payload",
+                        session.addr()
+                    );
+                    return send_smash_fail(session, response_type, SmashError::Item).await;
+                }
+            };
+
+            (selected_item_id, selected_slot, npc_id, material)
+        } else {
+            let item_id = reader.read_u32().unwrap_or(0);
+            let slot = reader.read_u8().unwrap_or(0xff);
+            let npc_id = reader.read_u32().unwrap_or(0);
+            (item_id, slot, npc_id, None)
+        };
 
     // Player state validation
     if world.is_player_dead(sid)
@@ -1819,6 +1866,25 @@ async fn item_disassemble(
 
         if !world.gold_lose(sid, req_coins) {
             return send_smash_fail(session, response_type, SmashError::Item).await;
+        }
+
+        if let Some((material_item_id, material_slot)) = consume_item {
+            let material_idx = SLOT_MAX + material_slot as usize;
+            world.update_inventory(sid, |inv| {
+                if material_idx < inv.len()
+                    && inv[material_idx].item_id == material_item_id
+                    && inv[material_idx].count > 0
+                {
+                    if inv[material_idx].count > 1 {
+                        inv[material_idx].count -= 1;
+                    } else {
+                        inv[material_idx] = Default::default();
+                    }
+                    true
+                } else {
+                    false
+                }
+            });
         }
 
         world.update_inventory(sid, |inv| {
