@@ -326,6 +326,23 @@ impl WorldState {
     pub fn get_upgrade_recipes(&self, origin_number: i32) -> Option<Vec<NewUpgradeRow>> {
         self.upgrade_recipes.get(&origin_number).map(|r| r.clone())
     }
+    /// Find the recipe that produced an upgraded item with one of the given materials.
+    ///
+    /// Used by accessory disassemble: +N accessory -> three copies of +(N-1).
+    pub fn find_upgrade_recipe_by_new_number_and_req_items(
+        &self,
+        new_number: i32,
+        req_items: &[i32],
+    ) -> Option<NewUpgradeRow> {
+        for entry in self.upgrade_recipes.iter() {
+            for recipe in entry.value() {
+                if recipe.new_number == new_number && req_items.contains(&recipe.req_item) {
+                    return Some(recipe.clone());
+                }
+            }
+        }
+        None
+    }
     /// Iterate all upgrade settings to find a matching entry.
     ///
     pub fn find_upgrade_setting(
