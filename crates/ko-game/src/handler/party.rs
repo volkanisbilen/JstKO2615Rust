@@ -250,23 +250,21 @@ pub(crate) fn build_party_member_info(
 /// Avoids the pattern `get_character_info(sid)` + `get_loyalty_symbol_rank(sid)`
 /// which acquires two separate DashMap locks on the same session.
 fn get_char_with_loyalty(world: &WorldState, sid: SessionId) -> Option<(CharacterInfo, i8)> {
-    world
-        .with_session(sid, |h| {
-            let ch = h.character.as_ref()?.clone();
-            let pr = h.personal_rank;
-            let kr = h.knights_rank;
-            let lr = if (pr > 100 && pr <= 200) || (kr > 100 && kr <= 200) || (kr == 0 && pr == 0) {
-                -1
-            } else if kr == 0 {
-                pr as i8
-            } else if pr == 0 || kr <= pr {
-                kr as i8
-            } else {
-                pr as i8
-            };
-            Some((ch, lr))
-        })
-        .flatten()
+    world.with_session(sid, |h| {
+        let ch = h.character.as_ref()?.clone();
+        let pr = h.personal_rank;
+        let kr = h.knights_rank;
+        let lr = if (pr > 100 && pr <= 200) || (kr > 100 && kr <= 200) || (kr == 0 && pr == 0) {
+            -1
+        } else if kr == 0 {
+            pr as i8
+        } else if pr == 0 || kr <= pr {
+            kr as i8
+        } else {
+            pr as i8
+        };
+        Some((ch, lr))
+    }).flatten()
 }
 
 /// Build a PARTY_HPCHANGE packet for a party member.

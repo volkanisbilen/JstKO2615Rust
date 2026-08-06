@@ -1091,9 +1091,7 @@ pub fn send_winner_screen(world: &WorldState, active_event: i16, now: u64) {
                 world.set_invisibility_type(*sid, 0);
                 let sc_pkt =
                     build_state_change_broadcast(*sid as u32, STATE_CHANGE_INVISIBILITY, 0);
-                if let Some((pos, sender_event_room)) =
-                    world.with_session(*sid, |h| (h.position, h.event_room))
-                {
+                if let Some((pos, sender_event_room)) = world.with_session(*sid, |h| (h.position, h.event_room)) {
                     world.broadcast_to_region_sync(
                         pos.zone_id,
                         pos.region_x,

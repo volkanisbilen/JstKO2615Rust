@@ -883,7 +883,7 @@ impl WorldState {
         let mut pkt = Packet::new(Opcode::WizChat as u8);
         pkt.write_u8(7); // ChatType::WarSystem (WAR_SYSTEM_CHAT)
         pkt.write_u8(0); // nation (0 = all)
-                         // Write formatted text as Latin-1 encoded string
+        // Write formatted text as Latin-1 encoded string
         pkt.write_string(&txt);
 
         self.broadcast_to_zone(zone_id, Arc::new(pkt), None);

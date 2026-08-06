@@ -49,10 +49,7 @@ pub async fn handle(session: &mut ClientSession, _pkt: Packet) -> anyhow::Result
     let pkt = build_zone_concurrent_packet(&world);
     session.send_packet(&pkt).await?;
 
-    debug!(
-        "[{}] WIZ_ZONE_CONCURRENT: sent battle zone counts",
-        session.addr()
-    );
+    debug!("[{}] WIZ_ZONE_CONCURRENT: sent battle zone counts", session.addr());
     Ok(())
 }
 

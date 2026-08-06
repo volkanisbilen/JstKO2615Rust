@@ -163,9 +163,7 @@ mod tests {
     fn test_max_hp_change_zero_hp() {
         let pkt = build_max_hp_change(0);
         let mut r = PacketReader::new(&pkt.data);
-        r.read_u8();
-        r.read_u8();
-        r.read_i32();
+        r.read_u8(); r.read_u8(); r.read_i32();
         assert_eq!(r.read_i32(), Some(0));
     }
 

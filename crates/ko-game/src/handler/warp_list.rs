@@ -70,12 +70,9 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let sid = session.session_id();
 
     // Basic validation: player must be alive and in-game
-    let (pos, char_info) = match world
-        .with_session(sid, |h| {
-            h.character.as_ref().map(|c| (h.position, c.clone()))
-        })
-        .flatten()
-    {
+    let (pos, char_info) = match world.with_session(sid, |h| {
+        h.character.as_ref().map(|c| (h.position, c.clone()))
+    }).flatten() {
         Some(v) => v,
         None => {
             send_select_fail(session).await?;
@@ -247,12 +244,9 @@ pub async fn send_warp_list(session: &mut ClientSession, warp_group: i32) -> any
     let world = session.world().clone();
     let sid = session.session_id();
 
-    let (pos, char_info) = match world
-        .with_session(sid, |h| {
-            h.character.as_ref().map(|c| (h.position, c.clone()))
-        })
-        .flatten()
-    {
+    let (pos, char_info) = match world.with_session(sid, |h| {
+        h.character.as_ref().map(|c| (h.position, c.clone()))
+    }).flatten() {
         Some(v) => v,
         None => return Ok(false),
     };

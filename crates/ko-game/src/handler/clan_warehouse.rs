@@ -1663,21 +1663,9 @@ mod tests {
     /// Clan bank sub-opcodes 1-5 are contiguous with no gaps.
     #[test]
     fn test_clan_bank_subopcodes_no_gap() {
-        let ops = [
-            CLAN_BANK_OPEN,
-            CLAN_BANK_INPUT,
-            CLAN_BANK_OUTPUT,
-            CLAN_BANK_MOVE,
-            CLAN_BANK_INVENTORY_MOVE,
-        ];
+        let ops = [CLAN_BANK_OPEN, CLAN_BANK_INPUT, CLAN_BANK_OUTPUT, CLAN_BANK_MOVE, CLAN_BANK_INVENTORY_MOVE];
         for i in 0..ops.len() - 1 {
-            assert_eq!(
-                ops[i + 1] - ops[i],
-                1,
-                "gap between sub-opcode {} and {}",
-                ops[i],
-                ops[i + 1]
-            );
+            assert_eq!(ops[i + 1] - ops[i], 1, "gap between sub-opcode {} and {}", ops[i], ops[i + 1]);
         }
     }
 

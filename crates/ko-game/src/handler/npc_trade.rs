@@ -201,27 +201,11 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
     let mut reader = PacketReader::new(&pkt.data);
     let trade_type = reader.read_u8().unwrap_or(0);
-    tracing::info!(
-        "[{}] NPC trade: type={} raw=[{}]",
-        session.addr(),
-        trade_type,
-        pkt.data
-            .iter()
-            .take(30)
-            .map(|b| format!("{:02X}", b))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
+    tracing::info!("[{}] NPC trade: type={} raw=[{}]", session.addr(), trade_type, pkt.data.iter().take(30).map(|b| format!("{:02X}",b)).collect::<Vec<_>>().join(" "));
     tracing::info!(
         "[{}] NPC trade: type={} raw_data=[{}]",
-        session.addr(),
-        trade_type,
-        pkt.data
-            .iter()
-            .take(40)
-            .map(|b| format!("{:02X}", b))
-            .collect::<Vec<_>>()
-            .join(" ")
+        session.addr(), trade_type,
+        pkt.data.iter().take(40).map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ")
     );
 
     if trade_type == 5 {
@@ -362,19 +346,11 @@ async fn handle_buy(
         let index = reader.read_u8().unwrap_or(0);
 
         if item_id == 0 || count == 0 || inv_pos as usize >= HAVE_MAX || count >= ITEMCOUNT_MAX {
-            return {
-                tracing::warn!("[{}] BUY_FAIL_20 line 371", session.addr());
-                send_fail(session, 20)
-            }
-            .await;
+            return { tracing::warn!("[{}] BUY_FAIL_20 line 371", session.addr()); send_fail(session, 20) }.await;
         }
         // LINE must be 0-11, INDEX must be 0-23
         if line >= 12 || index >= 24 {
-            return {
-                tracing::warn!("[{}] BUY_FAIL_21 line 375", session.addr());
-                send_fail(session, 21)
-            }
-            .await;
+            return { tracing::warn!("[{}] BUY_FAIL_21 line 375", session.addr()); send_fail(session, 21) }.await;
         }
 
         // Validate item exists in NPC sell table
@@ -386,11 +362,7 @@ async fn handle_buy(
                 selling_group,
                 index,
             );
-            return {
-                tracing::warn!("[{}] BUY_FAIL_22 line 388", session.addr());
-                send_fail(session, 22)
-            }
-            .await;
+            return { tracing::warn!("[{}] BUY_FAIL_22 line 388", session.addr()); send_fail(session, 22) }.await;
         }
 
         items.push(TradeItem {
@@ -405,11 +377,7 @@ async fn handle_buy(
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
             if items[i].inv_pos == items[j].inv_pos {
-                return {
-                    tracing::warn!("[{}] BUY_FAIL_23 line 404", session.addr());
-                    send_fail(session, 23)
-                }
-                .await;
+                return { tracing::warn!("[{}] BUY_FAIL_23 line 404", session.addr()); send_fail(session, 23) }.await;
             }
         }
     }
@@ -455,13 +423,7 @@ async fn handle_buy(
     for item in &mut items {
         let item_def = match world.get_item(item.item_id) {
             Some(i) => i,
-            None => {
-                return {
-                    tracing::warn!("[{}] BUY_FAIL_24 line 451", session.addr());
-                    send_fail(session, 24)
-                }
-                .await
-            }
+            None => return { tracing::warn!("[{}] BUY_FAIL_24 line 451", session.addr()); send_fail(session, 24) }.await,
         };
 
         // Loyalty merchants use NP price; regular merchants use gold price
@@ -472,11 +434,7 @@ async fn handle_buy(
         };
         let base_price = unit_price * item.count as u64;
         if base_price > COIN_MAX as u64 {
-            return {
-                tracing::warn!("[{}] BUY_FAIL_25 line 463", session.addr());
-                send_fail(session, 25)
-            }
-            .await;
+            return { tracing::warn!("[{}] BUY_FAIL_25 line 463", session.addr()); send_fail(session, 25) }.await;
         }
 
         // Apply tariff/tax (gold purchases only, non-exempt items)
@@ -503,22 +461,14 @@ async fn handle_buy(
         };
 
         if transaction_price > COIN_MAX as u64 {
-            return {
-                tracing::warn!("[{}] BUY_FAIL_26 line 492", session.addr());
-                send_fail(session, 26)
-            }
-            .await;
+            return { tracing::warn!("[{}] BUY_FAIL_26 line 492", session.addr()); send_fail(session, 26) }.await;
         }
 
         item.buy_price = transaction_price as u32;
         total_price += transaction_price;
 
         if total_price > COIN_MAX as u64 {
-            return {
-                tracing::warn!("[{}] BUY_FAIL_27 line 499", session.addr());
-                send_fail(session, 27)
-            }
-            .await;
+            return { tracing::warn!("[{}] BUY_FAIL_27 line 499", session.addr()); send_fail(session, 27) }.await;
         }
 
         let weight = (item_def.weight.unwrap_or(0) as u32).saturating_mul(item.count as u32);
@@ -547,22 +497,14 @@ async fn handle_buy(
                 tracing::warn!(
                     "[{}] BUY_FAIL_28: client wants inv_pos={} (server_slot={}), \
                      client_item={}, but server has item={} count={} at that slot",
-                    session.addr(),
-                    item.inv_pos,
-                    actual_slot,
-                    item.item_id,
-                    slot.item_id,
-                    slot.count
+                    session.addr(), item.inv_pos, actual_slot,
+                    item.item_id, slot.item_id, slot.count
                 );
                 return send_fail(session, 28).await;
             }
             let countable = item_def.countable.unwrap_or(0);
             if countable == 0 || item.count == 0 {
-                return {
-                    tracing::warn!("[{}] BUY_FAIL_29 line 529", session.addr());
-                    send_fail(session, 29)
-                }
-                .await;
+                return { tracing::warn!("[{}] BUY_FAIL_29 line 529", session.addr()); send_fail(session, 29) }.await;
             }
             if countable > 0 && (item.count + slot.count) > ITEMCOUNT_MAX {
                 return send_fail(session, 4).await;

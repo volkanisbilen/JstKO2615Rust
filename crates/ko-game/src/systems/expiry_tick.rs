@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(r.read_u16(), Some(0)); // durability = 0
         assert_eq!(r.read_u32(), Some(0)); // reserved
         assert_eq!(r.read_u32(), Some(0)); // expiration = 0
-                                           // v2600: no trailing u16 padding (sniff verified)
+        // v2600: no trailing u16 padding (sniff verified)
     }
 
     #[test]

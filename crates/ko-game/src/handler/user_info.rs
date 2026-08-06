@@ -32,9 +32,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
             let world = session.world().clone();
             let sid = session.session_id();
-            let (pos, my_event_room) = world
-                .with_session(sid, |h| (h.position, h.event_room))
-                .unwrap_or_default();
+            let (pos, my_event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
 
             // Get nearby session IDs (event_room filtered)
             let nearby = world.get_nearby_session_ids(
@@ -482,16 +480,8 @@ mod tests {
     fn test_user_info_detail_data_length() {
         let name = "Hero";
         let pkt = build_user_info_detail_packet(
-            name,
-            1,
-            1,
-            101,
-            80,
-            0,
-            [50, 50, 50, 50, 50],
-            0,
-            0,
-            [0, 0, 0, 0],
+            name, 1, 1, 101, 80, 0,
+            [50, 50, 50, 50, 50], 0, 0, [0, 0, 0, 0],
         );
         // 1+2 + (1+4) + 1+1+2+1+4 + 10 + 4+2+1+2 + 4 + 378 + 1 = 419
         let expected = 3 + (1 + name.len()) + 9 + 10 + 9 + 4 + 378 + 1;
@@ -559,26 +549,15 @@ mod tests {
         pkt.write_u8(1);
         pkt.write_sbyte_string("Rebirth");
         // Minimal char data
-        pkt.write_u8(1);
-        pkt.write_u8(1);
-        pkt.write_u16(101);
-        pkt.write_u8(83);
-        pkt.write_u32(0);
-        for _ in 0..5 {
-            pkt.write_u16(0);
-        }
-        pkt.write_u32(0);
-        pkt.write_u16(0);
-        pkt.write_u8(0);
-        pkt.write_u16(0);
-        for _ in 0..4 {
-            pkt.write_u8(0);
-        }
+        pkt.write_u8(1); pkt.write_u8(1); pkt.write_u16(101);
+        pkt.write_u8(83); pkt.write_u32(0);
+        for _ in 0..5 { pkt.write_u16(0); }
+        pkt.write_u32(0); pkt.write_u16(0);
+        pkt.write_u8(0); pkt.write_u16(0);
+        for _ in 0..4 { pkt.write_u8(0); }
         for _ in 0..42 {
-            pkt.write_u32(0);
-            pkt.write_i16(0);
-            pkt.write_u16(0);
-            pkt.write_u8(0);
+            pkt.write_u32(0); pkt.write_i16(0);
+            pkt.write_u16(0); pkt.write_u8(0);
         }
         pkt.write_u8(3); // rebirth_level = 3
 
@@ -591,28 +570,19 @@ mod tests {
     #[test]
     fn test_user_info_detail_skill_categories() {
         let pkt = build_user_info_detail_packet(
-            "Mage",
-            2,
-            12,
-            205,
-            70,
-            3000,
-            [30, 30, 30, 200, 30],
-            50000,
-            5,
+            "Mage", 2, 12, 205, 70, 3000,
+            [30, 30, 30, 200, 30], 50000, 5,
             [80, 60, 40, 10], // cat1=80, cat2=60, cat3=40, master=10
         );
         let mut r = PacketReader::new(&pkt.data);
         // Skip: sub(1) + markers(2) + sbyte("Mage"=1+4) + nation(1) + race(1)
         // + class(2) + level(1) + loyalty(4) + stats(10) + gold(4) + points(2)
         // + reserved(1+2) = 36
-        for _ in 0..36 {
-            r.read_u8();
-        }
-        assert_eq!(r.read_u8(), Some(80)); // cat1
-        assert_eq!(r.read_u8(), Some(60)); // cat2
-        assert_eq!(r.read_u8(), Some(40)); // cat3
-        assert_eq!(r.read_u8(), Some(10)); // master
+        for _ in 0..36 { r.read_u8(); }
+        assert_eq!(r.read_u8(), Some(80));  // cat1
+        assert_eq!(r.read_u8(), Some(60));  // cat2
+        assert_eq!(r.read_u8(), Some(40));  // cat3
+        assert_eq!(r.read_u8(), Some(10));  // master
     }
 
     /// Sub-opcode constants match C++ BottomUserListOpcode enum.

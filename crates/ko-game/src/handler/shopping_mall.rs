@@ -17,9 +17,9 @@ use ko_protocol::{Opcode, Packet, PacketReader};
 
 use crate::session::{ClientSession, SessionState};
 
+use super::{HAVE_MAX, SLOT_MAX};
 #[cfg(test)]
 use super::INVENTORY_TOTAL;
-use super::{HAVE_MAX, SLOT_MAX};
 
 /// STORE_OPEN sub-opcode.
 const STORE_OPEN: u8 = 1;

@@ -82,9 +82,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                 vis_pkt.write_u8(5);
                 vis_pkt.write_u32(1);
                 let arc_vis_pkt = Arc::new(vis_pkt);
-                if let Some((pos, event_room)) =
-                    world.with_session(sid, |h| (h.position, h.event_room))
-                {
+                if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
                     world.broadcast_to_3x3(
                         pos.zone_id,
                         pos.region_x,

@@ -664,10 +664,7 @@ pub fn handle_procinfo(session: &mut ClientSession, data: &[u8]) -> anyhow::Resu
     // Check if target is a GM + get nation (single read)
     let (is_gm, gm_nation) = world
         .with_session(target_sid as u16, |h| {
-            h.character
-                .as_ref()
-                .map(|c| (c.authority == AUTHORITY_GAME_MASTER, c.nation))
-                .unwrap_or((false, 0))
+            h.character.as_ref().map(|c| (c.authority == AUTHORITY_GAME_MASTER, c.nation)).unwrap_or((false, 0))
         })
         .unwrap_or((false, 0));
 
@@ -2815,7 +2812,11 @@ pub(crate) fn build_player_rank_update(
 /// Build a JURAID (0xE2) score packet — scoreboard on zone entry.
 /// Packet: `[0xE9][0xE2][u8 sub=0][u32 karus_score][u32 elmo_score][u32 remaining_secs]`
 #[allow(dead_code)]
-pub(crate) fn build_juraid_score(karus_score: u32, elmo_score: u32, remaining_secs: u32) -> Packet {
+pub(crate) fn build_juraid_score(
+    karus_score: u32,
+    elmo_score: u32,
+    remaining_secs: u32,
+) -> Packet {
     let mut pkt = Packet::new(WIZ_EXT_HOOK);
     pkt.write_u8(EXT_SUB_JURAID);
     pkt.write_u8(0); // score sub
@@ -2840,7 +2841,11 @@ pub(crate) fn build_juraid_updatescore(nation: u8, new_score: u32) -> Packet {
 /// Build a JURAID (0xE2) result packet — event ended, show results.
 /// Packet: `[0xE9][0xE2][u8 sub=2][u8 winner_nation][u32 karus_score][u32 elmo_score]`
 #[allow(dead_code)]
-pub(crate) fn build_juraid_result(winner_nation: u8, karus_score: u32, elmo_score: u32) -> Packet {
+pub(crate) fn build_juraid_result(
+    winner_nation: u8,
+    karus_score: u32,
+    elmo_score: u32,
+) -> Packet {
     let mut pkt = Packet::new(WIZ_EXT_HOOK);
     pkt.write_u8(EXT_SUB_JURAID);
     pkt.write_u8(2); // result sub
@@ -2877,7 +2882,11 @@ pub(crate) fn build_castle_siege_timer(sub: u8, remaining_secs: u32, status: u8)
 /// Build a ZindanWar result packet — event ended, show final result.
 /// Packet: `[0xE9][0xD2][u8 sub=3][u8 winner_nation][u32 elmo_kills][u32 karus_kills]`
 #[allow(dead_code)]
-pub(crate) fn build_zindan_result(winner_nation: u8, elmo_kills: u32, karus_kills: u32) -> Packet {
+pub(crate) fn build_zindan_result(
+    winner_nation: u8,
+    elmo_kills: u32,
+    karus_kills: u32,
+) -> Packet {
     let mut pkt = Packet::new(WIZ_EXT_HOOK);
     pkt.write_u8(EXT_SUB_ZINDAN_WAR);
     pkt.write_u8(3); // result sub
@@ -2914,7 +2923,7 @@ pub async fn handle_bansystem(session: &mut ClientSession, _data: &[u8]) -> anyh
     pkt.write_u8(EXT_SUB_BANSYSTEM);
     // 4 skills × (u8 level + u32 exp + u32 target_exp)
     for _ in 0..4 {
-        pkt.write_u8(0); // level
+        pkt.write_u8(0);  // level
         pkt.write_u32(0); // current exp
         pkt.write_u32(0); // target exp
     }
@@ -2958,7 +2967,11 @@ pub async fn handle_game_master_mode(
     let requested = data[0]; // 0 or 1
     let enabled = if requested != 0 { 1u8 } else { 0u8 };
 
-    debug!("[{}] GM mode toggle: enabled={}", session.addr(), enabled);
+    debug!(
+        "[{}] GM mode toggle: enabled={}",
+        session.addr(),
+        enabled
+    );
 
     let pkt = build_gm_mode_toggle(enabled);
     session.send_packet(&pkt).await
@@ -3917,26 +3930,12 @@ mod tests {
     #[test]
     fn test_ext_all_opcodes_unique() {
         let all = [
-            EXT_SUB_AUTHINFO,
-            EXT_SUB_PROCINFO,
-            EXT_SUB_OPEN,
-            EXT_SUB_LOG,
-            EXT_SUB_XALIVE,
-            EXT_SUB_UIINFO,
-            EXT_SUB_PUS,
-            EXT_SUB_CASHCHANGE,
-            EXT_SUB_KESN,
-            EXT_SUB_DROP_LIST,
-            EXT_SUB_ITEM_PROCESS,
-            EXT_SUB_RESET,
-            EXT_SUB_DROP_REQUEST,
-            EXT_SUB_COLLECTION_RACE,
-            EXT_SUB_CLANBANK,
-            EXT_SUB_USERINFO,
-            EXT_SUB_KCPAZAR,
-            EXT_SUB_LOOT_SETTINGS,
-            EXT_SUB_CHAOTIC_EXCHANGE,
-            EXT_SUB_MERCHANT,
+            EXT_SUB_AUTHINFO, EXT_SUB_PROCINFO, EXT_SUB_OPEN, EXT_SUB_LOG,
+            EXT_SUB_XALIVE, EXT_SUB_UIINFO, EXT_SUB_PUS, EXT_SUB_CASHCHANGE,
+            EXT_SUB_KESN, EXT_SUB_DROP_LIST, EXT_SUB_ITEM_PROCESS, EXT_SUB_RESET,
+            EXT_SUB_DROP_REQUEST, EXT_SUB_COLLECTION_RACE, EXT_SUB_CLANBANK,
+            EXT_SUB_USERINFO, EXT_SUB_KCPAZAR, EXT_SUB_LOOT_SETTINGS,
+            EXT_SUB_CHAOTIC_EXCHANGE, EXT_SUB_MERCHANT,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -3968,11 +3967,8 @@ mod tests {
         assert_eq!(EXT_SUB_DAILY_REWARD, 0xF7);
         // Must be above all other ext sub-opcodes
         let others = [
-            EXT_SUB_AUTHINFO,
-            EXT_SUB_GAME_MASTER_MODE,
-            EXT_SUB_HOOK_VISIBLE,
-            EXT_SUB_ITEM_EXCHANGE_INFO,
-            EXT_SUB_CHEST_BLOCKITEM,
+            EXT_SUB_AUTHINFO, EXT_SUB_GAME_MASTER_MODE, EXT_SUB_HOOK_VISIBLE,
+            EXT_SUB_ITEM_EXCHANGE_INFO, EXT_SUB_CHEST_BLOCKITEM,
         ];
         for &op in &others {
             assert!(EXT_SUB_DAILY_REWARD > op);
@@ -4201,70 +4197,25 @@ mod tests {
     #[test]
     fn test_ext_sub_total_count() {
         let all_subs: std::collections::HashSet<u8> = [
-            EXT_SUB_AUTHINFO,
-            EXT_SUB_XALIVE,
-            EXT_SUB_UIINFO,
-            EXT_SUB_USERINFO,
-            EXT_SUB_LOOT_SETTINGS,
-            EXT_SUB_SUPPORT,
-            EXT_SUB_CHAT_LASTSEEN,
-            EXT_SUB_SKILL_STAT_RESET,
-            EXT_SUB_PROCINFO,
-            EXT_SUB_LOG,
-            EXT_SUB_PUS,
-            EXT_SUB_CASHCHANGE,
-            EXT_SUB_DROP_LIST,
-            EXT_SUB_RESET,
-            EXT_SUB_DROP_REQUEST,
-            EXT_SUB_CLANBANK,
-            EXT_SUB_CHAOTIC_EXCHANGE,
-            EXT_SUB_MERCHANT,
-            EXT_SUB_TEMPITEMS,
-            EXT_SUB_MERCHANTLIST,
-            EXT_SUB_RESETREBSTAT,
-            EXT_SUB_ACCOUNT_INFO_SAVE,
-            EXT_SUB_REPURCHASE,
-            EXT_SUB_CHEST_BLOCKITEM,
-            EXT_SUB_ITEM_EXCHANGE_INFO,
-            EXT_SUB_DAILY_REWARD,
-            EXT_SUB_CSW,
-            EXT_SUB_ZINDAN_WAR,
-            EXT_SUB_OPEN,
-            EXT_SUB_KESN,
-            EXT_SUB_ITEM_PROCESS,
-            EXT_SUB_COLLECTION_RACE,
-            EXT_SUB_KCPAZAR,
-            EXT_SUB_USERDATA,
-            EXT_SUB_KCUPDATE,
-            EXT_SUB_AUTODROP,
-            EXT_SUB_INFOMESSAGE,
-            EXT_SUB_MESSAGE,
-            EXT_SUB_BANSYSTEM,
-            EXT_SUB_MERC_VIEWER_INFO,
-            EXT_SUB_UPGRADE_RATE,
-            EXT_SUB_CASTLE_SIEGE_TIMER,
-            EXT_SUB_VOICE,
-            EXT_SUB_LOTTERY,
-            EXT_SUB_TOPLEFT,
-            EXT_SUB_ERRORMSG,
-            EXT_SUB_UNKNOWN1,
-            EXT_SUB_TAG_INFO,
-            EXT_SUB_DAILY_QUEST,
-            EXT_SUB_PUS_REFUND,
-            EXT_SUB_PLAYER_RANK,
-            EXT_SUB_DEATH_NOTICE,
-            EXT_SUB_SHOW_QUEST_LIST,
-            EXT_SUB_WHEEL_DATA,
-            EXT_SUB_GENIE_INFO,
-            EXT_SUB_CINDERELLA,
-            EXT_SUB_JURAID,
-            EXT_SUB_PERKS,
-            EXT_SUB_MESSAGE2,
-            EXT_SUB_HOOK_VISIBLE,
+            EXT_SUB_AUTHINFO, EXT_SUB_XALIVE, EXT_SUB_UIINFO, EXT_SUB_USERINFO,
+            EXT_SUB_LOOT_SETTINGS, EXT_SUB_SUPPORT, EXT_SUB_CHAT_LASTSEEN,
+            EXT_SUB_SKILL_STAT_RESET, EXT_SUB_PROCINFO, EXT_SUB_LOG, EXT_SUB_PUS,
+            EXT_SUB_CASHCHANGE, EXT_SUB_DROP_LIST, EXT_SUB_RESET, EXT_SUB_DROP_REQUEST,
+            EXT_SUB_CLANBANK, EXT_SUB_CHAOTIC_EXCHANGE, EXT_SUB_MERCHANT, EXT_SUB_TEMPITEMS,
+            EXT_SUB_MERCHANTLIST, EXT_SUB_RESETREBSTAT, EXT_SUB_ACCOUNT_INFO_SAVE,
+            EXT_SUB_REPURCHASE, EXT_SUB_CHEST_BLOCKITEM, EXT_SUB_ITEM_EXCHANGE_INFO,
+            EXT_SUB_DAILY_REWARD, EXT_SUB_CSW, EXT_SUB_ZINDAN_WAR, EXT_SUB_OPEN,
+            EXT_SUB_KESN, EXT_SUB_ITEM_PROCESS, EXT_SUB_COLLECTION_RACE, EXT_SUB_KCPAZAR,
+            EXT_SUB_USERDATA, EXT_SUB_KCUPDATE, EXT_SUB_AUTODROP, EXT_SUB_INFOMESSAGE,
+            EXT_SUB_MESSAGE, EXT_SUB_BANSYSTEM, EXT_SUB_MERC_VIEWER_INFO,
+            EXT_SUB_UPGRADE_RATE, EXT_SUB_CASTLE_SIEGE_TIMER, EXT_SUB_VOICE,
+            EXT_SUB_LOTTERY, EXT_SUB_TOPLEFT, EXT_SUB_ERRORMSG, EXT_SUB_UNKNOWN1,
+            EXT_SUB_TAG_INFO, EXT_SUB_DAILY_QUEST, EXT_SUB_PUS_REFUND,
+            EXT_SUB_PLAYER_RANK, EXT_SUB_DEATH_NOTICE, EXT_SUB_SHOW_QUEST_LIST,
+            EXT_SUB_WHEEL_DATA, EXT_SUB_GENIE_INFO, EXT_SUB_CINDERELLA, EXT_SUB_JURAID,
+            EXT_SUB_PERKS, EXT_SUB_MESSAGE2, EXT_SUB_HOOK_VISIBLE,
             EXT_SUB_GAME_MASTER_MODE,
-        ]
-        .into_iter()
-        .collect();
+        ].into_iter().collect();
         assert_eq!(all_subs.len(), 61);
     }
 

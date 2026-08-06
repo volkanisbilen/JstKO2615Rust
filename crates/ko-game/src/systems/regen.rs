@@ -153,7 +153,11 @@ fn process_session_regen(world: &WorldState, rd: &RegenData) {
 
     // Apply HP change (undead: regen becomes damage)
     if hp_change > 0 {
-        let effective = if rd.is_undead { -hp_change } else { hp_change };
+        let effective = if rd.is_undead {
+            -hp_change
+        } else {
+            hp_change
+        };
         let new_hp = if effective > 0 {
             (rd.hp as i32 + effective).min(rd.max_hp as i32) as i16
         } else {

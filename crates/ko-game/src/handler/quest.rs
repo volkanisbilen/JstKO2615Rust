@@ -395,6 +395,7 @@ fn handle_check_fulfill(
     if let Some(quest_monster) = world.get_quest_monster(quest_id) {
         // Special case: quest 812 skips kill count check
         if quest_monster.s_quest_num != 812 {
+
             let counts = [
                 quest_monster.s_count1,
                 quest_monster.s_count2,
@@ -645,11 +646,7 @@ pub fn quest_monster_count_add(
 
                 let new_count = current_count + 1;
                 tracked_counts[group] = new_count;
-                updates.push(KillUpdate {
-                    quest_num,
-                    group,
-                    new_count,
-                });
+                updates.push(KillUpdate { quest_num, group, new_count });
             }
         }
 
@@ -937,7 +934,7 @@ mod tests {
         assert!(job_group_check(201, 1)); // El Morad Warrior base
         assert!(job_group_check(205, 1)); // El Morad Warrior Novice
         assert!(job_group_check(206, 1)); // El Morad Warrior Master
-                                          // Rogue should NOT match Warrior group
+        // Rogue should NOT match Warrior group
         assert!(!job_group_check(102, 1));
         assert!(!job_group_check(107, 1));
     }
@@ -992,11 +989,11 @@ mod tests {
         let mut pkt = Packet::new(Opcode::WizQuest as u8);
         pkt.write_u8(8);
         pkt.write_u16(2026); // year
-        pkt.write_u8(3); // month
-        pkt.write_u8(13); // day
-        pkt.write_u8(14); // hour
-        pkt.write_u8(30); // minute
-        pkt.write_u8(0); // second
+        pkt.write_u8(3);     // month
+        pkt.write_u8(13);    // day
+        pkt.write_u8(14);    // hour
+        pkt.write_u8(30);    // minute
+        pkt.write_u8(0);     // second
 
         let mut r = PacketReader::new(&pkt.data);
         assert_eq!(r.read_u8(), Some(8)); // sub=8
@@ -1013,9 +1010,9 @@ mod tests {
     fn test_quest_save_event_packet_format() {
         // Sub-opcode 2: save event (state change notification)
         let mut pkt = Packet::new(Opcode::WizQuest as u8);
-        pkt.write_u8(2); // sub=2
-        pkt.write_u16(1001); // quest_id
-        pkt.write_u8(1); // state=ongoing
+        pkt.write_u8(2);       // sub=2
+        pkt.write_u16(1001);   // quest_id
+        pkt.write_u8(1);       // state=ongoing
 
         let mut r = PacketReader::new(&pkt.data);
         assert_eq!(r.read_u8(), Some(2));
@@ -1029,12 +1026,12 @@ mod tests {
         // Sub-opcode 9, type 1: initial monster data
         let mut pkt = Packet::new(Opcode::WizQuest as u8);
         pkt.write_u8(9);
-        pkt.write_u8(1); // type=1 (initial)
-        pkt.write_u16(500); // quest_id
-        pkt.write_u16(3); // kill_count[0]
-        pkt.write_u16(0); // kill_count[1]
-        pkt.write_u16(5); // kill_count[2]
-        pkt.write_u16(0); // kill_count[3]
+        pkt.write_u8(1);       // type=1 (initial)
+        pkt.write_u16(500);    // quest_id
+        pkt.write_u16(3);      // kill_count[0]
+        pkt.write_u16(0);      // kill_count[1]
+        pkt.write_u16(5);      // kill_count[2]
+        pkt.write_u16(0);      // kill_count[3]
 
         let mut r = PacketReader::new(&pkt.data);
         assert_eq!(r.read_u8(), Some(9));
@@ -1052,10 +1049,10 @@ mod tests {
         // Sub-opcode 9, type 2: per-group kill count update
         let mut pkt = Packet::new(Opcode::WizQuest as u8);
         pkt.write_u8(9);
-        pkt.write_u8(2); // type=2 (update)
-        pkt.write_u16(500); // quest_id
-        pkt.write_u8(1); // group (1-indexed)
-        pkt.write_u16(4); // new_count
+        pkt.write_u8(2);       // type=2 (update)
+        pkt.write_u16(500);    // quest_id
+        pkt.write_u8(1);       // group (1-indexed)
+        pkt.write_u16(4);      // new_count
 
         let mut r = PacketReader::new(&pkt.data);
         assert_eq!(r.read_u8(), Some(9));
@@ -1100,17 +1097,8 @@ mod tests {
         let quest_monster: u8 = 9;
         let quest_accept: u8 = 12;
         // All distinct
-        let ops = [
-            quest_list,
-            quest_save,
-            quest_execute1,
-            quest_fulfill,
-            quest_abandon,
-            quest_execute2,
-            quest_time,
-            quest_monster,
-            quest_accept,
-        ];
+        let ops = [quest_list, quest_save, quest_execute1, quest_fulfill, quest_abandon,
+                   quest_execute2, quest_time, quest_monster, quest_accept];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
                 assert_ne!(ops[i], ops[j]);
@@ -1132,11 +1120,7 @@ mod tests {
     fn test_job_group_any_class_sentinel() {
         // required_class=5 matches all classes
         for class in [101u16, 102, 103, 104, 113, 201, 202, 203, 204, 213] {
-            assert!(
-                job_group_check(class, 5),
-                "class {} should pass any-class check",
-                class
-            );
+            assert!(job_group_check(class, 5), "class {} should pass any-class check", class);
         }
     }
 
@@ -1159,7 +1143,7 @@ mod tests {
         assert!(job_group_check(101, 101));
         assert!(!job_group_check(201, 101)); // El Morad Warrior doesn't match
         assert!(!job_group_check(102, 101)); // Rogue doesn't match
-                                             // 213 = El Morad Kurian master — only matches class 213
+        // 213 = El Morad Kurian master — only matches class 213
         assert!(job_group_check(213, 213));
         assert!(!job_group_check(113, 213));
     }

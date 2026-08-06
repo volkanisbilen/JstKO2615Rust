@@ -57,7 +57,10 @@ const DEFAULT_PY: i32 = 0;
 /// v2600 top-level handler (sub_B47BA0, a4=1): reads first byte.
 /// If byte != 1 → exits silently (no error display).
 /// Error codes are sent as u8: 0=success, 1-11=error.
-async fn send_newchar_error(session: &mut ClientSession, error_code: u8) -> anyhow::Result<()> {
+async fn send_newchar_error(
+    session: &mut ClientSession,
+    error_code: u8,
+) -> anyhow::Result<()> {
     let mut response = Packet::new(Opcode::WizNewChar as u8);
     response.write_u8(error_code);
     session.send_packet(&response).await

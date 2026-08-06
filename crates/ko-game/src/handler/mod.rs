@@ -676,7 +676,9 @@ async fn handle_ext_hook(session: &mut ClientSession, pkt: Packet) -> anyhow::Re
         }
         ext_hook::EXT_SUB_RESETREBSTAT => ext_hook::handle_resetrebstat(session),
         // Sprint 26: BANSYSTEM (0xBF) — life skill data query (C++ repurposed this sub-opcode)
-        ext_hook::EXT_SUB_BANSYSTEM => ext_hook::handle_bansystem(session, &pkt.data[1..]).await,
+        ext_hook::EXT_SUB_BANSYSTEM => {
+            ext_hook::handle_bansystem(session, &pkt.data[1..]).await
+        }
         // Sprint 26: GAME_MASTER_MODE (0xE9) — GM mode UI toggle
         ext_hook::EXT_SUB_GAME_MASTER_MODE => {
             ext_hook::handle_game_master_mode(session, &pkt.data[1..]).await

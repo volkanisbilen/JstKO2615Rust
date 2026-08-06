@@ -1569,10 +1569,13 @@ fn npc_fighting_npc(
                 pet.hp = cur_hp;
             }
         });
-        let hp_pkt = crate::handler::pet::build_pet_hp_change_packet(max_hp, cur_hp, npc_id);
+        let hp_pkt =
+            crate::handler::pet::build_pet_hp_change_packet(max_hp, cur_hp, npc_id);
         world.send_to_session_owned(owner_sid, hp_pkt);
-        let dmg_pkt =
-            crate::handler::pet::build_pet_damage_display_packet(npc_target as i32, damage as i16);
+        let dmg_pkt = crate::handler::pet::build_pet_damage_display_packet(
+            npc_target as i32,
+            damage as i16,
+        );
         world.send_to_session_owned(owner_sid, dmg_pkt);
     }
 

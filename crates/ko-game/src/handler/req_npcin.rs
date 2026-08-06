@@ -211,9 +211,7 @@ mod tests {
     fn test_req_npcin_c2s_data_length() {
         let mut pkt = Packet::new(Opcode::WizReqNpcIn as u8);
         pkt.write_u16(5);
-        for i in 0..5u32 {
-            pkt.write_u32(10000 + i);
-        }
+        for i in 0..5u32 { pkt.write_u32(10000 + i); }
         assert_eq!(pkt.data.len(), 22); // 2 + 5*4
     }
 
@@ -240,9 +238,7 @@ mod tests {
         let mut count: u16 = 0;
         for _ in 0..200 {
             count += 1;
-            if count >= MAX_SEND_NPCID {
-                break;
-            }
+            if count >= MAX_SEND_NPCID { break; }
         }
         assert_eq!(count, MAX_SEND_NPCID);
     }

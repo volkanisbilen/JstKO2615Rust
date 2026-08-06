@@ -547,20 +547,12 @@ mod tests {
     #[test]
     fn test_refund_list_entry_size() {
         let e1 = PusRefundEntry {
-            item_id: 100,
-            item_price: 200,
-            item_count: 1,
-            item_duration: 0,
-            expired_time: 1700000000,
-            buy_type: 0,
+            item_id: 100, item_price: 200, item_count: 1,
+            item_duration: 0, expired_time: 1700000000, buy_type: 0,
         };
         let e2 = PusRefundEntry {
-            item_id: 300,
-            item_price: 400,
-            item_count: 2,
-            item_duration: 7,
-            expired_time: 1700003600,
-            buy_type: 1,
+            item_id: 300, item_price: 400, item_count: 2,
+            item_duration: 7, expired_time: 1700003600, buy_type: 1,
         };
         let pkt = build_refund_list_packet(&[(1, &e1), (2, &e2)]);
         // header: sub(1) + listsend(1) + count(2) = 4, entries: 2*20 = 40
@@ -571,12 +563,8 @@ mod tests {
     #[test]
     fn test_listadd_packet_data_length() {
         let entry = PusRefundEntry {
-            item_id: 500,
-            item_price: 350,
-            item_count: 1,
-            item_duration: 0,
-            expired_time: 1700000000,
-            buy_type: 0,
+            item_id: 500, item_price: 350, item_count: 1,
+            item_duration: 0, expired_time: 1700000000, buy_type: 0,
         };
         let pkt = build_listadd_packet(12345, &entry);
         assert_eq!(pkt.data.len(), 27);

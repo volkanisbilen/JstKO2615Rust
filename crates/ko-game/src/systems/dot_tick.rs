@@ -53,12 +53,9 @@ fn process_dot_tick(world: &WorldState) {
         let hp_change = *hp_change;
         let expired = *expired;
 
-        let (ch, pos) = match world
-            .with_session(sid, |h| {
-                h.character.as_ref().map(|c| (c.clone(), h.position))
-            })
-            .flatten()
-        {
+        let (ch, pos) = match world.with_session(sid, |h| {
+            h.character.as_ref().map(|c| (c.clone(), h.position))
+        }).flatten() {
             Some(v) => v,
             None => continue,
         };
@@ -75,8 +72,7 @@ fn process_dot_tick(world: &WorldState) {
         // Skip DOT damage in temple event zones when combat is not allowed.
         // The DOT still ticks (tick_count advances, DOT expires normally) but
         // no HP change is applied during non-combat event phases.
-        if !is_event_attackable && hp_change < 0 && event_room::is_in_temple_event_zone(pos.zone_id)
-        {
+        if !is_event_attackable && hp_change < 0 && event_room::is_in_temple_event_zone(pos.zone_id) {
             // Even if skipping HP application, still send expiry packets
             if expired {
                 send_dot_expired_packet(world, sid, hp_change);

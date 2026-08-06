@@ -1355,11 +1355,7 @@ impl WorldState {
                 self.npc_instances.insert(nid, instance);
                 // Non-monster NPCs (merchants, event NPCs, etc.) never die in combat.
                 // If their template HP is 0, use 1 so is_npc_dead() doesn't filter them out.
-                let init_hp = if !tmpl.is_monster && tmpl.max_hp == 0 {
-                    1
-                } else {
-                    tmpl.max_hp as i32
-                };
+                let init_hp = if !tmpl.is_monster && tmpl.max_hp == 0 { 1 } else { tmpl.max_hp as i32 };
                 self.npc_hp.insert(nid, init_hp);
 
                 if tmpl.is_monster && tmpl.search_range > 0 {
@@ -1639,11 +1635,7 @@ impl WorldState {
 
                 zone.add_npc(region_x, region_z, nid);
                 self.npc_instances.insert(nid, instance);
-                let init_hp = if tmpl.max_hp == 0 {
-                    1
-                } else {
-                    tmpl.max_hp as i32
-                };
+                let init_hp = if tmpl.max_hp == 0 { 1 } else { tmpl.max_hp as i32 };
                 self.npc_hp.insert(nid, init_hp);
                 obj_npc_count += 1;
             }

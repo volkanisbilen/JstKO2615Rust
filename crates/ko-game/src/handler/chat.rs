@@ -348,17 +348,15 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
     // Prison zone chat block + mute level check — single DashMap read for both
     {
-        let (is_gm, zone_id, player_level) = world
-            .with_session(sid, |h| {
-                let ch = h.character.as_ref();
-                let auth = ch.map(|c| c.authority).unwrap_or(255);
-                (
-                    auth == 0 || auth == 2,
-                    h.position.zone_id,
-                    ch.map(|c| c.level as i16).unwrap_or(0),
-                )
-            })
-            .unwrap_or((false, 0, 0));
+        let (is_gm, zone_id, player_level) = world.with_session(sid, |h| {
+            let ch = h.character.as_ref();
+            let auth = ch.map(|c| c.authority).unwrap_or(255);
+            (
+                auth == 0 || auth == 2,
+                h.position.zone_id,
+                ch.map(|c| c.level as i16).unwrap_or(0),
+            )
+        }).unwrap_or((false, 0, 0));
         if zone_id == ZONE_PRISON && !is_gm {
             return Ok(());
         }
@@ -423,8 +421,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     match chat_type {
         Some(ChatType::General) => {
             // Broadcast to 3x3 region (nearby players)
-            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room))
-            {
+            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
                 world.broadcast_to_3x3(
                     pos.zone_id,
                     pos.region_x,
@@ -494,8 +491,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                     crate::systems::regen::build_mp_change_packet(ch_after.max_mp, ch_after.mp);
                 world.send_to_session_owned(sid, pkt);
             }
-            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room))
-            {
+            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
                 world.broadcast_to_3x3(
                     pos.zone_id,
                     pos.region_x,
@@ -533,8 +529,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             }
 
             // Broadcast to 3x3 region (merchant advertising)
-            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room))
-            {
+            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
                 world.broadcast_to_3x3(
                     pos.zone_id,
                     pos.region_x,
@@ -587,8 +582,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             // Send to self first
             world.send_to_session(sid, &broadcast);
             // Broadcast to class-matched, party-less players in same zone+nation
-            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room))
-            {
+            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
                 world.broadcast_to_zone_matched_class(
                     pos.zone_id,
                     nation,

@@ -3477,9 +3477,9 @@ mod types_tests {
     /// is_gate_npc_type matches gate NPC IDs.
     #[test]
     fn test_is_gate_npc_type() {
-        assert!(is_gate_npc_type(50)); // NPC_GATE
-        assert!(is_gate_npc_type(51)); // NPC_PHOENIX_GATE
-        assert!(is_gate_npc_type(55)); // NPC_GATE_LEVER
+        assert!(is_gate_npc_type(50));  // NPC_GATE
+        assert!(is_gate_npc_type(51));  // NPC_PHOENIX_GATE
+        assert!(is_gate_npc_type(55));  // NPC_GATE_LEVER
         assert!(is_gate_npc_type(150)); // NPC_GATE2
         assert!(is_gate_npc_type(180)); // NPC_KROWAZ_GATE
         assert!(!is_gate_npc_type(21)); // NPC_MERCHANT
@@ -3744,10 +3744,7 @@ mod types_tests {
     #[test]
     fn test_daily_opcode_from_u8() {
         assert_eq!(DailyOpCode::from_u8(1), Some(DailyOpCode::ChaosMap));
-        assert_eq!(
-            DailyOpCode::from_u8(8),
-            Some(DailyOpCode::UserLoyaltyWingReward)
-        );
+        assert_eq!(DailyOpCode::from_u8(8), Some(DailyOpCode::UserLoyaltyWingReward));
         assert_eq!(DailyOpCode::from_u8(0), None);
         assert_eq!(DailyOpCode::from_u8(9), None);
     }
@@ -4190,10 +4187,7 @@ mod types_tests {
     #[test]
     fn test_daily_op_code_all_roundtrip() {
         for v in 1..=8u8 {
-            assert!(
-                DailyOpCode::from_u8(v).is_some(),
-                "from_u8({v}) should be Some"
-            );
+            assert!(DailyOpCode::from_u8(v).is_some(), "from_u8({v}) should be Some");
         }
         assert!(DailyOpCode::from_u8(0).is_none());
         assert!(DailyOpCode::from_u8(9).is_none());

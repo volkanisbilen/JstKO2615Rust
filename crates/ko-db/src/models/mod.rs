@@ -3,6 +3,7 @@
 
 mod account;
 mod achieve;
+pub mod client_version;
 pub mod anti_afk_list;
 pub mod banish_of_winner;
 pub mod beginner_settings;
@@ -16,7 +17,6 @@ pub mod character_seal;
 pub mod check_account;
 pub mod cinderella;
 pub mod clan_warehouse;
-pub mod client_version;
 mod coefficient;
 pub mod collection_race;
 pub mod costume;
