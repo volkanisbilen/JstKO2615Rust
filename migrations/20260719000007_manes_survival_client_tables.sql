@@ -208,7 +208,7 @@ BEGIN
     IF (SELECT COUNT(*) FROM manes_survival_client_setting) <> 4 THEN
         RAISE EXCEPTION 'SurvivalSetting.tbl import count mismatch';
     END IF;
-    IF (SELECT COUNT(*) FROM manes_survival_client_magic) <> 154 THEN
+    IF (SELECT COUNT(*) FROM manes_survival_client_magic) <> 156 THEN
         RAISE EXCEPTION 'MANES_MAGIC.tbl import count mismatch';
     END IF;
 END $$;
