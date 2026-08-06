@@ -1406,6 +1406,31 @@ impl WorldState {
     pub fn get_respawn_chain(&self, dead_sid: i16) -> Option<MonsterRespawnLoopRow> {
         self.monster_respawn_loop.get(&dead_sid).map(|r| r.clone())
     }
+
+    /// Return Juraid Mountain spawn rows for a family/stage.
+    ///
+    /// Families 21-28 are the per-room Juraid waves loaded from
+    /// `monster_juraid_respawn_list`.
+    pub fn get_juraid_respawn_family(
+        &self,
+        family: i16,
+    ) -> Vec<ko_db::models::MonsterJuraidRespawnRow> {
+        self.monster_juraid_respawn
+            .read()
+            .iter()
+            .filter(|row| row.family == family)
+            .cloned()
+            .collect()
+    }
+
+    /// Return the configured Juraid Deva Bird template for a family.
+    pub fn get_juraid_deva_sid(&self, family: i16) -> Option<u16> {
+        self.monster_juraid_respawn
+            .read()
+            .iter()
+            .find(|row| row.family == family && row.s_sid == 8106)
+            .map(|row| row.s_sid as u16)
+    }
     /// Get all boss random spawn candidates for a given stage.
     pub fn get_boss_spawn_candidates(&self, stage: i32) -> Vec<MonsterBossRandomSpawnRow> {
         self.boss_random_spawn
