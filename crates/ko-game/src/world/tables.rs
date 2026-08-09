@@ -1708,6 +1708,40 @@ impl WorldState {
         self.juraid_bridge_states.clear();
     }
 
+    /// Schedule a Juraid Monument respawn for a specific room and nation.
+    pub fn set_juraid_monument_respawn(&self, room_id: u8, nation: u8, due_at: u64) {
+        if room_id == 0 || !matches!(nation, 1 | 2) {
+            return;
+        }
+        self.juraid_monument_respawns
+            .insert((room_id, nation), due_at);
+    }
+
+    /// Drain Juraid Monument respawns whose due timestamp has passed.
+    pub fn take_due_juraid_monument_respawns(&self, now: u64) -> Vec<(u8, u8)> {
+        let due: Vec<(u8, u8)> = self
+            .juraid_monument_respawns
+            .iter()
+            .filter_map(|entry| {
+                if *entry.value() <= now {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for key in &due {
+            self.juraid_monument_respawns.remove(key);
+        }
+        due
+    }
+
+    /// Clear pending Juraid Monument respawns (called on event start/cleanup).
+    pub fn clear_juraid_monument_respawns(&self) {
+        self.juraid_monument_respawns.clear();
+    }
+
     // ── Monster Stone ────────────────────────────────────────────
 
     /// Get a read lock on the Monster Stone manager.

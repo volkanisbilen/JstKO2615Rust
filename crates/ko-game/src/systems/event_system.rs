@@ -36,6 +36,8 @@ use ko_db::models::event_schedule::EventRewardRow;
 const EVENT_TICK_INTERVAL_SECS: u64 = 1;
 
 fn spawn_juraid_room_npcs(world: &WorldState) {
+    world.clear_juraid_monument_respawns();
+
     let rooms = world
         .event_room_manager
         .list_rooms(TempleEventType::JuraidMountain);
@@ -182,7 +184,22 @@ pub fn start_event_system_task(
             //
             //
             // Chaos uses per-user EXP from kills/deaths (not winner/loser table rewards).
-            // BDW and Juraid use the EVENT_REWARD table (winner/loser items + level bonus).
+            // BDW uses EVENT_REWARD rows. Juraid gets its original winner-only
+            // gem/EXP rewards and keeps monster/chest drops on their own tables.
+            if active_event_i16 == TempleEventType::JuraidMountain as i16 {
+                for (room_id, nation) in world.take_due_juraid_monument_respawns(now) {
+                    let spawned = juraid::spawn_monument(&world, room_id, nation);
+                    if spawned > 0 {
+                        tracing::info!(
+                            room_id,
+                            nation,
+                            spawned,
+                            "Juraid Monument respawned"
+                        );
+                    }
+                }
+            }
+
             match &action {
                 EventTickAction::TransitionedToRewards(results) => {
                     // Send winner screen to all room users before distributing rewards.
@@ -191,6 +208,8 @@ pub fn start_event_system_task(
                     if active_event_i16 == 24 {
                         // Chaos Dungeon: per-user EXP from kills/deaths
                         distribute_chaos_finish_exp(&world).await;
+                    } else if active_event_i16 == TempleEventType::JuraidMountain as i16 {
+                        distribute_juraid_rewards(&world, results).await;
                     } else {
                         // BDW / Juraid: table-based winner/loser rewards
                         let local_id = active_event_to_local_id(active_event_i16);
@@ -267,6 +286,7 @@ pub fn start_event_system_task(
                     // Clear Juraid bridge state from WorldState on cleanup.
                     if *et == TempleEventType::JuraidMountain {
                         world.clear_juraid_bridge_states();
+                        world.clear_juraid_monument_respawns();
                     }
 
                     // Kick all event zone users to their appropriate destination.
@@ -304,6 +324,15 @@ pub fn start_event_system_task(
                                 let spawned = juraid::spawn_deva_bird(&world, room_id);
                                 if spawned > 0 {
                                     tracing::info!(room_id, spawned, "Juraid Deva Bird spawned");
+                                }
+                                let monument_spawned =
+                                    juraid::spawn_deva_room_monuments(&world, room_id);
+                                if monument_spawned > 0 {
+                                    tracing::info!(
+                                        room_id,
+                                        monument_spawned,
+                                        "Juraid Deva room Monuments spawned"
+                                    );
                                 }
                             }
                         }
@@ -2353,6 +2382,72 @@ pub async fn distribute_event_rewards(
                 sid,
                 nation,
                 room_id
+            );
+        }
+    }
+}
+
+pub async fn distribute_juraid_rewards(world: &WorldState, winner_results: &[(u8, u8)]) {
+    let erm = world.event_room_manager();
+
+    for &(room_id, winner_nation) in winner_results {
+        let participants: Vec<(SessionId, u8)> = {
+            let Some(mut room) = erm.get_room_mut(TempleEventType::JuraidMountain, room_id) else {
+                tracing::warn!("Juraid room {} not found for reward distribution", room_id);
+                continue;
+            };
+
+            let mut users = Vec::new();
+            for user in room.karus_users.values_mut() {
+                if user.prize_given || user.logged_out {
+                    continue;
+                }
+                user.prize_given = true;
+                users.push((user.session_id, user.nation));
+            }
+            for user in room.elmorad_users.values_mut() {
+                if user.prize_given || user.logged_out {
+                    continue;
+                }
+                user.prize_given = true;
+                users.push((user.session_id, user.nation));
+            }
+            users
+        };
+
+        for (sid, nation) in participants {
+            if nation != winner_nation || winner_nation == 0 {
+                continue;
+            }
+
+            let Some(ch) = world.get_character_info(sid) else {
+                continue;
+            };
+            let level = ch.level;
+            let rebirth_level = ch.rebirth_level;
+            if let Some(gem_id) = juraid::juraid_winner_gem(level, rebirth_level) {
+                if !world.give_item(sid, gem_id, 1) {
+                    tracing::warn!(
+                        sid,
+                        gem_id,
+                        "Juraid reward gem could not be delivered"
+                    );
+                }
+            }
+
+            let is_premium = world.with_session(sid, |h| h.premium_in_use).unwrap_or(0) != 0;
+            let exp = if is_premium { 50_000_000 } else { 20_000_000 };
+            crate::handler::level::exp_change_with_bonus(world, sid, exp, true).await;
+
+            tracing::info!(
+                sid,
+                room_id,
+                nation,
+                level,
+                rebirth_level,
+                is_premium,
+                exp,
+                "Juraid winner reward granted"
             );
         }
     }

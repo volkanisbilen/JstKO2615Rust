@@ -1008,11 +1008,47 @@ pub fn track_juraid_monster_kill(
                 if room.finish_packet_sent {
                     return;
                 }
-                // Update EventRoom scores directly
-                if killer_nation == 1 {
-                    room.karus_score += 1;
+                if juraid::is_juraid_monument(killed_npc_sid) {
+                    let monument_nation = juraid::monument_nation(killed_npc_sid);
+                    let can_score = match killer_nation {
+                        1 => room.karus_score <= room.elmorad_score,
+                        2 => room.elmorad_score <= room.karus_score,
+                        _ => false,
+                    };
+                    if can_score {
+                        if killer_nation == 1 {
+                            room.karus_score += 1;
+                        } else if killer_nation == 2 {
+                            room.elmorad_score += 1;
+                        }
+                    }
+                    tracing::info!(
+                        room_id,
+                        killer_nation,
+                        monument_nation,
+                        can_score,
+                        "Juraid Monument killed"
+                    );
+                    if monument_nation != 0 {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        world.set_juraid_monument_respawn(
+                            room_id,
+                            monument_nation,
+                            now.saturating_add(juraid::MONUMENT_RESPAWN_SECS),
+                        );
+                    }
+                } else if juraid::is_deva_bird(killed_npc_sid) {
+                    room.winner_nation = killer_nation;
                 } else {
-                    room.elmorad_score += 1;
+                    // Update EventRoom scores directly
+                    if killer_nation == 1 {
+                        room.karus_score += 1;
+                    } else {
+                        room.elmorad_score += 1;
+                    }
                 }
                 (room.karus_score, room.elmorad_score)
             };
@@ -1034,14 +1070,16 @@ pub fn track_juraid_monster_kill(
             // Fast progression for 2615 Juraid rooms: GM/test kills can clear a room
             // much faster than the original 20/30/40 minute bridge timers.
             let nation_score = if killer_nation == 1 { k_score } else { e_score };
-            spawn_juraid_child_monsters(
-                world,
-                room_id,
-                killed_npc_sid,
-                killed_event_room,
-                killed_x,
-                killed_z,
-            );
+            if !juraid::is_juraid_monument(killed_npc_sid) {
+                spawn_juraid_child_monsters(
+                    world,
+                    room_id,
+                    killed_npc_sid,
+                    killed_event_room,
+                    killed_x,
+                    killed_z,
+                );
+            }
 
             for (bridge_idx, threshold) in juraid::ROOM_BRIDGE_KILL_THRESHOLDS.iter().enumerate() {
                 if nation_score >= *threshold {
@@ -1055,8 +1093,15 @@ pub fn track_juraid_monster_kill(
                         world.broadcast_juraid_bridge_open(bridge_idx, room_id as u16);
                         if bridge_idx + 1 == juraid::NUM_BRIDGES {
                             let spawned = juraid::spawn_deva_bird(world, room_id);
+                            let monument_spawned =
+                                juraid::spawn_deva_room_monuments(world, room_id);
                             if spawned > 0 {
-                                tracing::info!(room_id, spawned, "Juraid Deva Bird spawned");
+                                tracing::info!(
+                                    room_id,
+                                    spawned,
+                                    monument_spawned,
+                                    "Juraid Deva room spawned"
+                                );
                             }
                         }
                         tracing::info!(
@@ -1114,7 +1159,10 @@ fn spawn_juraid_child_monsters(
     killed_x: f32,
     killed_z: f32,
 ) {
-    if juraid::is_deva_bird(killed_npc_sid) || juraid::is_bridge(killed_npc_sid) {
+    if juraid::is_deva_bird(killed_npc_sid)
+        || juraid::is_bridge(killed_npc_sid)
+        || juraid::is_juraid_monument(killed_npc_sid)
+    {
         return;
     }
 

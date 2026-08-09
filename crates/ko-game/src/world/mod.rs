@@ -650,6 +650,10 @@ pub struct WorldState {
     /// `handle_npc_attack()`. Key = room_id (1-based).
     ///
     juraid_bridge_states: DashMap<u8, JuraidBridgeState>,
+    /// Pending Juraid Monument respawn timestamps.
+    ///
+    /// Key = (room_id, nation), nation 1=Karus Monument, 2=El Morad Monument.
+    juraid_monument_respawns: DashMap<(u8, u8), u64>,
 
     /// Juraid Mountain monster respawn definitions loaded from DB at startup (136 rows).
     ///
@@ -1083,6 +1087,7 @@ impl WorldState {
             monster_stone_manager: parking_lot::RwLock::new(MonsterStoneManager::new()),
             monster_boss_random_stages: parking_lot::RwLock::new(Vec::new()),
             juraid_bridge_states: DashMap::new(),
+            juraid_monument_respawns: DashMap::new(),
             monster_juraid_respawn: parking_lot::RwLock::new(Vec::new()),
             monster_challenge: parking_lot::RwLock::new(Vec::new()),
             monster_challenge_summon: parking_lot::RwLock::new(Vec::new()),
@@ -1321,6 +1326,7 @@ impl WorldState {
             monster_stone_respawn: parking_lot::RwLock::new(Vec::new()),
             monster_boss_random_stages: parking_lot::RwLock::new(Vec::new()),
             juraid_bridge_states: DashMap::new(),
+            juraid_monument_respawns: DashMap::new(),
             monster_juraid_respawn: parking_lot::RwLock::new(Vec::new()),
             monster_challenge: parking_lot::RwLock::new(Vec::new()),
             monster_challenge_summon: parking_lot::RwLock::new(Vec::new()),

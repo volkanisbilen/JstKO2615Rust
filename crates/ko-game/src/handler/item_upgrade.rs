@@ -861,6 +861,25 @@ async fn item_upgrade(
     }
 
     if !settings_found || gen_rate == 0 {
+        if upgrade_type == ITEM_ACCESSORIES
+            && user_scroll_type == ScrollType::Accessories
+            && matched_req_item == scroll_id as i32
+        {
+            gen_rate = 10000;
+            req_coins = 100_000;
+            settings_found = true;
+            debug!(
+                "[{}] ItemUpgrade accessory settings fallback: origin={} new_item={} scroll={} grade={}",
+                session.addr(),
+                origin_item_id,
+                new_item_id,
+                scroll_id,
+                matched_recipe_grade
+            );
+        }
+    }
+
+    if !settings_found || gen_rate == 0 {
         debug!(
             "[{}] ItemUpgrade fail: type={} reason=settings not found origin={} new_item={} scroll={} scroll_type={:?} item_type={} grade={} recipe_grade={} matched_req={}",
             session.addr(),

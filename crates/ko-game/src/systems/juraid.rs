@@ -46,6 +46,16 @@ pub const BRIDGE_OPEN_DELAYS: [u64; NUM_BRIDGES] = [1200, 1800, 2400];
 
 pub const DEVA_BIRD_SID: u16 = 8106;
 pub const BRIDGE_SID: u16 = 8110;
+pub const KARUS_MONUMENT_SID: u16 = 8113;
+pub const ELMORAD_MONUMENT_SID: u16 = 8114;
+pub const MONUMENT_RESPAWN_SECS: u64 = 60;
+
+pub const GEM_GREEN: u32 = 389201000;
+pub const GEM_BLUE: u32 = 389199000;
+pub const GEM_YELLOW: u32 = 389198000;
+pub const GEM_RED: u32 = 389197000;
+pub const GEM_SILVERY: u32 = 389196000;
+pub const GEM_FORTIFIED_STERLING: u32 = 811137000;
 
 pub fn is_deva_bird(sid: u16) -> bool {
     sid == DEVA_BIRD_SID
@@ -55,8 +65,23 @@ pub fn is_bridge(sid: u16) -> bool {
     sid == BRIDGE_SID
 }
 
+pub fn is_juraid_monument(sid: u16) -> bool {
+    sid == KARUS_MONUMENT_SID || sid == ELMORAD_MONUMENT_SID
+}
+
+pub fn monument_nation(sid: u16) -> u8 {
+    match sid {
+        KARUS_MONUMENT_SID => 1,
+        ELMORAD_MONUMENT_SID => 2,
+        _ => 0,
+    }
+}
+
 pub fn is_wave_monster(row: &MonsterJuraidRespawnRow) -> bool {
-    row.b_type == 0 && !is_deva_bird(row.s_sid as u16) && !is_bridge(row.s_sid as u16)
+    row.b_type == 0
+        && !is_deva_bird(row.s_sid as u16)
+        && !is_bridge(row.s_sid as u16)
+        && !is_juraid_monument(row.s_sid as u16)
 }
 
 fn template_hp(world: &WorldState, sid: u16) -> u32 {
@@ -152,6 +177,33 @@ pub fn spawn_deva_bird(world: &WorldState, room_id: u8) -> usize {
             0,
         )
         .len()
+}
+
+pub fn spawn_monument(world: &WorldState, room_id: u8, nation: u8) -> usize {
+    let (sid, x, z) = match nation {
+        1 => (KARUS_MONUMENT_SID, 462.0, 510.0),
+        2 => (ELMORAD_MONUMENT_SID, 558.0, 510.0),
+        _ => return 0,
+    };
+    world
+        .spawn_event_npc_ex(sid, true, ZONE_JURAID, x, z, 1, room_id as u16, 0)
+        .len()
+}
+
+pub fn spawn_deva_room_monuments(world: &WorldState, room_id: u8) -> usize {
+    spawn_monument(world, room_id, 1) + spawn_monument(world, room_id, 2)
+}
+
+pub fn juraid_winner_gem(level: u8, rebirth_level: u8) -> Option<u32> {
+    match level {
+        75 | 76 => Some(GEM_GREEN),
+        77 | 78 => Some(GEM_BLUE),
+        79 | 80 => Some(GEM_YELLOW),
+        81 | 82 => Some(GEM_RED),
+        83 if rebirth_level >= 6 => Some(GEM_FORTIFIED_STERLING),
+        83 => Some(GEM_SILVERY),
+        _ => None,
+    }
 }
 
 // ── Juraid Bridge State ─────────────────────────────────────────────────────
@@ -535,16 +587,22 @@ pub fn determine_all_winners(erm: &EventRoomManager, juraid: &JuraidManager) -> 
     let mut results = Vec::with_capacity(room_ids.len());
 
     for room_id in room_ids {
-        let juraid_state = match juraid.get_room_state(room_id) {
-            Some(s) => s,
-            None => continue,
-        };
-
         if let Some(mut room) = erm.get_room_mut(TempleEventType::JuraidMountain, room_id) {
             if room.finished || room.state != RoomState::Running {
                 continue;
             }
-            let winner = determine_winner(juraid_state);
+            let winner = if room.winner_nation != 0 {
+                room.winner_nation
+            } else if room.karus_score > room.elmorad_score {
+                1
+            } else if room.elmorad_score > room.karus_score {
+                2
+            } else {
+                juraid
+                    .get_room_state(room_id)
+                    .map(determine_winner)
+                    .unwrap_or(0)
+            };
             room.winner_nation = winner;
             room.finish_packet_sent = true;
             results.push((room_id, winner));
