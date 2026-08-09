@@ -46,7 +46,6 @@ const NPC_ANVIL: u8 = 24;
 const UPGRADE_DELAY: u64 = 2;
 
 const MAX_ITEMS_REQ: usize = 8;
-const ITEM_UPGRADE_SLOT_COUNT: usize = 10;
 
 /// C++ sub-opcodes for WIZ_ITEM_UPGRADE (ItemUpgradeOpcodes enum).
 const ITEM_UPGRADE: u8 = 2;
@@ -1325,18 +1324,18 @@ async fn send_accessory_disassemble_fail(
     session: &mut ClientSession,
     error: SmashError,
 ) -> anyhow::Result<()> {
-    let result = match error {
-        SmashError::Success => UpgradeResult::Succeeded,
-        SmashError::Inventory | SmashError::Item | SmashError::Npc => UpgradeResult::NoMatch,
-    };
-
     let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
     pkt.write_u8(ITEM_ACCESSORY_DISASSEMBLE);
-    pkt.write_u8(UPGRADE_TYPE_NORMAL);
-    pkt.write_u8(result as u8);
-    for _ in 0..ITEM_UPGRADE_SLOT_COUNT {
-        pkt.write_i32(0);
-        pkt.write_i8(-1);
+    // CUIAccessoryReturn parses a fixed result body on failure too. A short
+    // 3-byte response makes the 2615 client read past the packet and crash.
+    pkt.write_u16(error as u16);
+    pkt.write_u32(0);
+    pkt.write_u8(0xff);
+    pkt.write_u16(0);
+    for _ in 0..3 {
+        pkt.write_u32(0);
+        pkt.write_u8(0xff);
+        pkt.write_u16(0);
     }
     session.send_packet(&pkt).await
 }
@@ -2071,19 +2070,9 @@ async fn item_disassemble(
         }
         session.send_packet(&pkt).await?;
 
-        let mut anvil_pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-        anvil_pkt.write_u8(response_type);
-        anvil_pkt.write_u8(UPGRADE_TYPE_NORMAL);
-        anvil_pkt.write_u8(UpgradeResult::Succeeded as u8);
-        for (reward_id, reward_slot) in &reward_slots {
-            anvil_pkt.write_i32(*reward_id as i32);
-            anvil_pkt.write_i8(*reward_slot as i8);
-        }
-        for _ in reward_slots.len()..10 {
-            anvil_pkt.write_i32(0);
-            anvil_pkt.write_i8(-1);
-        }
-        session.send_packet(&anvil_pkt).await?;
+        // Accessory Return consumes the legacy 31-byte result above.  A
+        // second normal-upgrade (53-byte) result makes the 2615 client parse
+        // an unrelated contract and disconnect with 10054.
 
         world.set_user_ability(sid);
         return Ok(());

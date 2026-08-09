@@ -27,7 +27,8 @@ use crate::world::WorldState;
 pub use crate::world::types::ZONE_JURAID;
 
 /// Default maximum rooms for Juraid.
-pub const DEFAULT_JURAID_ROOMS: u8 = 10;
+/// The 2615 database contains families 21..28 (eight instanced rooms).
+pub const DEFAULT_JURAID_ROOMS: u8 = 8;
 
 /// Number of bridge gates in Juraid Mountain.
 pub const NUM_BRIDGES: usize = 3;
@@ -167,17 +168,20 @@ pub fn select_child_monster_sid(world: &WorldState, room_id: u8, killed_sid: u16
 pub fn spawn_deva_bird(world: &WorldState, room_id: u8) -> usize {
     let family = 20 + room_id as i16;
     let rows = world.get_juraid_respawn_family(family);
-    let Some(row) = rows.iter().find(|row| row.s_sid as u16 == DEVA_BIRD_SID) else {
-        return 0;
-    };
+    let (x, z) = rows
+        .iter()
+        .find(|row| row.s_sid as u16 == DEVA_BIRD_SID)
+        .map(|row| (row.x as f32, row.z as f32))
+        // Old databases may have the Deva template but no respawn-list row.
+        .unwrap_or((510.0, 510.0));
 
     world
         .spawn_event_npc_ex(
             DEVA_BIRD_SID,
             true,
             ZONE_JURAID,
-            row.x as f32,
-            row.z as f32,
+            x,
+            z,
             1,
             room_id as u16,
             SUMMON_JURAID_DEVA,
@@ -1081,7 +1085,7 @@ mod tests {
         assert_eq!(ZONE_JURAID, 87);
         assert_eq!(NUM_BRIDGES, 3);
         assert_eq!(BRIDGE_OPEN_DELAYS, [1200, 1800, 2400]);
-        assert_eq!(DEFAULT_JURAID_ROOMS, 10);
+        assert_eq!(DEFAULT_JURAID_ROOMS, 8);
     }
 
     // ── Full Lifecycle Test ─────────────────────────────────────────────

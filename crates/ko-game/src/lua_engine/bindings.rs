@@ -4907,9 +4907,32 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
         return Ok(());
     }
 
-    // Keep the server room state aligned with the floor NPC's requested
-    // transition. Without this, the next kill searches the previous stage
-    // and Draki appears to stop at floor 4.
+    // The floor NPC sends the next-floor value (for example 1/4), while the
+    // database also contains a rest NPC row at the preceding sub-stage. Pick
+    // the first actual monster stage at or after the requested value.
+    let stages = w.draki_tower_stages();
+    let resolved = stages
+        .iter()
+        .find(|s| {
+            s.draki_stage == stage as i16
+                && s.draki_sub_stage == sub_stage as i16
+                && s.draki_tower_npc_state == 0
+        })
+        .or_else(|| {
+            stages.iter().find(|s| {
+                s.draki_stage == stage as i16
+                    && s.draki_sub_stage >= sub_stage as i16
+                    && s.draki_tower_npc_state == 0
+            })
+        })
+        .map(|s| (s.id, s.draki_stage as u16, s.draki_sub_stage as u16));
+    let Some((stage_id, resolved_stage, resolved_sub_stage)) = resolved else {
+        tracing::warn!(sid, stage, sub_stage, "DrakiRiftChange: no monster stage found");
+        return Ok(());
+    };
+
+    // Keep runtime state and NPCs aligned. Previously this function only
+    // changed the state and sent timers, so the run stopped at this NPC.
     let event_room = w.get_event_room(sid);
     if event_room > 0 {
         let now = std::time::SystemTime::now()
@@ -4918,10 +4941,33 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
             .as_secs();
         let mut rooms = w.draki_tower_rooms_write();
         if let Some(room) = rooms.get_mut(&event_room) {
-            room.draki_stage = stage;
-            room.draki_sub_stage = sub_stage;
+            room.draki_stage = resolved_stage;
+            room.draki_sub_stage = resolved_sub_stage;
             room.draki_sub_timer = now + 300;
             room.is_draki_stage_change = true;
+            room.draki_monster_kill = 0;
+        }
+
+        w.despawn_room_npcs(crate::handler::draki_tower::ZONE_DRAKI_TOWER, event_room);
+        let monsters = w.draki_monster_list();
+        let mut monster_count = 0u32;
+        for monster in crate::handler::draki_tower::get_monsters_for_stage(&monsters, stage_id) {
+            w.spawn_event_npc_ex(
+                monster.monster_id as u16,
+                monster.is_monster,
+                crate::handler::draki_tower::ZONE_DRAKI_TOWER,
+                monster.pos_x as f32,
+                monster.pos_z as f32,
+                1,
+                event_room,
+                0,
+            );
+            if monster.is_monster {
+                monster_count = monster_count.saturating_add(1);
+            }
+        }
+        if let Some(room) = w.draki_tower_rooms_write().get_mut(&event_room) {
+            room.draki_monster_kill = monster_count;
         }
     }
 
@@ -4943,8 +4989,8 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
     event_pkt.write_u8(0x16); // TEMPLE_DRAKI_TOWER_TIMER
     event_pkt.write_u8(233);
     event_pkt.write_u8(3);
-    event_pkt.write_u16(stage);
-    event_pkt.write_u16(sub_stage);
+    event_pkt.write_u16(resolved_stage);
+    event_pkt.write_u16(resolved_sub_stage);
     event_pkt.write_u32(time_limit as u32);
     event_pkt.write_u32(0); // elapsed placeholder
     w.send_to_session_owned(sid, event_pkt);
@@ -4960,8 +5006,8 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
     tracing::debug!(
         "[{}] DrakiRiftChange: stage={}, sub_stage={}, time_limit={}",
         sid,
-        stage,
-        sub_stage,
+        resolved_stage,
+        resolved_sub_stage,
         time_limit
     );
 

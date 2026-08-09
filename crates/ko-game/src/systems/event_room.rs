@@ -641,11 +641,13 @@ impl EventRoomManager {
 
     /// List all rooms for an event type.
     pub fn list_rooms(&self, event_type: TempleEventType) -> Vec<u8> {
-        self.rooms
+        let mut rooms: Vec<u8> = self.rooms
             .iter()
             .filter(|r| r.key().0 == event_type)
             .map(|r| r.key().1)
-            .collect()
+            .collect();
+        rooms.sort_unstable();
+        rooms
     }
 
     /// Count total rooms of a given type.
@@ -900,7 +902,10 @@ pub fn broadcast_event_counter(world: &WorldState) -> Option<Packet> {
     let counter_pkt = match active_event {
         4 => build_bdw_counter_packet(karus_count, elmo_count),
         24 => build_chaos_counter_packet(all_count),
-        100 => build_juraid_counter_packet(karus_count, elmo_count, sign_remain),
+        // 2615 consumes Juraid registration through WIZ_EVENT sub-opcode 16.
+        // The legacy EXT_HOOK packet has a different contract and must not be
+        // sent alongside the native counter.
+        100 => build_juraid_event_counter_packet(karus_count, elmo_count, sign_remain),
         _ => return None,
     };
 
@@ -910,17 +915,6 @@ pub fn broadcast_event_counter(world: &WorldState) -> Option<Packet> {
     for user in users.iter() {
         world.send_to_session_arc(user.session_id, Arc::clone(&arc_counter));
     }
-    if active_event == TempleEventType::JuraidMountain as i16 {
-        let arc_event_counter = Arc::new(build_juraid_event_counter_packet(
-            karus_count,
-            elmo_count,
-            sign_remain,
-        ));
-        for user in users.iter() {
-            world.send_to_session_arc(user.session_id, Arc::clone(&arc_event_counter));
-        }
-    }
-
     Some(counter_pkt)
 }
 
@@ -1191,7 +1185,7 @@ pub fn send_active_event_time(world: &WorldState, sid: SessionId) {
 
     // Read active event and remaining seconds atomically
     let (active_event, remaining_secs) = erm.read_temple_event(|te| {
-        if !te.is_active {
+        if !te.is_active && !te.allow_join {
             return (-1i16, 0u16);
         }
         let now = std::time::SystemTime::now()
