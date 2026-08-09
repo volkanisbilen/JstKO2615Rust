@@ -4505,9 +4505,9 @@ fn lua_draki_tower_npc_out(lua: &Lua, uid: i32) -> LuaResult<()> {
         return Ok(());
     }
 
-    // Kill all non-monster NPCs in ZONE_DRAKI_TOWER
-    // C++ checks: !isDead, zone==DRAKI_TOWER, !isMonster
-    w.kill_non_monster_npcs_in_zone(ZONE_DRAKI_TOWER);
+    // Never clear another player's concurrent Draki instance.
+    let event_room = w.get_event_room(sid);
+    w.kill_non_monster_npcs_in_room(ZONE_DRAKI_TOWER, event_room);
 
     Ok(())
 }
@@ -4865,6 +4865,7 @@ fn lua_join_event(lua: &Lua, uid: i32) -> LuaResult<i32> {
             pkt.write_i16(TEMPLE_EVENT_JURAD_MOUNTAIN);
             w.send_to_session_owned(sid, pkt);
             crate::systems::event_room::broadcast_event_counter(&w);
+            crate::systems::event_room::send_active_event_time(&w, sid);
             tracing::info!(
                 "Lua JoinEvent: '{}' joined Juraid Mountain (nation={}, total signed up={})",
                 char_name,
@@ -4904,6 +4905,24 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
         .unwrap_or(false);
     if !has_char {
         return Ok(());
+    }
+
+    // Keep the server room state aligned with the floor NPC's requested
+    // transition. Without this, the next kill searches the previous stage
+    // and Draki appears to stop at floor 4.
+    let event_room = w.get_event_room(sid);
+    if event_room > 0 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut rooms = w.draki_tower_rooms_write();
+        if let Some(room) = rooms.get_mut(&event_room) {
+            room.draki_stage = stage;
+            room.draki_sub_stage = sub_stage;
+            room.draki_sub_timer = now + 300;
+            room.is_draki_stage_change = true;
+        }
     }
 
     let time_limit: u16 = 300;
