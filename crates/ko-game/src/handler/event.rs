@@ -902,10 +902,11 @@ async fn handle_draki_enter(
             0, // monster stage
         ) {
             if let Some(stage) = draki_tower::get_stage_at(&stages, stage_idx) {
+                let stage_is_monster = stage.draki_tower_npc_state == 0;
                 for m in draki_tower::get_monsters_for_stage(&monsters, stage.id) {
                     list.push((
                         m.monster_id as u16,
-                        m.is_monster,
+                        stage_is_monster,
                         m.pos_x as f32,
                         m.pos_z as f32,
                     ));
@@ -980,8 +981,14 @@ async fn handle_draki_enter(
     }
 
     debug!(
-        "[sid={}] Draki Tower entered: dungeon={}, room={}, spawn=({},{})",
-        sid, enter_dungeon, room_id, spawn_x, spawn_z
+        "[sid={}] Draki Tower entered: dungeon={}, room={}, spawn=({},{}), spawned={}, monsters={}",
+        sid,
+        enter_dungeon,
+        room_id,
+        spawn_x,
+        spawn_z,
+        spawn_list.len(),
+        spawn_list.iter().filter(|(_, is_m, _, _)| *is_m).count()
     );
 
     Ok(())

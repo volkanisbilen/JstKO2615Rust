@@ -3430,13 +3430,19 @@ fn collect_draki_spawn_data(
     use crate::handler::draki_tower;
 
     let monsters = world.draki_monster_list();
+    let stages = world.draki_tower_stages();
+    let stage_is_monster = stages
+        .iter()
+        .find(|stage| stage.id == stage_id)
+        .map(|stage| stage.draki_tower_npc_state == 0)
+        .unwrap_or(true);
     let spawn_list: Vec<(u16, bool, f32, f32)> =
         draki_tower::get_monsters_for_stage(&monsters, stage_id)
             .into_iter()
             .map(|m| {
                 (
                     m.monster_id as u16,
-                    m.is_monster,
+                    stage_is_monster,
                     m.pos_x as f32,
                     m.pos_z as f32,
                 )

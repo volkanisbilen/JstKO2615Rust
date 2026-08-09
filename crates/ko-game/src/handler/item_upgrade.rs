@@ -304,13 +304,15 @@ async fn item_upgrade(
 
     // Read 10 items from the client
     let mut raw_items: [u32; 10] = [0; 10];
+    let mut raw_slots: [i8; 10] = [-1; 10];
     let mut items: Vec<UpgradeItem> = Vec::with_capacity(10);
 
-    for raw_slot in &mut raw_items {
+    for i in 0..raw_items.len() {
         let item_id = reader.read_u32().unwrap_or(0) as i32;
         let slot = reader.read_u8().unwrap_or(0xff) as i8;
 
-        *raw_slot = item_id as u32;
+        raw_items[i] = item_id as u32;
+        raw_slots[i] = slot;
 
         if item_id > 0 && slot >= 0 && (slot as usize) < HAVE_MAX {
             items.push(UpgradeItem {
@@ -1051,7 +1053,8 @@ async fn item_upgrade(
     result.write_u8(b_type);
     result.write_u8(b_result as u8);
 
-    for item in &result_items {
+    let response_items = build_upgrade_response_items(&raw_items, &raw_slots, &result_items);
+    for item in &response_items {
         result.write_i32(item.item_id as i32);
         result.write_i8(item.slot);
     }
@@ -1217,7 +1220,35 @@ async fn send_fail(
         pkt.write_i32(item.item_id as i32);
         pkt.write_i8(item.slot);
     }
+    if matches!(
+        upgrade_type,
+        ITEM_UPGRADE | ITEM_ACCESSORIES | ITEM_UPGRADE_REBIRTH | ITEM_UPGRADE_REVERSE
+    ) {
+        for _ in items.len()..10 {
+            pkt.write_i32(0);
+            pkt.write_i8(-1);
+        }
+    }
     session.send_packet(&pkt).await
+}
+
+fn build_upgrade_response_items(
+    raw_items: &[u32; 10],
+    raw_slots: &[i8; 10],
+    result_items: &[UpgradeItem],
+) -> Vec<UpgradeItem> {
+    let mut response = Vec::with_capacity(10);
+    for i in 0..10 {
+        let mut item_id = raw_items[i];
+        let slot = raw_slots[i];
+
+        if i < result_items.len() {
+            item_id = result_items[i].item_id;
+        }
+
+        response.push(UpgradeItem { item_id, slot });
+    }
+    response
 }
 
 /// Generate a random number in [min, max).
@@ -2022,6 +2053,10 @@ async fn item_disassemble(
         for (reward_id, reward_slot) in &reward_slots {
             anvil_pkt.write_i32(*reward_id as i32);
             anvil_pkt.write_i8(*reward_slot as i8);
+        }
+        for _ in reward_slots.len()..10 {
+            anvil_pkt.write_i32(0);
+            anvil_pkt.write_i8(-1);
         }
         session.send_packet(&anvil_pkt).await?;
 
