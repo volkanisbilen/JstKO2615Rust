@@ -2817,6 +2817,7 @@ pub(crate) async fn handle_npc_death(
             killer_sid,
             npc.proto_id,
             npc.event_room,
+            npc.summon_type,
             npc.x,
             npc.z,
         );

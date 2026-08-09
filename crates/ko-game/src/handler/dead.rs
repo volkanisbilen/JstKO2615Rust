@@ -965,6 +965,7 @@ pub fn track_juraid_monster_kill(
     killer_sid: SessionId,
     killed_npc_sid: u16,
     killed_event_room: u16,
+    killed_summon_type: u8,
     killed_x: f32,
     killed_z: f32,
 ) {
@@ -1076,6 +1077,7 @@ pub fn track_juraid_monster_kill(
                     room_id,
                     killed_npc_sid,
                     killed_event_room,
+                    killed_summon_type,
                     killed_x,
                     killed_z,
                 );
@@ -1156,6 +1158,7 @@ fn spawn_juraid_child_monsters(
     room_id: u8,
     killed_npc_sid: u16,
     killed_event_room: u16,
+    killed_summon_type: u8,
     killed_x: f32,
     killed_z: f32,
 ) {
@@ -1166,7 +1169,10 @@ fn spawn_juraid_child_monsters(
         return;
     }
 
-    if !juraid::is_main_monster(world, room_id, killed_npc_sid) {
+    let is_runtime_main = killed_summon_type == juraid::SUMMON_JURAID_MAIN;
+    let is_legacy_main =
+        killed_summon_type == 0 && juraid::is_main_monster(world, room_id, killed_npc_sid);
+    if !is_runtime_main && !is_legacy_main {
         return;
     }
 
@@ -1183,7 +1189,7 @@ fn spawn_juraid_child_monsters(
         killed_z,
         juraid::ROOM_CHILD_MONSTER_COUNT,
         killed_event_room,
-        0,
+        juraid::SUMMON_JURAID_CHILD,
     );
     tracing::info!(
         room_id,

@@ -50,6 +50,12 @@ pub const KARUS_MONUMENT_SID: u16 = 8113;
 pub const ELMORAD_MONUMENT_SID: u16 = 8114;
 pub const MONUMENT_RESPAWN_SECS: u64 = 60;
 
+pub const SUMMON_JURAID_MAIN: u8 = 2;
+pub const SUMMON_JURAID_CHILD: u8 = 3;
+pub const SUMMON_JURAID_DEVA: u8 = 4;
+pub const SUMMON_JURAID_MONUMENT: u8 = 5;
+pub const SUMMON_JURAID_BRIDGE: u8 = 6;
+
 pub const GEM_GREEN: u32 = 389201000;
 pub const GEM_BLUE: u32 = 389199000;
 pub const GEM_YELLOW: u32 = 389198000;
@@ -174,7 +180,7 @@ pub fn spawn_deva_bird(world: &WorldState, room_id: u8) -> usize {
             row.z as f32,
             1,
             room_id as u16,
-            0,
+            SUMMON_JURAID_DEVA,
         )
         .len()
 }
@@ -186,7 +192,16 @@ pub fn spawn_monument(world: &WorldState, room_id: u8, nation: u8) -> usize {
         _ => return 0,
     };
     world
-        .spawn_event_npc_ex(sid, true, ZONE_JURAID, x, z, 1, room_id as u16, 0)
+        .spawn_event_npc_ex(
+            sid,
+            true,
+            ZONE_JURAID,
+            x,
+            z,
+            1,
+            room_id as u16,
+            SUMMON_JURAID_MONUMENT,
+        )
         .len()
 }
 

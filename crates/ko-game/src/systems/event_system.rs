@@ -59,6 +59,7 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
         let main_rows = juraid::main_monster_rows(world, &rows);
         let mut spawned_total = 0usize;
         let mut spawned_monsters = 0usize;
+        let mut spawned_bridges = 0usize;
         for row in rows {
             let is_monster = row.b_type == 0;
             let is_deva = juraid::is_deva_bird(row.s_sid as u16);
@@ -75,12 +76,11 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
             {
                 continue;
             }
+            if !is_wave_monster && !is_bridge {
+                continue;
+            }
 
-            let count = if is_wave_monster {
-                1
-            } else {
-                row.s_count.max(1) as u16
-            };
+            let count = 1;
             let trap_number = if is_bridge {
                 let trap = bridge_trap;
                 bridge_trap = bridge_trap.saturating_add(1);
@@ -88,11 +88,11 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
             } else {
                 0
             };
-            if is_bridge {
-                // Bridge gate NPCs are state objects, not room monsters.
-                // Keep their DB count untouched, but never let them count as
-                // Juraid wave monsters.
-            }
+            let summon_type = if is_wave_monster {
+                juraid::SUMMON_JURAID_MAIN
+            } else {
+                juraid::SUMMON_JURAID_BRIDGE
+            };
 
             let ids = world.spawn_event_npc_ex(
                 row.s_sid as u16,
@@ -102,7 +102,7 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
                 row.z as f32,
                 count,
                 room_id as u16,
-                0,
+                summon_type,
             );
             if trap_number > 0 {
                 for nid in &ids {
@@ -111,6 +111,8 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
             }
             if is_wave_monster {
                 spawned_monsters += ids.len();
+            } else if is_bridge {
+                spawned_bridges += ids.len();
             }
             spawned_total += ids.len();
         }
@@ -119,6 +121,7 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
             room_id,
             family,
             spawned_monsters,
+            spawned_bridges,
             spawned_total,
             "Juraid room NPCs spawned from monster_juraid_respawn_list"
         );
@@ -292,6 +295,11 @@ pub fn start_event_system_task(
                     // Kick all event zone users to their appropriate destination.
                     let event_zone = et.zone_id();
                     for sid in user_sids {
+                        world.update_session(*sid, |h| {
+                            h.event_room = 0;
+                            h.joined_event = false;
+                            h.is_final_joined_event = false;
+                        });
                         let nation = world
                             .get_character_info(*sid)
                             .map(|c| c.nation)
@@ -5842,11 +5850,11 @@ mod tests {
         assert_eq!(dest, 2, "Elmorad level 50 Chaos → Elmorad capital");
     }
 
-    /// Juraid kick: level >= 35 → Ronark Land (zone 71).
+    /// Juraid kick: exits to Moradon.
     #[test]
     fn test_kick_out_destination_juraid_high_level() {
         let dest = event_room::kick_out_destination(87, 1, 60);
-        assert_eq!(dest, 71, "High-level Juraid → Ronark Land");
+        assert_eq!(dest, 21, "High-level Juraid → Moradon");
     }
 
     /// Juraid kick: low-level → Moradon.

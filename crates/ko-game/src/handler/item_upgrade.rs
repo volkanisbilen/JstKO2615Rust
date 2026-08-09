@@ -1310,9 +1310,33 @@ async fn send_smash_fail(
     response_type: u8,
     error: SmashError,
 ) -> anyhow::Result<()> {
+    if response_type == ITEM_ACCESSORY_DISASSEMBLE {
+        return send_accessory_disassemble_fail(session, error).await;
+    }
+
     let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
     pkt.write_u8(response_type);
     pkt.write_u16(error as u16);
+    session.send_packet(&pkt).await
+}
+
+async fn send_accessory_disassemble_fail(
+    session: &mut ClientSession,
+    error: SmashError,
+) -> anyhow::Result<()> {
+    let result = match error {
+        SmashError::Success => UpgradeResult::Succeeded,
+        SmashError::Inventory | SmashError::Item | SmashError::Npc => UpgradeResult::NoMatch,
+    };
+
+    let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+    pkt.write_u8(ITEM_ACCESSORY_DISASSEMBLE);
+    pkt.write_u8(UPGRADE_TYPE_NORMAL);
+    pkt.write_u8(result as u8);
+    for _ in 0..ITEM_UPGRADE_SLOT_COUNT {
+        pkt.write_i32(0);
+        pkt.write_i8(-1);
+    }
     session.send_packet(&pkt).await
 }
 

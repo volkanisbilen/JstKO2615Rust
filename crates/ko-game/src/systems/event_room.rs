@@ -25,7 +25,7 @@ use dashmap::DashMap;
 use ko_protocol::{Opcode, Packet};
 
 use crate::state_change_constants::{STATE_CHANGE_INVISIBILITY, STATE_CHANGE_PARTY_LEADER};
-use crate::world::types::{ZONE_ELMORAD, ZONE_KARUS, ZONE_MORADON, ZONE_RONARK_LAND};
+use crate::world::types::{ZONE_ELMORAD, ZONE_KARUS, ZONE_MORADON};
 use crate::world::WorldState;
 use crate::zone::SessionId;
 
@@ -1048,6 +1048,8 @@ pub fn send_winner_screen(world: &WorldState, active_event: i16, now: u64) {
             // Determine winner nation for this room
             let winner = if is_chaos {
                 0 // Chaos: always FFA (no winner nation)
+            } else if room.winner_nation != 0 {
+                room.winner_nation
             } else if room.karus_score > room.elmorad_score {
                 1 // Karus wins
             } else if room.elmorad_score > room.karus_score {
@@ -1574,7 +1576,7 @@ fn send_event_zone_change(world: &WorldState, sid: SessionId, zone_id: u16, even
 
 /// Determine the kick-out destination zone for a player leaving an event.
 /// - BDW/Chaos: Nation capital (level >= 35) or Moradon
-/// - Juraid: Ronark Land or Moradon
+/// - Juraid: Moradon
 pub fn kick_out_destination(event_zone: u16, nation: u8, level: u8) -> u16 {
     match event_zone {
         // BDW (84) or Chaos (85): nation capital if level >= 35
@@ -1589,14 +1591,8 @@ pub fn kick_out_destination(event_zone: u16, nation: u8, level: u8) -> u16 {
                 ZONE_MORADON
             }
         }
-        // Juraid (87): Ronark Land if level sufficient, else Moradon
-        87 => {
-            if level >= NATION_CAPITAL_MIN_LEVEL {
-                ZONE_RONARK_LAND
-            } else {
-                ZONE_MORADON
-            }
-        }
+        // Juraid (87): original 2615 flow now exits to Moradon for this server.
+        87 => ZONE_MORADON,
         _ => ZONE_MORADON,
     }
 }
@@ -1657,20 +1653,17 @@ pub fn temple_event_room_close(world: &WorldState, event_type: TempleEventType, 
             let event_zone = event_type.zone_id();
             for (sid, nation, level) in &users {
                 let dest_zone = kick_out_destination(event_zone, *nation, *level);
-                world.update_position(*sid, dest_zone, 0.0, 0.0, 0.0);
-
-                let mut pkt = Packet::new(Opcode::WizZoneChange as u8);
-                pkt.write_u8(3); // ZONE_CHANGE_TELEPORT
-                pkt.write_u16(dest_zone);
-                pkt.write_u16(0);
-                pkt.write_u16(0);
-                pkt.write_u16(0);
-                pkt.write_u16(0);
-                pkt.write_u8(*nation);
-                pkt.write_u16(0xFFFF);
-
-                world.send_to_session_owned(*sid, pkt);
+                world.update_session(*sid, |h| {
+                    h.event_room = 0;
+                    h.joined_event = false;
+                    h.is_final_joined_event = false;
+                });
+                crate::handler::zone_change::server_teleport_to_zone(
+                    world, *sid, dest_zone, 0.0, 0.0,
+                );
             }
+
+            world.despawn_room_npcs(event_zone, *room_id as u16);
 
             tracing::info!(
                 "Event {:?} room {} — finish countdown expired, kicked {} users",
@@ -2535,8 +2528,8 @@ mod tests {
 
     #[test]
     fn test_kick_out_destination_juraid_high_level() {
-        assert_eq!(kick_out_destination(87, 1, 60), ZONE_RONARK_LAND);
-        assert_eq!(kick_out_destination(87, 2, 35), ZONE_RONARK_LAND);
+        assert_eq!(kick_out_destination(87, 1, 60), ZONE_MORADON);
+        assert_eq!(kick_out_destination(87, 2, 35), ZONE_MORADON);
     }
 
     #[test]
