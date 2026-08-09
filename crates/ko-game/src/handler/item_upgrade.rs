@@ -46,6 +46,7 @@ const NPC_ANVIL: u8 = 24;
 const UPGRADE_DELAY: u64 = 2;
 
 const MAX_ITEMS_REQ: usize = 8;
+const ITEM_UPGRADE_SLOT_COUNT: usize = 10;
 
 /// C++ sub-opcodes for WIZ_ITEM_UPGRADE (ItemUpgradeOpcodes enum).
 const ITEM_UPGRADE: u8 = 2;

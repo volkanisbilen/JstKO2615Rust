@@ -331,6 +331,7 @@ pub async fn process_chat_command(
         "open_skill" => handle_open_skill(session, &args)?,
         "open_master" => handle_open_master(session, &args).await?,
         "open_questskill" => handle_open_questskill(session, &args).await?,
+        "master" | "open_all_master" => handle_open_all_master(session, &args).await?,
         "bowlevent" => handle_bowlevent(session, &args)?,
         "mode_gamemaster" => handle_mode_gamemaster(session)?,
         "exp" => handle_exp_change(session, &args)?,
@@ -1534,6 +1535,7 @@ fn handle_help(session: &mut ClientSession) -> anyhow::Result<()> {
         "clear [CharName] - Clear inventory",
         "clearinventory CharName - Clear all items",
         "changegm CharName - Grant GM authority",
+        "master [CharName] - Open novice/master/quest skills",
         "reload_scripts - Reload quest scripts",
         "reloadranks - Reload rankings",
         "manesopen/manesclose - Manes Survival test lifecycle",
@@ -4684,6 +4686,7 @@ fn handle_open_skill(session: &mut ClientSession, args: &[&str]) -> anyhow::Resu
 
     // C++ also calls KnightsCurrentMember — update clan if applicable
     // (clan info already tracks class via CharacterInfo, no separate update needed)
+    persist_class_change(session, target_ch.name.clone(), new_class, target_ch.race);
 
     info!(
         "[{}] +open_skill: promoted {} class {}→{}",
@@ -4762,6 +4765,7 @@ async fn handle_open_master(session: &mut ClientSession, args: &[&str]) -> anyho
 
     // Recalculate abilities.
     world.set_user_ability(target_sid);
+    persist_class_change(session, target_ch.name.clone(), new_class, target_ch.race);
 
     // bBaseClass = (bOldClass / 2) - 1
     let base_class = (class_type / 2).saturating_sub(1) as u16;
@@ -4806,6 +4810,73 @@ async fn handle_open_master(session: &mut ClientSession, args: &[&str]) -> anyho
     );
 
     Ok(())
+}
+
+/// +master [CharName] — one-shot GM helper for opening novice, master and quest skills.
+async fn handle_open_all_master(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    let target_name = if args.is_empty() {
+        session
+            .world()
+            .get_character_info(session.session_id())
+            .map(|ch| ch.name)
+            .unwrap_or_default()
+    } else {
+        args[0].to_string()
+    };
+
+    if target_name.is_empty() {
+        send_help(session, "Usage: +master [CharName]");
+        return Ok(());
+    }
+
+    let world = session.world().clone();
+    let target_sid = match world.find_session_by_name(&target_name) {
+        Some(sid) => sid,
+        None => {
+            send_help(session, "Player not found or not online.");
+            return Ok(());
+        }
+    };
+    let target_arg = [target_name.as_str()];
+
+    if let Some(ch) = world.get_character_info(target_sid) {
+        if super::class_change::is_beginner(ch.class) {
+            handle_open_skill(session, &target_arg)?;
+        }
+    }
+
+    if let Some(ch) = world.get_character_info(target_sid) {
+        if super::class_change::is_novice(ch.class) {
+            handle_open_master(session, &target_arg).await?;
+        }
+    }
+
+    if let Some(ch) = world.get_character_info(target_sid) {
+        if super::class_change::is_mastered(ch.class) {
+            handle_open_questskill(session, &target_arg).await?;
+            send_help(
+                session,
+                &format!("{} master class and quest skills are open.", target_name),
+            );
+        } else {
+            send_help(session, "Target could not be promoted to master class.");
+        }
+    }
+
+    Ok(())
+}
+
+fn persist_class_change(session: &ClientSession, char_name: String, class: u16, race: u8) {
+    let pool = session.pool().clone();
+    tokio::spawn(async move {
+        let repo = ko_db::repositories::character::CharacterRepository::new(&pool);
+        if let Err(e) = repo
+            .save_class_change(&char_name, class as i16, race as i16)
+            .await
+        {
+            tracing::warn!("Failed to save class change for {char_name}: {e}");
+        }
+    });
 }
 
 /// +open_questskill <CharName> — save class-specific quest skill events.

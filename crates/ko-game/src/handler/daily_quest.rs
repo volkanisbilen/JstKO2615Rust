@@ -36,10 +36,10 @@ const DQ_OP_KILLUPDATE: u8 = 2;
 
 /// v2615 built-in beginner mission: "Rescuing Sid".
 /// The client places this mission in native panel slot 2 with mission ID 3,
-/// and completes it after one Worm (NPC proto 750) is killed in Moradon.
+/// and completes it after one Moradon Worm is killed.
 const RESCUING_SID_SLOT: u8 = 2;
 const RESCUING_SID_CLIENT_MISSION_ID: i32 = 3;
-const RESCUING_SID_WORM_PROTO_ID: u16 = 750;
+const RESCUING_SID_WORM_PROTO_IDS: [u16; 3] = [700, 750, 751];
 
 use crate::world::{ITEM_COUNT, ITEM_EXP, ITEM_GOLD, ITEM_LADDERPOINT, ITEM_RANDOM};
 
@@ -318,7 +318,9 @@ pub async fn update_daily_quest_count(world: &WorldState, sid: SessionId, monste
     // "Rescuing Sid" is a built-in one-kill beginner mission, not the
     // configurable Daily Quest Worm Hunt. Close its exact native panel entry
     // immediately while leaving the separate daily quest counter untouched.
-    if player_zone == 21 && monster_id == RESCUING_SID_WORM_PROTO_ID {
+    if matches!(player_zone, 21 | 22 | 23 | 24 | 25)
+        && RESCUING_SID_WORM_PROTO_IDS.contains(&monster_id)
+    {
         let complete_pkt = super::daily_quest_v2525::build_complete(
             RESCUING_SID_SLOT,
             RESCUING_SID_CLIENT_MISSION_ID,
