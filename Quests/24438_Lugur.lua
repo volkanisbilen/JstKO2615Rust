@@ -10,7 +10,7 @@ end
 
 if (EVENT == 3011) then
 	Level = CheckLevel(UID);
-	if (Level > 69) then
+	if (Level > 74) then
 		SelectMsg(UID, 2, -1, 804, NPC, 2002, 3012);
 	else
 		SelectMsg(UID, 2, -1, 810, NPC, 10, -1);

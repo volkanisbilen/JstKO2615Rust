@@ -1053,6 +1053,12 @@ pub fn track_juraid_monster_kill(
                     if opened_k || opened_e {
                         world.set_juraid_bridge_state(room_id, bridge_state);
                         world.broadcast_juraid_bridge_open(bridge_idx, room_id as u16);
+                        if bridge_idx + 1 == juraid::NUM_BRIDGES {
+                            let spawned = juraid::spawn_deva_bird(world, room_id);
+                            if spawned > 0 {
+                                tracing::info!(room_id, spawned, "Juraid Deva Bird spawned");
+                            }
+                        }
                         tracing::info!(
                             "Juraid room {} bridge {} opened by kill threshold score={}",
                             room_id,
@@ -1063,15 +1069,26 @@ pub fn track_juraid_monster_kill(
                 }
             }
 
-            // Deva Bird death ends Juraid. Use the existing manual-close path so the
-            // event tick performs winner calculation, cleanup and teleport handling.
-            if killed_npc_sid == 8106 {
+            // Deva Bird death should enter the reward phase, leaving the existing
+            // 20-second finish counter for chest interaction before teleport.
+            if juraid::is_deva_bird(killed_npc_sid) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let finish_secs = crate::systems::event_room::EventRoomManager::vroom_index(
+                    TempleEventType::JuraidMountain,
+                )
+                .and_then(|idx| world.event_room_manager.get_vroom_opt(idx))
+                .map(|opts| ((opts.sign + opts.play).max(0) as u64) * 60)
+                .unwrap_or(0);
                 world.event_room_manager.update_temple_event(|s| {
-                    s.manual_close = true;
-                    s.manual_closed_time = 0;
+                    s.manual_close = false;
+                    s.start_time = now.saturating_sub(finish_secs);
+                    s.closed_time = now;
                 });
                 tracing::info!(
-                    "Juraid Deva Bird killed by '{}'; event finish requested",
+                    "Juraid Deva Bird killed by '{}'; reward countdown requested",
                     killer_name,
                 );
             }
@@ -1097,29 +1114,18 @@ fn spawn_juraid_child_monsters(
     killed_x: f32,
     killed_z: f32,
 ) {
-    if killed_npc_sid == 8106 || killed_npc_sid == 8110 {
+    if juraid::is_deva_bird(killed_npc_sid) || juraid::is_bridge(killed_npc_sid) {
         return;
     }
 
-    let family = 20 + room_id as i16;
-    let rows = world.get_juraid_respawn_family(family);
-    let main_sids: Vec<u16> = rows
-        .iter()
-        .filter(|row| row.b_type == 0 && row.s_sid != 8106 && row.s_sid != 8110)
-        .take(juraid::ROOM_MAIN_MONSTER_COUNT)
-        .map(|row| row.s_sid as u16)
-        .collect();
-    if !main_sids.contains(&killed_npc_sid) {
+    if !juraid::is_main_monster(world, room_id, killed_npc_sid) {
         return;
     }
 
-    let child_sid = rows
-        .iter()
-        .filter(|row| row.b_type == 0 && row.s_sid != 8106 && row.s_sid != 8110)
-        .skip(juraid::ROOM_MAIN_MONSTER_COUNT)
-        .find(|row| row.s_sid as u16 != killed_npc_sid)
-        .map(|row| row.s_sid as u16)
-        .unwrap_or(killed_npc_sid);
+    let Some(child_sid) = juraid::select_child_monster_sid(world, room_id, killed_npc_sid) else {
+        tracing::warn!(room_id, killed_npc_sid, "Juraid child monster skipped: no candidate");
+        return;
+    };
 
     let spawned = world.spawn_event_npc_ex(
         child_sid,

@@ -363,6 +363,8 @@ pub async fn process_chat_command(
         "juraidopen" => handle_temple_event_open(session, TempleEventKind::Juraid)?,
         "juraidstart" => handle_juraid_event_start(session)?,
         "juraidclose" => handle_temple_event_close(session, TempleEventKind::Juraid)?,
+        "utcopen" | "undercastleopen" => handle_under_castle_open(session, &args)?,
+        "utcclose" | "undercastleclose" => handle_under_castle_close(session)?,
         "manesopen" => handle_manes_survival_open(session)?,
         "manesstart" => handle_manes_survival_start(session)?,
         "manesclose" => handle_manes_survival_close(session)?,
@@ -6196,6 +6198,74 @@ fn handle_juraid_event_start(session: &mut ClientSession) -> anyhow::Result<()> 
         signed
     );
 
+    Ok(())
+}
+
+/// +utcopen [minutes] — start Under The Castle using the loaded DB spawn table.
+fn handle_under_castle_open(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let duration_minutes = args
+        .first()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(180);
+    let spawn_count = world.utc_spawns().read().len();
+    if spawn_count == 0 {
+        send_help(session, "Under The Castle: monster_under_the_castle table is empty.");
+        return Ok(());
+    }
+
+    let state = world.under_the_castle_state();
+    if !crate::handler::under_castle::activate_event(
+        state,
+        duration_minutes,
+        crate::handler::under_castle::MIN_LEVEL_UNDER_CASTLE,
+        83,
+    ) {
+        send_help(session, "Under The Castle is already active or duration is invalid.");
+        return Ok(());
+    }
+
+    let msg = format!(
+        "Under The Castle has started. Duration: {} minute(s).",
+        duration_minutes
+    );
+    world.broadcast_to_all(
+        Arc::new(crate::systems::timed_notice::build_notice_packet(8, &msg)),
+        None,
+    );
+    send_help(session, &msg);
+    info!(
+        "[{}] +utcopen: Under The Castle started (duration={}min, spawns={})",
+        session.addr(),
+        duration_minutes,
+        spawn_count
+    );
+    Ok(())
+}
+
+/// +utcclose — stop Under The Castle on the next UTC timer tick.
+fn handle_under_castle_close(session: &mut ClientSession) -> anyhow::Result<()> {
+    let world = session.world().clone();
+    let state = world.under_the_castle_state();
+    if !state
+        .is_active
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        send_help(session, "Under The Castle is not active.");
+        return Ok(());
+    }
+
+    crate::handler::under_castle::force_stop_event(state);
+    world.broadcast_to_all(
+        Arc::new(crate::systems::timed_notice::build_notice_packet(
+            8,
+            "Under The Castle is closing.",
+        )),
+        None,
+    );
+    send_help(session, "Under The Castle close submitted.");
+    info!("[{}] +utcclose: Under The Castle close submitted", session.addr());
     Ok(())
 }
 

@@ -4788,7 +4788,7 @@ fn lua_event_soccer_stard(lua: &Lua, uid: i32) -> LuaResult<()> {
 /// Returns 1 on success, 0 on failure.
 /// C++ checks: isEventUser, zone prison, active event match, level limits, loyalty, coins.
 fn lua_join_event(lua: &Lua, uid: i32) -> LuaResult<i32> {
-    const MIN_LEVEL_JURAID: u8 = 35;
+    const MIN_LEVEL_JURAID: u8 = 75;
     const TEMPLE_EVENT_JOIN: u8 = 8;
     const TEMPLE_EVENT_JURAD_MOUNTAIN: i16 = 100;
 

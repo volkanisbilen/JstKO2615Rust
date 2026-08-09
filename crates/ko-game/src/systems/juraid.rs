@@ -17,9 +17,12 @@
 
 use std::collections::HashMap;
 
+use ko_db::models::MonsterJuraidRespawnRow;
+
 use crate::systems::event_room::{
     EventRoom, EventRoomManager, EventUser, RoomState, TempleEventType, MAX_ROOM_USERS_PER_NATION,
 };
+use crate::world::WorldState;
 
 pub use crate::world::types::ZONE_JURAID;
 
@@ -40,6 +43,116 @@ pub const ROOM_BRIDGE_KILL_THRESHOLDS: [i32; NUM_BRIDGES] = [20, 40, 60];
 
 /// Bridge open delays in seconds from event start.
 pub const BRIDGE_OPEN_DELAYS: [u64; NUM_BRIDGES] = [1200, 1800, 2400];
+
+pub const DEVA_BIRD_SID: u16 = 8106;
+pub const BRIDGE_SID: u16 = 8110;
+
+pub fn is_deva_bird(sid: u16) -> bool {
+    sid == DEVA_BIRD_SID
+}
+
+pub fn is_bridge(sid: u16) -> bool {
+    sid == BRIDGE_SID
+}
+
+pub fn is_wave_monster(row: &MonsterJuraidRespawnRow) -> bool {
+    row.b_type == 0 && !is_deva_bird(row.s_sid as u16) && !is_bridge(row.s_sid as u16)
+}
+
+fn template_hp(world: &WorldState, sid: u16) -> u32 {
+    world
+        .get_npc_template(sid, true)
+        .map(|tmpl| tmpl.max_hp)
+        .unwrap_or(0)
+}
+
+pub fn main_monster_rows(
+    world: &WorldState,
+    rows: &[MonsterJuraidRespawnRow],
+) -> Vec<MonsterJuraidRespawnRow> {
+    let mut wave_rows: Vec<_> = rows.iter().filter(|row| is_wave_monster(row)).cloned().collect();
+    wave_rows.sort_by_key(|row| {
+        (
+            std::cmp::Reverse(template_hp(world, row.s_sid as u16)),
+            row.s_index,
+        )
+    });
+    wave_rows.truncate(ROOM_MAIN_MONSTER_COUNT);
+    wave_rows
+}
+
+pub fn is_main_monster(world: &WorldState, room_id: u8, sid: u16) -> bool {
+    let family = 20 + room_id as i16;
+    let rows = world.get_juraid_respawn_family(family);
+    main_monster_rows(world, &rows)
+        .iter()
+        .any(|row| row.s_sid as u16 == sid)
+}
+
+pub fn select_child_monster_sid(world: &WorldState, room_id: u8, killed_sid: u16) -> Option<u16> {
+    let family = 20 + room_id as i16;
+    let rows = world.get_juraid_respawn_family(family);
+    let killed_hp = template_hp(world, killed_sid);
+
+    let mut candidates: Vec<_> = rows
+        .iter()
+        .filter(|row| is_wave_monster(row))
+        .filter(|row| row.s_sid as u16 != killed_sid)
+        .filter(|row| template_hp(world, row.s_sid as u16) < killed_hp)
+        .cloned()
+        .collect();
+
+    let non_lillime_exists = candidates.iter().any(|row| {
+        !row.str_name
+            .to_ascii_lowercase()
+            .contains("lillime")
+    });
+    if non_lillime_exists {
+        candidates.retain(|row| {
+            !row.str_name
+                .to_ascii_lowercase()
+                .contains("lillime")
+        });
+    }
+
+    if candidates.is_empty() {
+        candidates = rows
+            .iter()
+            .filter(|row| is_wave_monster(row))
+            .filter(|row| row.s_sid as u16 != killed_sid)
+            .filter(|row| {
+                !row.str_name
+                    .to_ascii_lowercase()
+                    .contains("lillime")
+            })
+            .cloned()
+            .collect();
+    }
+
+    candidates.sort_by_key(|row| (template_hp(world, row.s_sid as u16), row.s_index));
+    candidates.first().map(|row| row.s_sid as u16)
+}
+
+pub fn spawn_deva_bird(world: &WorldState, room_id: u8) -> usize {
+    let family = 20 + room_id as i16;
+    let rows = world.get_juraid_respawn_family(family);
+    let Some(row) = rows.iter().find(|row| row.s_sid as u16 == DEVA_BIRD_SID) else {
+        return 0;
+    };
+
+    world
+        .spawn_event_npc_ex(
+            DEVA_BIRD_SID,
+            true,
+            ZONE_JURAID,
+            row.x as f32,
+            row.z as f32,
+            1,
+            room_id as u16,
+            0,
+        )
+        .len()
+}
 
 // ── Juraid Bridge State ─────────────────────────────────────────────────────
 

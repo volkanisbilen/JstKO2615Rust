@@ -54,23 +54,32 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
         world.despawn_room_npcs(juraid::ZONE_JURAID, room_id as u16);
 
         let mut bridge_trap = 1u8;
-        let mut spawned = 0usize;
-        let mut main_monsters_spawned = 0usize;
+        let main_rows = juraid::main_monster_rows(world, &rows);
+        let mut spawned_total = 0usize;
+        let mut spawned_monsters = 0usize;
         for row in rows {
             let is_monster = row.b_type == 0;
-            let is_deva = row.s_sid == 8106;
-            let is_bridge = row.s_sid == 8110;
-            if is_monster && !is_deva && main_monsters_spawned >= juraid::ROOM_MAIN_MONSTER_COUNT {
+            let is_deva = juraid::is_deva_bird(row.s_sid as u16);
+            let is_bridge = juraid::is_bridge(row.s_sid as u16);
+            let is_wave_monster = juraid::is_wave_monster(&row);
+
+            if is_deva {
+                continue;
+            }
+            if is_wave_monster
+                && !main_rows
+                    .iter()
+                    .any(|main| main.s_index == row.s_index && main.s_sid == row.s_sid)
+            {
                 continue;
             }
 
-            let count = if is_monster && !is_deva {
-                main_monsters_spawned += 1;
+            let count = if is_wave_monster {
                 1
             } else {
                 row.s_count.max(1) as u16
             };
-            let trap_number = if row.s_sid == 8110 {
+            let trap_number = if is_bridge {
                 let trap = bridge_trap;
                 bridge_trap = bridge_trap.saturating_add(1);
                 trap
@@ -98,13 +107,17 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
                     world.update_npc_trap_number(*nid, trap_number as i16);
                 }
             }
-            spawned += ids.len();
+            if is_wave_monster {
+                spawned_monsters += ids.len();
+            }
+            spawned_total += ids.len();
         }
 
         tracing::info!(
             room_id,
             family,
-            spawned,
+            spawned_monsters,
+            spawned_total,
             "Juraid room NPCs spawned from monster_juraid_respawn_list"
         );
     }
@@ -286,6 +299,12 @@ pub fn start_event_system_task(
                             world.broadcast_juraid_bridge_open(bridge_idx, room_id as u16);
                             if let Some(rs) = juraid_mgr.room_states.get(&room_id) {
                                 world.set_juraid_bridge_state(room_id, rs.bridges.clone());
+                            }
+                            if bridge_idx + 1 == juraid::NUM_BRIDGES {
+                                let spawned = juraid::spawn_deva_bird(&world, room_id);
+                                if spawned > 0 {
+                                    tracing::info!(room_id, spawned, "Juraid Deva Bird spawned");
+                                }
                             }
                         }
 

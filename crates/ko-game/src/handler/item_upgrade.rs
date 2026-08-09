@@ -1969,24 +1969,43 @@ async fn item_disassemble(
             }
         });
 
+        let mut reward_slots: Vec<(u32, u8)> = Vec::with_capacity(reward_count as usize);
+
+        for _ in 0..reward_count {
+            if let Some(slot_idx) = world.find_slot_for_item(sid, reward_item_id, 1) {
+                if slot_idx >= SLOT_MAX && world.give_item(sid, reward_item_id, 1) {
+                    reward_slots.push((reward_item_id, (slot_idx - SLOT_MAX) as u8));
+                }
+            }
+        }
+
+        if reward_slots.len() != reward_count as usize {
+            return send_smash_fail(session, response_type, SmashError::Inventory).await;
+        }
+
         let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
         pkt.write_u8(response_type);
         pkt.write_u16(SmashError::Success as u16);
         pkt.write_u32(item_id);
         pkt.write_u8(slot);
         pkt.write_u16(reward_count);
-
-        for _ in 0..reward_count {
-            if let Some(slot_idx) = world.find_slot_for_item(sid, reward_item_id, 1) {
-                if slot_idx >= SLOT_MAX && world.give_item(sid, reward_item_id, 1) {
-                    pkt.write_u32(reward_item_id);
-                    pkt.write_u8((slot_idx - SLOT_MAX) as u8);
-                    pkt.write_u16(1);
-                }
-            }
+        for (reward_id, reward_slot) in &reward_slots {
+            pkt.write_u32(*reward_id);
+            pkt.write_u8(*reward_slot);
+            pkt.write_u16(1);
         }
-
         session.send_packet(&pkt).await?;
+
+        let mut anvil_pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+        anvil_pkt.write_u8(response_type);
+        anvil_pkt.write_u8(UPGRADE_TYPE_NORMAL);
+        anvil_pkt.write_u8(UpgradeResult::Succeeded as u8);
+        for (reward_id, reward_slot) in &reward_slots {
+            anvil_pkt.write_i32(*reward_id as i32);
+            anvil_pkt.write_i8(*reward_slot as i8);
+        }
+        session.send_packet(&anvil_pkt).await?;
+
         world.set_user_ability(sid);
         return Ok(());
     }
