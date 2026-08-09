@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::session::{ClientSession, SessionState};
 use crate::systems::bdw;
 use crate::systems::event_room::{self, TempleEventType};
+use crate::systems::juraid;
 use crate::world::types::{
     ZONE_BATTLE6, ZONE_CAITHAROS_ARENA, ZONE_CHAOS_DUNGEON, ZONE_DELOS_CASTELLAN,
     ZONE_DESPERATION_ABYSS, ZONE_DRAGON_CAVE, ZONE_DRAKI_TOWER, ZONE_DUNGEON_DEFENCE,
@@ -959,7 +960,14 @@ pub fn rob_chaos_skill_items(world: &WorldState, sid: SessionId) {
 /// nation in the appropriate Juraid room.
 /// This is a public helper that other handlers can call. The actual wiring in
 /// attack.rs::handle_npc_death should call this when the NPC dies in zone 87.
-pub fn track_juraid_monster_kill(world: &WorldState, killer_sid: SessionId, killed_npc_sid: u16) {
+pub fn track_juraid_monster_kill(
+    world: &WorldState,
+    killer_sid: SessionId,
+    killed_npc_sid: u16,
+    killed_event_room: u16,
+    killed_x: f32,
+    killed_z: f32,
+) {
     // Check if Juraid is active
     let is_juraid_active = world
         .event_room_manager
@@ -1026,7 +1034,16 @@ pub fn track_juraid_monster_kill(world: &WorldState, killer_sid: SessionId, kill
             // Fast progression for 2615 Juraid rooms: GM/test kills can clear a room
             // much faster than the original 20/30/40 minute bridge timers.
             let nation_score = if killer_nation == 1 { k_score } else { e_score };
-            for (bridge_idx, threshold) in [4, 8, 12].iter().enumerate() {
+            spawn_juraid_child_monsters(
+                world,
+                room_id,
+                killed_npc_sid,
+                killed_event_room,
+                killed_x,
+                killed_z,
+            );
+
+            for (bridge_idx, threshold) in juraid::ROOM_BRIDGE_KILL_THRESHOLDS.iter().enumerate() {
                 if nation_score >= *threshold {
                     let mut bridge_state = world
                         .get_juraid_bridge_state(room_id)
@@ -1070,6 +1087,57 @@ pub fn track_juraid_monster_kill(world: &WorldState, killer_sid: SessionId, kill
             return;
         }
     }
+}
+
+fn spawn_juraid_child_monsters(
+    world: &WorldState,
+    room_id: u8,
+    killed_npc_sid: u16,
+    killed_event_room: u16,
+    killed_x: f32,
+    killed_z: f32,
+) {
+    if killed_npc_sid == 8106 || killed_npc_sid == 8110 {
+        return;
+    }
+
+    let family = 20 + room_id as i16;
+    let rows = world.get_juraid_respawn_family(family);
+    let main_sids: Vec<u16> = rows
+        .iter()
+        .filter(|row| row.b_type == 0 && row.s_sid != 8106 && row.s_sid != 8110)
+        .take(juraid::ROOM_MAIN_MONSTER_COUNT)
+        .map(|row| row.s_sid as u16)
+        .collect();
+    if !main_sids.contains(&killed_npc_sid) {
+        return;
+    }
+
+    let child_sid = rows
+        .iter()
+        .filter(|row| row.b_type == 0 && row.s_sid != 8106 && row.s_sid != 8110)
+        .skip(juraid::ROOM_MAIN_MONSTER_COUNT)
+        .find(|row| row.s_sid as u16 != killed_npc_sid)
+        .map(|row| row.s_sid as u16)
+        .unwrap_or(killed_npc_sid);
+
+    let spawned = world.spawn_event_npc_ex(
+        child_sid,
+        true,
+        juraid::ZONE_JURAID,
+        killed_x,
+        killed_z,
+        juraid::ROOM_CHILD_MONSTER_COUNT,
+        killed_event_room,
+        0,
+    );
+    tracing::info!(
+        room_id,
+        killed_npc_sid,
+        child_sid,
+        spawned = spawned.len(),
+        "Juraid main monster released child monsters"
+    );
 }
 
 /// Track a Juraid PvP kill — updates room kill count and broadcasts scoreboard.

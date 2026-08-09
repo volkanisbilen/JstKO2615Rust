@@ -29,6 +29,15 @@ pub const DEFAULT_JURAID_ROOMS: u8 = 10;
 /// Number of bridge gates in Juraid Mountain.
 pub const NUM_BRIDGES: usize = 3;
 
+/// Each side room starts with four strong monsters.
+pub const ROOM_MAIN_MONSTER_COUNT: usize = 4;
+
+/// Each strong monster death releases four lower monsters.
+pub const ROOM_CHILD_MONSTER_COUNT: u16 = 4;
+
+/// Monster kill totals required to open the three room bridges.
+pub const ROOM_BRIDGE_KILL_THRESHOLDS: [i32; NUM_BRIDGES] = [20, 40, 60];
+
 /// Bridge open delays in seconds from event start.
 pub const BRIDGE_OPEN_DELAYS: [u64; NUM_BRIDGES] = [1200, 1800, 2400];
 

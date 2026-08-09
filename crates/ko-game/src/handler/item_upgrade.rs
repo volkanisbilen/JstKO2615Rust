@@ -35,6 +35,7 @@ const ITEM_MIDDLE_CLASS_TRINA: u32 = 352900000;
 const ITEM_BLESSING_LOGOS: u32 = 890092000;
 /// Accessory trina piece.
 const ITEM_RING_TRINA: u32 = 354000000;
+const ITEM_ACCESSORY_DISASSEMBLE_SCROLL: u32 = 810325000;
 const ACCESSORY_UPGRADE_SCROLLS: [i32; 6] = [
     379159000, 379160000, 379161000, 379162000, 379163000, 379164000,
 ];
@@ -1721,6 +1722,12 @@ async fn item_disassemble(
                     continue;
                 };
                 candidates.push((packet_item_id, candidate_slot, inv_item_id));
+                if inv_item_id == ITEM_ACCESSORY_DISASSEMBLE_SCROLL
+                    || packet_item_id == ITEM_ACCESSORY_DISASSEMBLE_SCROLL
+                {
+                    material.get_or_insert((inv_item_id, candidate_slot));
+                    continue;
+                }
 
                 let is_reverseable = world
                     .find_upgrade_recipe_by_new_number_and_req_items(
@@ -1742,6 +1749,39 @@ async fn item_disassemble(
                     selected = Some((inv_item_id, candidate_slot));
                 } else if material.is_none() {
                     material = Some((inv_item_id, candidate_slot));
+                }
+            }
+
+            if selected.is_none() {
+                for i in 0..HAVE_MAX {
+                    let Some(inv_item_id) = world
+                        .get_inventory_slot(sid, SLOT_MAX + i)
+                        .map(|inv| inv.item_id)
+                        .filter(|id| *id != 0 && *id != ITEM_ACCESSORY_DISASSEMBLE_SCROLL)
+                    else {
+                        continue;
+                    };
+
+                    let is_reverseable = world
+                        .find_upgrade_recipe_by_new_number_and_req_items(
+                            inv_item_id as i32,
+                            &ACCESSORY_UPGRADE_SCROLLS,
+                        )
+                        .is_some();
+                    let looks_like_upgraded_accessory = inv_item_id % 10 > 0
+                        && world.get_item(inv_item_id).is_some_and(|proto| {
+                            proto.countable.unwrap_or(0) == 0
+                                && proto.kind.unwrap_or(0) != ITEM_KIND_UNIQUE
+                                && matches!(
+                                    proto.item_class.unwrap_or(0) as i16,
+                                    21 | 22 | 31 | 32 | 33 | 34 | 35 | 37 | 38
+                                )
+                        });
+
+                    if is_reverseable || looks_like_upgraded_accessory {
+                        selected = Some((inv_item_id, i as u8));
+                        break;
+                    }
                 }
             }
 

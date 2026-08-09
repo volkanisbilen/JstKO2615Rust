@@ -55,9 +55,21 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
 
         let mut bridge_trap = 1u8;
         let mut spawned = 0usize;
+        let mut main_monsters_spawned = 0usize;
         for row in rows {
-            let count = row.s_count.max(1) as u16;
             let is_monster = row.b_type == 0;
+            let is_deva = row.s_sid == 8106;
+            let is_bridge = row.s_sid == 8110;
+            if is_monster && !is_deva && main_monsters_spawned >= juraid::ROOM_MAIN_MONSTER_COUNT {
+                continue;
+            }
+
+            let count = if is_monster && !is_deva {
+                main_monsters_spawned += 1;
+                1
+            } else {
+                row.s_count.max(1) as u16
+            };
             let trap_number = if row.s_sid == 8110 {
                 let trap = bridge_trap;
                 bridge_trap = bridge_trap.saturating_add(1);
@@ -65,6 +77,11 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
             } else {
                 0
             };
+            if is_bridge {
+                // Bridge gate NPCs are state objects, not room monsters.
+                // Keep their DB count untouched, but never let them count as
+                // Juraid wave monsters.
+            }
 
             let ids = world.spawn_event_npc_ex(
                 row.s_sid as u16,

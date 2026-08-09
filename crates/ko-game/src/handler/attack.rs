@@ -2812,7 +2812,14 @@ pub(crate) async fn handle_npc_death(
     // When a monster dies in zone 87 during an active Juraid event, track
     // the kill for the player's nation room.
     if npc.zone_id == ZONE_JURAID_MOUNTAIN && npc.is_monster && npc.event_room > 0 {
-        super::dead::track_juraid_monster_kill(world, killer_sid, npc.proto_id);
+        super::dead::track_juraid_monster_kill(
+            world,
+            killer_sid,
+            npc.proto_id,
+            npc.event_room,
+            npc.x,
+            npc.z,
+        );
     }
 
     // ── Forgotten Temple monster death (C++ CNpc::ForgettenTempleMonsterDead) ──
