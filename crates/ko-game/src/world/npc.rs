@@ -1464,6 +1464,26 @@ impl WorldState {
         }
     }
 
+    pub(crate) fn kill_non_monster_npcs_in_room(&self, zone_id: u16, event_room: u16) {
+        if event_room == 0 {
+            return;
+        }
+        let matching_nids: Vec<NpcId> = self
+            .npc_instances
+            .iter()
+            .filter(|entry| {
+                let inst = entry.value();
+                inst.zone_id == zone_id
+                    && inst.event_room == event_room
+                    && !inst.is_monster
+            })
+            .map(|entry| *entry.key())
+            .collect();
+        for nid in matching_nids {
+            self.kill_npc_by_runtime_id(nid);
+        }
+    }
+
     /// Insert an NPC instance and register it in the zone's region grid.
     ///
     /// Calculates proper region coordinates from the instance's world position

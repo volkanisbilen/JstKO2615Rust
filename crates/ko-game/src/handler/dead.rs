@@ -1093,6 +1093,9 @@ pub fn track_juraid_monster_kill(
                     if opened_k || opened_e {
                         world.set_juraid_bridge_state(room_id, bridge_state);
                         world.broadcast_juraid_bridge_open(bridge_idx, room_id as u16);
+                        if bridge_idx < juraid::NUM_BRIDGES - 1 {
+                            spawn_juraid_next_wave(world, room_id);
+                        }
                         if bridge_idx + 1 == juraid::NUM_BRIDGES {
                             let spawned = juraid::spawn_deva_bird(world, room_id);
                             let monument_spawned =
@@ -1151,6 +1154,32 @@ pub fn track_juraid_monster_kill(
             return;
         }
     }
+}
+
+/// Opened bridges lead to another monster wave.  The database stores one
+/// family per room, so later waves reuse that room's four main templates at
+/// their configured coordinates; without this, scores stop at 20 and the
+/// 40/60 bridge thresholds can never be reached.
+fn spawn_juraid_next_wave(world: &WorldState, room_id: u8) {
+    let family = 20 + room_id as i16;
+    let rows = world.get_juraid_respawn_family(family);
+    let main_rows = juraid::main_monster_rows(world, &rows);
+    let mut spawned = 0usize;
+    for row in main_rows {
+        spawned += world
+            .spawn_event_npc_ex(
+                row.s_sid as u16,
+                true,
+                juraid::ZONE_JURAID,
+                row.x as f32,
+                row.z as f32,
+                1,
+                room_id as u16,
+                juraid::SUMMON_JURAID_MAIN,
+            )
+            .len();
+    }
+    tracing::info!(room_id, spawned, "Juraid next monster wave spawned");
 }
 
 fn spawn_juraid_child_monsters(

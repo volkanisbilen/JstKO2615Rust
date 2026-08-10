@@ -4505,9 +4505,13 @@ fn lua_draki_tower_npc_out(lua: &Lua, uid: i32) -> LuaResult<()> {
         return Ok(());
     }
 
-    // Never clear another player's concurrent Draki instance.
+    // Never clear another player's concurrent Draki instance.  Use the
+    // established room-scoped event cleanup API here; a zone-wide cleanup
+    // would remove NPCs from every concurrent Draki run.
     let event_room = w.get_event_room(sid);
-    w.kill_non_monster_npcs_in_room(ZONE_DRAKI_TOWER, event_room);
+    if event_room > 0 {
+        w.despawn_room_npcs(ZONE_DRAKI_TOWER, event_room);
+    }
 
     Ok(())
 }
