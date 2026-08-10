@@ -854,6 +854,7 @@ dependencies = [
  "rand",
  "serde",
  "smallvec",
+ "sqlx",
  "thiserror",
  "tokio",
  "toml",

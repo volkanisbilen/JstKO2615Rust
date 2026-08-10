@@ -4505,12 +4505,14 @@ fn lua_draki_tower_npc_out(lua: &Lua, uid: i32) -> LuaResult<()> {
         return Ok(());
     }
 
-    // Never clear another player's concurrent Draki instance.  Use the
-    // established room-scoped event cleanup API here; a zone-wide cleanup
-    // would remove NPCs from every concurrent Draki run.
+    // Never clear another player's concurrent Draki instance or the monster
+    // wave DrakiRiftChange just spawned. The client scripts call this after
+    // DrakiRiftChange, so only the old floor NPCs may be removed here.
     let event_room = w.get_event_room(sid);
     if event_room > 0 {
-        w.despawn_room_npcs(ZONE_DRAKI_TOWER, event_room);
+        w.kill_non_monster_npcs_in_room(ZONE_DRAKI_TOWER, event_room);
+    } else {
+        w.kill_non_monster_npcs_in_zone(ZONE_DRAKI_TOWER);
     }
 
     Ok(())
@@ -4943,22 +4945,31 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut rooms = w.draki_tower_rooms_write();
-        if let Some(room) = rooms.get_mut(&event_room) {
-            room.draki_stage = resolved_stage;
-            room.draki_sub_stage = resolved_sub_stage;
-            room.draki_sub_timer = now + 300;
-            room.is_draki_stage_change = true;
-            room.draki_monster_kill = 0;
+        // Keep the guard in its own scope. A named parking_lot guard is
+        // dropped at scope end; retaining it until the second write below
+        // self-deadlocks the Lua execution at event 101.
+        {
+            let mut rooms = w.draki_tower_rooms_write();
+            if let Some(room) = rooms.get_mut(&event_room) {
+                room.draki_stage = resolved_stage;
+                room.draki_sub_stage = resolved_sub_stage;
+                room.draki_sub_timer = now + 300;
+                room.is_draki_stage_change = true;
+                room.draki_monster_kill = 0;
+            }
         }
 
         w.despawn_room_npcs(crate::handler::draki_tower::ZONE_DRAKI_TOWER, event_room);
         let monsters = w.draki_monster_list();
         let mut monster_count = 0u32;
         for monster in crate::handler::draki_tower::get_monsters_for_stage(&monsters, stage_id) {
-            w.spawn_event_npc_ex(
+            // The imported Draki list's boolean is not a reliable entity
+            // type discriminator (monster rows are stored as FALSE). The
+            // resolved stage has npc_state=0, so mirror the normal stage
+            // progression path and spawn every row as a monster.
+            let spawned = w.spawn_event_npc_ex(
                 monster.monster_id as u16,
-                monster.is_monster,
+                true,
                 crate::handler::draki_tower::ZONE_DRAKI_TOWER,
                 monster.pos_x as f32,
                 monster.pos_z as f32,
@@ -4966,12 +4977,15 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
                 event_room,
                 0,
             );
-            if monster.is_monster {
+            if !spawned.is_empty() {
                 monster_count = monster_count.saturating_add(1);
             }
         }
-        if let Some(room) = w.draki_tower_rooms_write().get_mut(&event_room) {
-            room.draki_monster_kill = monster_count;
+        {
+            let mut rooms = w.draki_tower_rooms_write();
+            if let Some(room) = rooms.get_mut(&event_room) {
+                room.draki_monster_kill = monster_count;
+            }
         }
     }
 

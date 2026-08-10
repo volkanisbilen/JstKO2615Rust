@@ -35,9 +35,11 @@ const DQ_OP_USERINFO: u8 = 1;
 const DQ_OP_KILLUPDATE: u8 = 2;
 
 /// v2615 built-in beginner mission: "Rescuing Sid".
-/// The client places this mission in native panel slot 2 with mission ID 3,
-/// and completes it after one Moradon Worm is killed.
-const RESCUING_SID_SLOT: u8 = 2;
+/// The client places this mission in the first native panel slot (zero-based
+/// slot 0) with mission ID 3, and completes it after one Moradon Worm is
+/// killed.  Slot 2 was used by the earlier workaround, which made the server
+/// log completion while leaving the first visible entry open in the client.
+const RESCUING_SID_SLOT: u8 = 0;
 const RESCUING_SID_CLIENT_MISSION_ID: i32 = 3;
 const RESCUING_SID_WORM_PROTO_IDS: [u16; 3] = [700, 750, 751];
 
