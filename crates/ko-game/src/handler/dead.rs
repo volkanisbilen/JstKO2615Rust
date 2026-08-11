@@ -969,6 +969,20 @@ pub fn track_juraid_monster_kill(
     killed_x: f32,
     killed_z: f32,
 ) {
+    // Match the C++ CNpc::HandleJuraidKill gate: only Juraid-spawned
+    // entities participate in the event. Ordinary zone monsters (including
+    // GM-spawned monsters with summon_type=0) must not alter Juraid scores or
+    // bridge progression.
+    if !matches!(
+        killed_summon_type,
+        juraid::SUMMON_JURAID_MAIN
+            | juraid::SUMMON_JURAID_CHILD
+            | juraid::SUMMON_JURAID_DEVA
+            | juraid::SUMMON_JURAID_MONUMENT
+    ) {
+        return;
+    }
+
     // Check if Juraid is active
     let is_juraid_active = world
         .event_room_manager
@@ -999,7 +1013,7 @@ pub fn track_juraid_monster_kill(
             .is_some_and(|room| room.get_user(&killer_name).is_some());
 
         if found {
-            let (k_score, e_score) = {
+            let (k_score, e_score, score_changed) = {
                 let Some(mut room) = world
                     .event_room_manager
                     .get_room_mut(TempleEventType::JuraidMountain, room_id)
@@ -1009,14 +1023,20 @@ pub fn track_juraid_monster_kill(
                 if room.finish_packet_sent {
                     return;
                 }
+                let mut score_changed = false;
                 if juraid::is_juraid_monument(killed_npc_sid) {
                     let monument_nation = juraid::monument_nation(killed_npc_sid);
-                    let can_score = match killer_nation {
-                        1 => room.karus_score <= room.elmorad_score,
-                        2 => room.elmorad_score <= room.karus_score,
-                        _ => false,
-                    };
+                    // Only the opposing nation may destroy a monument. Per
+                    // the Juraid design document, a point is granted only to
+                    // the tied/trailing team.
+                    let can_score = juraid::can_monument_score(
+                        killer_nation,
+                        killed_npc_sid,
+                        room.karus_score,
+                        room.elmorad_score,
+                    );
                     if can_score {
+                        score_changed = true;
                         if killer_nation == 1 {
                             room.karus_score += 1;
                         } else if killer_nation == 2 {
@@ -1043,34 +1063,27 @@ pub fn track_juraid_monster_kill(
                     }
                 } else if juraid::is_deva_bird(killed_npc_sid) {
                     room.winner_nation = killer_nation;
-                } else {
-                    // Update EventRoom scores directly
-                    if killer_nation == 1 {
-                        room.karus_score += 1;
-                    } else {
-                        room.elmorad_score += 1;
-                    }
                 }
-                (room.karus_score, room.elmorad_score)
+                (room.karus_score, room.elmorad_score, score_changed)
             };
 
-            // Broadcast TEMPLE_SCREEN scoreboard to room users after every monster kill.
-            let arc_screen = Arc::new(event_room::build_temple_screen_packet(k_score, e_score));
-            if let Some(room) = world
-                .event_room_manager
-                .get_room(TempleEventType::JuraidMountain, room_id)
-            {
-                for u in room.karus_users.values().filter(|u| !u.logged_out) {
-                    world.send_to_session_arc(u.session_id, Arc::clone(&arc_screen));
-                }
-                for u in room.elmorad_users.values().filter(|u| !u.logged_out) {
-                    world.send_to_session_arc(u.session_id, Arc::clone(&arc_screen));
+            // Wave monsters advance bridge progress but never alter the score.
+            // Refresh the scoreboard only when an eligible monument grants +1.
+            if score_changed {
+                let arc_screen = Arc::new(event_room::build_temple_screen_packet(k_score, e_score));
+                if let Some(room) = world
+                    .event_room_manager
+                    .get_room(TempleEventType::JuraidMountain, room_id)
+                {
+                    for u in room.karus_users.values().filter(|u| !u.logged_out) {
+                        world.send_to_session_arc(u.session_id, Arc::clone(&arc_screen));
+                    }
+                    for u in room.elmorad_users.values().filter(|u| !u.logged_out) {
+                        world.send_to_session_arc(u.session_id, Arc::clone(&arc_screen));
+                    }
                 }
             }
 
-            // Fast progression for 2615 Juraid rooms: GM/test kills can clear a room
-            // much faster than the original 20/30/40 minute bridge timers.
-            let nation_score = if killer_nation == 1 { k_score } else { e_score };
             if !juraid::is_juraid_monument(killed_npc_sid) {
                 spawn_juraid_child_monsters(
                     world,
@@ -1083,41 +1096,53 @@ pub fn track_juraid_monster_kill(
                 );
             }
 
-            for (bridge_idx, threshold) in juraid::ROOM_BRIDGE_KILL_THRESHOLDS.iter().enumerate() {
-                if nation_score >= *threshold {
-                    let mut bridge_state = world
-                        .get_juraid_bridge_state(room_id)
-                        .unwrap_or_default();
-                    let opened_k = bridge_state.open_bridge(bridge_idx, 1);
-                    let opened_e = bridge_state.open_bridge(bridge_idx, 2);
-                    if opened_k || opened_e {
-                        world.set_juraid_bridge_state(room_id, bridge_state);
-                        world.broadcast_juraid_bridge_open(bridge_idx, room_id as u16);
-                        if bridge_idx < juraid::NUM_BRIDGES - 1 {
-                            spawn_juraid_next_wave(world, room_id);
-                        }
-                        if bridge_idx + 1 == juraid::NUM_BRIDGES {
-                            let spawned = juraid::spawn_deva_bird(world, room_id);
-                            let monument_spawned =
-                                juraid::spawn_deva_room_monuments(world, room_id);
-                            if spawned > 0 {
-                                tracing::info!(
-                                    room_id,
-                                    spawned,
-                                    monument_spawned,
-                                    "Juraid Deva room spawned"
-                                );
-                            }
-                        }
-                        tracing::info!(
-                            "Juraid room {} bridge {} opened by kill threshold score={}",
-                            room_id,
-                            bridge_idx,
-                            nation_score,
-                        );
-                    }
+            // Match CNpc::HandleJuraidKill exactly: main and released child
+            // monsters are counted separately for each nation. A nation opens
+            // only its own bridge at 4/20, 8/40 and 12/60.
+            let mut bridge_state = world
+                .get_juraid_bridge_state(room_id)
+                .unwrap_or_default();
+            match (killer_nation, killed_summon_type) {
+                (1, juraid::SUMMON_JURAID_MAIN) => {
+                    bridge_state.karus_main_kills = bridge_state.karus_main_kills.saturating_add(1)
+                }
+                (1, juraid::SUMMON_JURAID_CHILD) => {
+                    bridge_state.karus_sub_kills = bridge_state.karus_sub_kills.saturating_add(1)
+                }
+                (2, juraid::SUMMON_JURAID_MAIN) => {
+                    bridge_state.elmorad_main_kills = bridge_state.elmorad_main_kills.saturating_add(1)
+                }
+                (2, juraid::SUMMON_JURAID_CHILD) => {
+                    bridge_state.elmorad_sub_kills = bridge_state.elmorad_sub_kills.saturating_add(1)
+                }
+                _ => {}
+            }
+            let (main_kills, sub_kills) = if killer_nation == 1 {
+                (bridge_state.karus_main_kills, bridge_state.karus_sub_kills)
+            } else {
+                (bridge_state.elmorad_main_kills, bridge_state.elmorad_sub_kills)
+            };
+            for bridge_idx in 0..juraid::NUM_BRIDGES {
+                if main_kills >= juraid::ROOM_MAIN_KILL_THRESHOLDS[bridge_idx]
+                    && sub_kills >= juraid::ROOM_BRIDGE_KILL_THRESHOLDS[bridge_idx] as u16
+                    && bridge_state.open_bridge(bridge_idx, killer_nation)
+                {
+                    world.broadcast_juraid_bridge_open_for_nation(
+                        bridge_idx,
+                        room_id as u16,
+                        killer_nation,
+                    );
+                    tracing::info!(
+                        room_id,
+                        bridge_idx,
+                        killer_nation,
+                        main_kills,
+                        sub_kills,
+                        "Juraid bridge opened by verified main/sub thresholds"
+                    );
                 }
             }
+            world.set_juraid_bridge_state(room_id, bridge_state);
 
             // Deva Bird death should enter the reward phase, leaving the existing
             // 20-second finish counter for chest interaction before teleport.
@@ -1143,43 +1168,17 @@ pub fn track_juraid_monster_kill(
                 );
             }
 
-                tracing::info!(
-                    "Juraid kill: player '{}' (nation={}) killed monster in room {}, scores: K={} E={}",
-                    killer_name,
-                    killer_nation,
-                    room_id,
-                    k_score,
-                    e_score,
-                );
+            tracing::info!(
+                "Juraid kill: player '{}' (nation={}) killed entity in room {}, monument scores: K={} E={}",
+                killer_name,
+                killer_nation,
+                room_id,
+                k_score,
+                e_score,
+            );
             return;
         }
     }
-}
-
-/// Opened bridges lead to another monster wave.  The database stores one
-/// family per room, so later waves reuse that room's four main templates at
-/// their configured coordinates; without this, scores stop at 20 and the
-/// 40/60 bridge thresholds can never be reached.
-fn spawn_juraid_next_wave(world: &WorldState, room_id: u8) {
-    let family = 20 + room_id as i16;
-    let rows = world.get_juraid_respawn_family(family);
-    let main_rows = juraid::main_monster_rows(world, &rows);
-    let mut spawned = 0usize;
-    for row in main_rows {
-        spawned += world
-            .spawn_event_npc_ex(
-                row.s_sid as u16,
-                true,
-                juraid::ZONE_JURAID,
-                row.x as f32,
-                row.z as f32,
-                1,
-                room_id as u16,
-                juraid::SUMMON_JURAID_MAIN,
-            )
-            .len();
-    }
-    tracing::info!(room_id, spawned, "Juraid next monster wave spawned");
 }
 
 fn spawn_juraid_child_monsters(
@@ -1205,10 +1204,13 @@ fn spawn_juraid_child_monsters(
         return;
     }
 
-    let Some(child_sid) = juraid::select_child_monster_sid(world, room_id, killed_npc_sid) else {
-        tracing::warn!(room_id, killed_npc_sid, "Juraid child monster skipped: no candidate");
-        return;
-    };
+    // C++ CNpc::HandleJuraidKill releases five creatures chosen from this
+    // fixed set; it does not choose another entry from MONSTER_JURAID_RESPAWN.
+    let selector = (usize::from(killed_npc_sid)
+        + killed_x.to_bits() as usize
+        + killed_z.to_bits() as usize)
+        % juraid::JURAID_CHILD_SIDS.len();
+    let child_sid = juraid::JURAID_CHILD_SIDS[selector];
 
     let spawned = world.spawn_event_npc_ex(
         child_sid,

@@ -759,6 +759,17 @@ async fn handle_draki_enter(
 
             // Load from DB (C++ LoadUserDrakiTowerData)
             let repo = ko_db::repositories::draki_tower::DrakiTowerRepository::new(session.pool());
+            match repo.reset_user_entrance_limit_if_due(&ch.name).await {
+                Ok(true) => tracing::info!(
+                    user = %ch.name,
+                    "Draki Tower entrance limit lazily reset for current 18:00 bucket"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    user = %ch.name,
+                    "Draki Tower lazy entrance reset failed: {e}"
+                ),
+            }
             let user_data = match repo.load_user_data(&ch.name).await {
                 Ok(data) => data,
                 Err(e) => {
@@ -1015,6 +1026,14 @@ async fn handle_draki_list(session: &mut ClientSession) -> anyhow::Result<()> {
     let user_draki_class = draki_tower::draki_class(ch.class);
 
     let repo = DrakiTowerRepository::new(session.pool());
+
+    if let Err(e) = repo.reset_user_entrance_limit_if_due(&user_name).await {
+        tracing::warn!(
+            "[{}] draki_tower lazy entrance reset failed for {}: {e}",
+            session.addr(),
+            user_name
+        );
+    }
 
     // Load all rift rankings and filter by user's class
     let all_ranks = match repo.load_rift_ranks().await {

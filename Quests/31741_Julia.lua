@@ -46,6 +46,13 @@ local function ExchangeManesOrb(required, reward, reward_count, expiry_days)
 	end
 end
 
+-- The capture routes the generic "where can I find it?" button here. Julia
+-- has no Quest_Helper map target for Manes' Orb, so close with the same
+-- explanatory text instead of dispatching a nonexistent quest map entry.
+if (EVENT == 5000) then
+	SelectMsg(UID, 2, -1, 10596, NPC, 27, -1);
+end
+
 if (EVENT == 201) then ExchangeManesOrb(7, 931731000, 1, 3); end
 
 if (EVENT == 202) then

@@ -2832,11 +2832,11 @@ async fn item_seal_bound(
     world: &std::sync::Arc<crate::world::WorldState>,
     sid: crate::zone::SessionId,
 ) -> anyhow::Result<()> {
-    let _unk1 = reader.read_u32().unwrap_or(0);
-    let item_id = reader.read_u32().unwrap_or(0);
-    let src_pos = reader.read_u8().unwrap_or(0);
-    let _unk3 = reader.read_u8().unwrap_or(0);
-    let _unk2 = reader.read_u32().unwrap_or(0);
+    // v2615 ITEM_BOUND wire layout is exactly 12 bytes after the operation:
+    // u16 unk1, u32 item_id, u8 slot, u8 unk3, u32 unk2.  Reading unk1 as
+    // u32 shifted item_id/slot by two bytes and made every restoration request
+    // fail with [ITEM_SEAL, ITEM_BOUND, SealErrorFailed].
+    let (_unk1, item_id, src_pos, _unk3, _unk2) = read_item_bound_fields(reader);
 
     // C++ early return if item_id == 0
     if item_id == 0 {
@@ -2890,6 +2890,16 @@ async fn item_seal_bound(
         sid, item_id, src_pos
     );
     send_seal_result(session, SEAL_BOUND, 1, item_id, src_pos).await
+}
+
+fn read_item_bound_fields(reader: &mut PacketReader<'_>) -> (u16, u32, u8, u8, u32) {
+    (
+        reader.read_u16().unwrap_or(0),
+        reader.read_u32().unwrap_or(0),
+        reader.read_u8().unwrap_or(0),
+        reader.read_u8().unwrap_or(0),
+        reader.read_u32().unwrap_or(0),
+    )
 }
 
 /// ITEM_UNBOUND — unbind an item (requires VIP password + binding scrolls).
@@ -3435,6 +3445,22 @@ fn save_seal_item_async(session: &ClientSession, slot_idx: usize) {
 #[allow(clippy::ifs_same_cond)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_v2615_item_bound_packet_layout() {
+        let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+        pkt.write_u16(0x1234);
+        pkt.write_u32(1_310_515_301);
+        pkt.write_u8(7);
+        pkt.write_u8(0x56);
+        pkt.write_u32(0x89AB_CDEF);
+
+        assert_eq!(pkt.data.len(), 12);
+        let mut reader = PacketReader::new(&pkt.data);
+        let fields = read_item_bound_fields(&mut reader);
+        assert_eq!(fields, (0x1234, 1_310_515_301, 7, 0x56, 0x89AB_CDEF));
+        assert_eq!(reader.remaining(), 0);
+    }
 
     #[test]
     fn test_scroll_type_classification() {

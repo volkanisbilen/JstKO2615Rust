@@ -1812,6 +1812,18 @@ async fn handle_npc_attack(
         None => return,
     };
 
+    // Town, quest and event NPCs are never combat targets. Previously only
+    // a small set of infrastructure NPC types was filtered, allowing regular
+    // NPCs with zero combat HP (including Event Manager) to be "killed".
+    if !npc.is_monster
+        && !matches!(
+            tmpl.npc_type,
+            NPC_DESTROYED_ARTIFACT | NPC_OBJECT_FLAG | NPC_GATE
+        )
+    {
+        return;
+    }
+
     // ── NPC type pre-blocking ─────────────────────────────────────
     {
         let npc_type = tmpl.npc_type;
@@ -1912,6 +1924,28 @@ async fn handle_npc_attack(
     // ── Deva Bird attack check (Juraid Mountain) ─────────────────
     // Deva Bird (proto 8106) can only be attacked if all 3 bridges for the
     // attacker's nation are built in the player's event room.
+    // Juraid nation monuments are enemy-only objectives. The monument SID,
+    // not its generic monster group, is authoritative for ownership.
+    if npc.zone_id == ZONE_JURAID_MOUNTAIN
+        && crate::systems::juraid::is_juraid_monument(npc.proto_id)
+    {
+        let attacker_nation = world
+            .get_character_info(attacker_sid)
+            .map(|ch| ch.nation)
+            .unwrap_or(0);
+        if attacker_nation == 0
+            || attacker_nation == crate::systems::juraid::monument_nation(npc.proto_id)
+        {
+            tracing::debug!(
+                attacker_sid,
+                attacker_nation,
+                monument_sid = npc.proto_id,
+                "Blocked attack against own Juraid monument"
+            );
+            return;
+        }
+    }
+
     {
         const DEVA_BIRD_SSID: u16 = 8106;
 

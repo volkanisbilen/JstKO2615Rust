@@ -1831,6 +1831,15 @@ async fn execute_type1_aoe(
             None => continue,
         };
 
+        if npc.zone_id == crate::systems::juraid::ZONE_JURAID
+            && crate::systems::juraid::is_juraid_monument(npc.proto_id)
+            && world
+                .get_character_info(caster_sid)
+                .is_none_or(|ch| ch.nation == crate::systems::juraid::monument_nation(npc.proto_id))
+        {
+            continue;
+        }
+
         if !npc.is_monster {
             continue;
         }
@@ -3296,6 +3305,15 @@ async fn execute_type3(
                     Some(n) => n,
                     None => continue,
                 };
+
+                if npc.zone_id == crate::systems::juraid::ZONE_JURAID
+                    && crate::systems::juraid::is_juraid_monument(npc.proto_id)
+                    && world.get_character_info(caster_sid).is_none_or(|ch| {
+                        ch.nation == crate::systems::juraid::monument_nation(npc.proto_id)
+                    })
+                {
+                    continue;
+                }
 
                 // Must be a monster (not friendly NPC)
                 if !npc.is_monster {
@@ -6202,6 +6220,20 @@ async fn apply_skill_damage_to_npc(
         Some(t) => t,
         None => return,
     };
+
+    if npc.zone_id == crate::systems::juraid::ZONE_JURAID
+        && crate::systems::juraid::is_juraid_monument(npc.proto_id)
+        && world
+            .get_character_info(caster_sid)
+            .is_none_or(|ch| ch.nation == crate::systems::juraid::monument_nation(npc.proto_id))
+    {
+        tracing::debug!(
+            caster_sid,
+            monument_sid = npc.proto_id,
+            "Blocked magic attack against own Juraid monument"
+        );
+        return;
+    }
 
     let damage = super::attack::scale_manes_magic_damage(world, caster_sid, &npc, damage);
 

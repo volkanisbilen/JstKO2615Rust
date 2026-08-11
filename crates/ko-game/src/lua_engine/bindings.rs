@@ -301,6 +301,10 @@ pub fn register_all(lua: &Lua) -> LuaResult<()> {
         "GetEventTrigger",
         lua.create_function(lua_get_event_trigger)?,
     )?;
+    g.set(
+        "GetQuestHelperID",
+        lua.create_function(lua_get_quest_helper_id)?,
+    )?;
     g.set("RollDice", lua.create_function(lua_roll_dice)?)?;
 
     // Exchange system (Tier 1)
@@ -960,7 +964,7 @@ fn lua_npc_say(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
 ///   arg 2 = nQuestID (quest_helper n_index)
 ///   arg 3 = sNpcID   (optional, defaults to m_sEventSid)
 /// Calls `QuestV2SendNpcMsg(nQuestID, sNpcID)`:
-///   Packet: WIZ_QUEST [u8(7)] [u32(nQuestID)] [u32(sNpcID)]
+///   Packet: WIZ_QUEST [u8(7)] [u32(nQuestID)] [u16(sNpcID)]
 fn lua_npc_msg(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     let w = get_world(lua)?;
     let vals: Vec<LuaValue> = args.into_vec();
@@ -988,13 +992,20 @@ fn lua_npc_msg(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     // The quest_helper_id is set by quest_v2_run_event before Lua execution,
     // so we must not overwrite it here with the quest_menu ID.
 
-    // Send WIZ_QUEST sub-opcode 7: [u32 nQuestID] [u32 sNpcID]
+    // QuestV2SendNpcMsg writes the NPC SID as uint16. Writing uint32 here
+    // leaves two trailing bytes and makes the v2615 client reject the dialog.
+    // Send WIZ_QUEST sub-opcode 7: [u32 nQuestID] [u16 sNpcID]
+    let pkt = build_npc_msg_packet(quest_id, npc_id as u16);
+    w.send_to_session_owned(sid, pkt);
+    Ok(())
+}
+
+fn build_npc_msg_packet(quest_id: u32, npc_id: u16) -> Packet {
     let mut pkt = Packet::new(Opcode::WizQuest as u8);
     pkt.write_u8(7);
     pkt.write_u32(quest_id);
-    pkt.write_u32(npc_id);
-    w.send_to_session_owned(sid, pkt);
-    Ok(())
+    pkt.write_u16(npc_id);
+    pkt
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1056,19 +1067,26 @@ fn lua_select_msg(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
 fn lua_zone_change(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -> LuaResult<()> {
     let w = get_world(lua)?;
     let sid = uid as SessionId;
-    let mut pkt = Packet::new(Opcode::WizZoneChange as u8);
-    pkt.write_u8(2);
-    pkt.write_u16(zone_id);
-    pkt.write_f32(x);
-    pkt.write_f32(0.0);
-    pkt.write_f32(z);
-    pkt.write_u8(0);
-    w.send_to_session_owned(sid, pkt);
-    w.update_session(sid, |h| {
-        h.position.zone_id = zone_id;
-        h.position.x = x;
-        h.position.z = z;
-    });
+    let old_position = w.get_position(sid);
+
+    // Lua ZoneChange is also used by the Draki floor NPCs while the player
+    // remains in zone 95.  The old implementation only changed three session
+    // fields and emitted a legacy float packet; it did not move the player
+    // between region grids.  v2615 consequently acknowledged the click while
+    // leaving the character on the previous floor.  Use the same authoritative
+    // server teleport path as the other instanced events, forcing same-zone
+    // relocation when necessary.
+    crate::handler::zone_change::server_teleport_to_zone_force(&w, sid, zone_id, x, z);
+    tracing::info!(
+        sid,
+        from_zone = old_position.map(|p| p.zone_id).unwrap_or_default(),
+        from_x = old_position.map(|p| p.x).unwrap_or_default(),
+        from_z = old_position.map(|p| p.z).unwrap_or_default(),
+        to_zone = zone_id,
+        to_x = x,
+        to_z = z,
+        "Lua ZoneChange completed through authoritative region teleport"
+    );
     Ok(())
 }
 
@@ -1428,36 +1446,12 @@ fn lua_quest_check_finished(lua: &Lua, (uid, qid): (i32, u16)) -> LuaResult<bool
 /// first one that has a matching entry in the `quest_monsters` table.
 /// Lua call: `result = ExistMonsterQuestSub(UID)` — returns u16 (quest_id or 0).
 fn lua_exist_monster_quest_sub(lua: &Lua, uid: i32) -> LuaResult<u16> {
-    let w = get_world(lua)?;
-    let sid = uid as SessionId;
-
-    // Collect in-progress quest IDs from session (avoids DashMap re-entrancy).
-    let in_progress_quests: Vec<u16> = w
-        .with_session(sid, |h| {
-            h.quests
-                .iter()
-                .filter(|(_, q)| q.quest_state == 1)
-                .map(|(&qid, _)| qid)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Check which one has a quest_monster entry (monster-kill quest).
-    let mut found: u16 = 0;
-    for qid in in_progress_quests {
-        if w.get_quest_monster(qid).is_some() {
-            if found == 0 {
-                found = qid;
-            } else {
-                tracing::debug!(
-                    "ExistMonsterQuestSub: sid={sid} has multiple active monster quests \
-                     (returning {found}, also found {qid})"
-                );
-            }
-        }
-    }
-
-    Ok(found)
+    // Evidence: reference_cpp/User.h::GetActiveQuestID() is an inline stub
+    // that always returns zero. Patrick event 175 relies on that zero to show
+    // its accept button; returning another active kill quest makes it emit a
+    // close-only menu.
+    let _ = (lua, uid);
+    Ok(0)
 }
 
 /// Search for an eligible quest for the given NPC.
@@ -1595,6 +1589,16 @@ fn lua_show_map(lua: &Lua, (uid, mid): (i32, Option<u32>)) -> LuaResult<()> {
     pkt.write_u32(helper_id);
     w.send_to_session_owned(sid, pkt);
     Ok(())
+}
+
+/// Return the quest_helper row that selected the currently executing Lua
+/// event. Some v2615 scripts share event numbers between compatibility quest
+/// IDs, so the Lua must be able to choose the matching SaveEvent/exchange row.
+fn lua_get_quest_helper_id(lua: &Lua, uid: i32) -> LuaResult<u32> {
+    let w = get_world(lua)?;
+    Ok(w
+        .with_session(uid as SessionId, |h| h.quest_helper_id)
+        .unwrap_or(0))
 }
 
 /// 1. Guard: must be beginner class (class % 100 in {1,2,3,4,13})
@@ -2418,9 +2422,29 @@ fn lua_run_quest_exchange(lua: &Lua, (uid, exchange_id): (i32, i32)) -> LuaResul
         }
     }
 
-    // Uses bySelectedReward (member variable) to select a reward from the exp table.
+    // C++ CheckExchangeExp contract: an exchange with selectable rewards must
+    // never finish without a valid client selection. Previously Rust silently
+    // gave only the base rewards and Lua then marked the quest completed.
     let by_selected_reward = w.with_session(sid, |h| h.by_selected_reward).unwrap_or(-1);
-    if let Some(exp_exchange) = w.get_item_exchange_exp(exchange_id) {
+    let select_msg_flag = w.with_session(sid, |h| h.select_msg_flag).unwrap_or(0);
+    let exp_exchange = w.get_item_exchange_exp(exchange_id);
+    if by_selected_reward > 4
+        || (select_msg_flag == 5 && by_selected_reward < 0)
+        || (exp_exchange.is_some() && by_selected_reward < 0)
+        || (exp_exchange.is_none() && by_selected_reward > 0)
+    {
+        tracing::warn!(
+            sid,
+            exchange_id,
+            by_selected_reward,
+            select_msg_flag,
+            has_selected_rewards = exp_exchange.is_some(),
+            "RunQuestExchange: invalid or missing selected reward"
+        );
+        return Ok(false);
+    }
+
+    if let Some(exp_exchange) = exp_exchange {
         if by_selected_reward >= 0 && (by_selected_reward as usize) < 5 {
             let idx = by_selected_reward as usize;
             let exp_outputs: [(i32, i32); 5] = [
@@ -4490,6 +4514,37 @@ fn lua_draki_out_zone(lua: &Lua, uid: i32) -> LuaResult<()> {
     pkt.write_u8(0);
     w.send_to_session_owned(sid, pkt);
 
+    // Reference DrakiTowerKickOuts() starts the 20-second evacuation timer
+    // immediately after sending OUT1. Sending the packet alone leaves event
+    // 101 at the final NPC without any server-side transition.
+    let room_id = w
+        .with_session(sid, |h| {
+            if h.draki_room_id > 0 {
+                h.draki_room_id
+            } else {
+                h.event_room
+            }
+        })
+        .unwrap_or(0);
+    if room_id > 0 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut rooms = w.draki_tower_rooms_write();
+        if let Some(room) = rooms.get_mut(&room_id) {
+            crate::handler::draki_tower::apply_kickout(room, now);
+            tracing::info!(
+                sid,
+                room_id,
+                exit_at = room.draki_out_timer,
+                "Draki final NPC started authoritative kick-out timer"
+            );
+        } else {
+            tracing::warn!(sid, room_id, "DrakiOutZone could not find active room");
+        }
+    }
+
     Ok(())
 }
 
@@ -4508,7 +4563,24 @@ fn lua_draki_tower_npc_out(lua: &Lua, uid: i32) -> LuaResult<()> {
     // Never clear another player's concurrent Draki instance or the monster
     // wave DrakiRiftChange just spawned. The client scripts call this after
     // DrakiRiftChange, so only the old floor NPCs may be removed here.
-    let event_room = w.get_event_room(sid);
+    // ZoneChange in the 25258/25260/25263/25265 scripts may clear the
+    // session's transient event_room before this Lua function runs. The
+    // Draki room itself keeps the owner name, so recover the room from that
+    // persistent instance state instead of silently skipping the spawn.
+    let event_room = {
+        let session_room = w.get_event_room(sid);
+        if session_room > 0 {
+            session_room
+        } else if let Some(name) = w.get_session_name(sid) {
+            w.draki_tower_rooms_read()
+                .iter()
+                .find(|(_, room)| room.user_name == name)
+                .map(|(room_id, _)| *room_id)
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    };
     if event_room > 0 {
         w.kill_non_monster_npcs_in_room(ZONE_DRAKI_TOWER, event_room);
     } else {
@@ -4940,6 +5012,7 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
     // Keep runtime state and NPCs aligned. Previously this function only
     // changed the state and sent timers, so the run stopped at this NPC.
     let event_room = w.get_event_room(sid);
+    let mut spawned_monster_count = 0u32;
     if event_room > 0 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4987,6 +5060,7 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
                 room.draki_monster_kill = monster_count;
             }
         }
+        spawned_monster_count = monster_count;
     }
 
     let time_limit: u16 = 300;
@@ -5021,12 +5095,17 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
 
     // Note: Monster spawning (SummonDrakiMonsters) requires runtime room state
     // that is managed by the draki_tower handler's tick system, not via Lua.
-    tracing::debug!(
-        "[{}] DrakiRiftChange: stage={}, sub_stage={}, time_limit={}",
+    tracing::info!(
         sid,
+        event_room,
+        requested_stage = stage,
+        requested_sub_stage = sub_stage,
         resolved_stage,
         resolved_sub_stage,
-        time_limit
+        stage_id,
+        spawned_monsters = spawned_monster_count,
+        time_limit,
+        "DrakiRiftChange completed"
     );
 
     Ok(())
@@ -5502,6 +5581,14 @@ fn lua_rebirth_bas(lua: &Lua, uid: i32) -> LuaResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn npc_msg_uses_v2615_u16_npc_sid() {
+        let pkt = build_npc_msg_packet(500, 31_772);
+        assert_eq!(pkt.opcode, Opcode::WizQuest as u8);
+        assert_eq!(pkt.data.len(), 7);
+        assert_eq!(pkt.data, vec![7, 0xF4, 0x01, 0x00, 0x00, 0x1C, 0x7C]);
+    }
 
     #[test]
     fn test_check_percent_boundaries() {
@@ -7541,6 +7628,36 @@ mod tests {
         let (lua, _world) = setup_lua_world();
         // Player is in zone 21 (Moradon), should still send packet (has character)
         lua.load("DrakiOutZone(1)").exec().unwrap();
+    }
+
+    #[test]
+    fn test_exist_monster_quest_sub_matches_reference_stub() {
+        let (lua, _world) = setup_lua_world();
+        let result: u16 = lua.load("return ExistMonsterQuestSub(1)").eval().unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_draki_out_zone_starts_kickout_timer() {
+        let (lua, world) = setup_lua_world();
+        world.update_session(1, |h| {
+            h.draki_room_id = 1;
+            h.event_room = 1;
+        });
+        world
+            .draki_tower_rooms_write()
+            .insert(1, crate::handler::draki_tower::DrakiTowerRoomInfo::new(1));
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        lua.load("DrakiOutZone(1)").exec().unwrap();
+
+        let rooms = world.draki_tower_rooms_read();
+        let room = rooms.get(&1).unwrap();
+        assert!(room.out_timer_active);
+        assert!(room.draki_out_timer >= before + 20);
     }
 
     #[test]

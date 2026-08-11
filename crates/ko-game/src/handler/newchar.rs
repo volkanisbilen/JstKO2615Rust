@@ -25,6 +25,7 @@
 
 use ko_db::repositories::account::AccountRepository;
 use ko_db::repositories::character::{CharacterRepository, CreateCharParams};
+use ko_db::repositories::char_creation::CharCreationRepository;
 use ko_db::repositories::daily_rank::DailyRankRepository;
 use ko_db::repositories::perk::PerkRepository;
 use ko_db::repositories::user_data::UserDataRepository;
@@ -158,12 +159,20 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                 tracing::error!("[{}] DB error setting char slot: {}", session.addr(), e);
             }
 
-            // Apply starting equipment from CREATE_NEW_CHAR_SET table
+            let char_creation_repo = CharCreationRepository::new(session.pool());
+            let beginner_type = char_creation_repo
+                .load_beginner_type(1)
+                .await
+                .unwrap_or(1);
+
+            // Apply level-specific equipment when configured; otherwise use legacy class set.
             // The create_new_char_set table uses base class values (1-4, 13),
             // not the full class value (101, 102, 201, etc.).
             let class_type = (class % 100) as i16;
-            let world = session.world();
-            let equipment = world.get_starting_equipment(class_type);
+            let equipment = char_creation_repo
+                .load_starting_equipment(class_type, beginner_type)
+                .await
+                .unwrap_or_default();
             if !equipment.is_empty() {
                 if let Err(e) = char_repo
                     .apply_starting_equipment(&char_name, &equipment)
@@ -177,8 +186,9 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                 }
             }
 
-            // Apply starting stats from CREATE_NEW_CHAR_VALUE table (job_type=0 for new char)
-            if let Some(stats) = world.get_starting_stats(class_type, 0) {
+            // C++ parity: BEGINNER_SETTINGS selects CREATE_NEW_CHAR_VALUE.job_type.
+            let world = session.world();
+            if let Some(stats) = world.get_starting_stats(class_type, beginner_type) {
                 if let Err(e) = char_repo.apply_starting_stats(&char_name, &stats).await {
                     tracing::error!(
                         "[{}] DB error applying starting stats: {}",

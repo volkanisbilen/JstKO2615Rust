@@ -898,13 +898,15 @@ pub fn broadcast_event_counter(world: &WorldState) -> Option<Packet> {
     };
     drop(te);
 
-    // Build the correct per-event counter packet
+    // Build the native counter packet. Juraid additionally needs the 2615
+    // EXT_HOOK join-screen update: registration logs proved that WIZ_EVENT
+    // alone is accepted by the server flow but does not open/update the UI.
     let counter_pkt = match active_event {
         4 => build_bdw_counter_packet(karus_count, elmo_count),
         24 => build_chaos_counter_packet(all_count),
-        // 2615 consumes Juraid registration through WIZ_EVENT sub-opcode 16.
-        // The legacy EXT_HOOK packet has a different contract and must not be
-        // sent alongside the native counter.
+        // 2615 uses the native WIZ_EVENT counter contract. The older C++
+        // reference's XSafe/JURAID packet is not authoritative for this
+        // client and must not replace the reverse-engineered packet.
         100 => build_juraid_event_counter_packet(karus_count, elmo_count, sign_remain),
         _ => return None,
     };
@@ -912,8 +914,37 @@ pub fn broadcast_event_counter(world: &WorldState) -> Option<Packet> {
     // Send to all signed-up users (clone once, Arc share in loop)
     let users = erm.signed_up_users.read();
     let arc_counter = Arc::new(counter_pkt.clone());
+    let arc_juraid_hook = (active_event == 100).then(|| {
+        Arc::new(build_juraid_counter_packet(
+            karus_count,
+            elmo_count,
+            sign_remain,
+        ))
+    });
+    let arc_juraid_native = (active_event == 100).then(|| {
+        Arc::new(build_juraid_select_counter_packet(
+            karus_count,
+            elmo_count,
+            sign_remain,
+        ))
+    });
+    if active_event == 100 {
+        tracing::info!(
+            karus_count,
+            elmorad_count = elmo_count,
+            remaining_secs = sign_remain,
+            signed_users = users.len(),
+            "Juraid registration counter packets sent (WIZ_EVENT + v2615 WIZ_SELECT_MSG)"
+        );
+    }
     for user in users.iter() {
         world.send_to_session_arc(user.session_id, Arc::clone(&arc_counter));
+        if let Some(hook) = &arc_juraid_hook {
+            world.send_to_session_arc(user.session_id, Arc::clone(hook));
+        }
+        if let Some(native) = &arc_juraid_native {
+            world.send_to_session_arc(user.session_id, Arc::clone(native));
+        }
     }
     Some(counter_pkt)
 }
@@ -1277,6 +1308,10 @@ pub fn send_active_event_time(world: &WorldState, sid: SessionId) {
                 sid,
                 build_juraid_counter_packet(k_count, e_count, remain),
             );
+            world.send_to_session_owned(
+                sid,
+                build_juraid_select_counter_packet(k_count, e_count, remain),
+            );
         }
         _ => {}
     }
@@ -1354,6 +1389,32 @@ pub fn build_juraid_event_counter_packet(
     pkt.write_u16(karus_count);
     pkt.write_u16(elmo_count);
     pkt.write_u16(remaining_secs);
+    pkt
+}
+
+/// Native Juraid registration panel payload used by the stock client before
+/// the old C++ source replaced it with its private XSafe extension.
+///
+/// Reference: EventSigningSystem.cpp::TemplEventJuraidSendJoinScreenUpdate.
+/// v2615's WIZ_SELECT_MSG dispatcher reads the common leading event SID as
+/// u32 (the same contract used by quest menus, Draki timers and winner UI).
+/// `[u32 0][u8 7][u64 0][u32 6][u16 K][u16 0][u16 E][u16 0][u16 remain][u16 0]`
+pub fn build_juraid_select_counter_packet(
+    karus_count: u16,
+    elmo_count: u16,
+    remaining_secs: u16,
+) -> Packet {
+    let mut pkt = Packet::new(Opcode::WizSelectMsg as u8);
+    pkt.write_u32(0);
+    pkt.write_u8(7);
+    pkt.write_u64(0);
+    pkt.write_u32(6);
+    pkt.write_u16(karus_count);
+    pkt.write_u16(0);
+    pkt.write_u16(elmo_count);
+    pkt.write_u16(0);
+    pkt.write_u16(remaining_secs);
+    pkt.write_u16(0);
     pkt
 }
 
@@ -2647,6 +2708,24 @@ mod tests {
         assert_eq!(r.read_u16(), Some(4)); // karus count
         assert_eq!(r.read_u16(), Some(6)); // elmo count
         assert_eq!(r.read_u16(), Some(180)); // remaining seconds
+        assert!(r.read_u8().is_none());
+    }
+
+    #[test]
+    fn test_build_juraid_select_counter_packet() {
+        let pkt = build_juraid_select_counter_packet(4, 6, 180);
+        assert_eq!(pkt.opcode, Opcode::WizSelectMsg as u8);
+        let mut r = ko_protocol::PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u32(), Some(0));
+        assert_eq!(r.read_u8(), Some(7));
+        assert_eq!(r.read_u64(), Some(0));
+        assert_eq!(r.read_u32(), Some(6));
+        assert_eq!(r.read_u16(), Some(4));
+        assert_eq!(r.read_u16(), Some(0));
+        assert_eq!(r.read_u16(), Some(6));
+        assert_eq!(r.read_u16(), Some(0));
+        assert_eq!(r.read_u16(), Some(180));
+        assert_eq!(r.read_u16(), Some(0));
         assert!(r.read_u8().is_none());
     }
 

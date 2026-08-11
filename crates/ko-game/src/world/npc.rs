@@ -591,15 +591,27 @@ impl WorldState {
     /// Timer-triggered broadcasts are per-nation: Karus bridge → KARUS only,
     /// Elmorad bridge → ELMORAD only.
     pub fn broadcast_juraid_bridge_open(&self, bridge_idx: usize, room_id: u16) {
+        self.broadcast_juraid_bridge_open_for_nation(bridge_idx, room_id, NATION_KARUS);
+        self.broadcast_juraid_bridge_open_for_nation(bridge_idx, room_id, NATION_ELMORAD);
+    }
+
+    /// Open only one nation's Juraid bridge. Kill progression is independent;
+    /// the two-nation wrapper above is reserved for the 10-minute fallback.
+    pub fn broadcast_juraid_bridge_open_for_nation(
+        &self,
+        bridge_idx: usize,
+        room_id: u16,
+        nation: u8,
+    ) {
         use crate::npc::{build_npc_inout, NPC_IN, NPC_OUT};
         use crate::systems::juraid::ZONE_JURAID;
 
-        // Karus trap_number = bridge_idx + 1 (1, 2, 3)
-        // Elmorad trap_number = bridge_idx + 4 (4, 5, 6)
-        let karus_trap = bridge_idx as i16 + 1;
-        let elmo_trap = bridge_idx as i16 + 4;
-
-        for (trap, nation) in [(karus_trap, NATION_KARUS), (elmo_trap, NATION_ELMORAD)] {
+        let trap = match nation {
+            NATION_KARUS => bridge_idx as i16 + 1,
+            NATION_ELMORAD => bridge_idx as i16 + 4,
+            _ => return,
+        };
+        {
             // Find the bridge NPC by zone + event_room + trap_number
             let npc = self.npc_instances.iter().find_map(|entry| {
                 let n = entry.value();
@@ -612,45 +624,54 @@ impl WorldState {
 
             let npc = match npc {
                 Some(n) => n,
-                None => continue,
+                None => return,
             };
 
             // Set gate_open = 2
             self.update_npc_gate_open(npc.nid, 2);
+
+            // v2615 keeps the bridge's collision object separately from its
+            // NPC_INOUT model. CNpc::SendJuraidBridgeFlag() explicitly sends
+            // WIZ_OBJECT_EVENT/OBJECT_GATE with a boolean open flag; without
+            // this packet the model refreshes but the client collision stays
+            // closed.
+            let mut gate_pkt = Packet::new(Opcode::WizObjectEvent as u8);
+            gate_pkt.write_u8(crate::object_event_constants::OBJECT_GATE);
+            gate_pkt.write_u8(1);
+            gate_pkt.write_u32(npc.nid);
+            gate_pkt.write_u8(1);
+            self.broadcast_to_zone_event_room(
+                ZONE_JURAID,
+                room_id,
+                Arc::new(gate_pkt),
+                None,
+            );
 
             // Build INOUT_OUT packet (despawn closed gate)
             let mut out_pkt = Packet::new(Opcode::WizNpcInout as u8);
             out_pkt.write_u8(NPC_OUT);
             out_pkt.write_u32(npc.nid);
 
-            // Send OUT to matching zone + event_room + nation
-            self.broadcast_to_zone_event_room_nation(
-                ZONE_JURAID,
-                room_id,
-                nation,
-                Arc::new(out_pkt),
-            );
+            // C++ HandleJuraidGateOpen broadcasts the bridge transition to ALL
+            // users in the event room. The two nation paths use different
+            // physical bridge NPCs, but filtering the packet by nation left the
+            // client's collision state stale in v2615.
+            self.broadcast_to_zone_event_room(ZONE_JURAID, room_id, Arc::new(out_pkt), None);
 
             // Re-read the updated NPC instance (with gate_open=2)
             let updated_npc = match self.get_npc_instance(npc.nid) {
                 Some(n) => n,
-                None => continue,
+                None => return,
             };
 
             // Build INOUT_IN packet (spawn with gate_open=2)
             let tmpl = match self.get_npc_template(npc.proto_id, npc.is_monster) {
                 Some(t) => t,
-                None => continue,
+                None => return,
             };
             let in_pkt = build_npc_inout(NPC_IN, &updated_npc, &tmpl);
 
-            // Send IN to matching zone + event_room + nation
-            self.broadcast_to_zone_event_room_nation(
-                ZONE_JURAID,
-                room_id,
-                nation,
-                Arc::new(in_pkt),
-            );
+            self.broadcast_to_zone_event_room(ZONE_JURAID, room_id, Arc::new(in_pkt), None);
 
             tracing::debug!(
                 npc_id = npc.nid,

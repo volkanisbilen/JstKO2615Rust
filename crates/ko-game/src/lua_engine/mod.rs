@@ -386,4 +386,26 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn all_quest_lua_files_compile() {
+        let quest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("Quests");
+        let mut failures = Vec::new();
+        for entry in std::fs::read_dir(&quest_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("lua") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            let lua = Lua::new();
+            if let Err(error) = lua.load(&source).set_name(path.to_string_lossy()).into_function() {
+                failures.push(format!("{}: {}", path.display(), error));
+            }
+        }
+        assert!(failures.is_empty(), "Lua compile failures:\n{}", failures.join("\n"));
+    }
 }

@@ -17,6 +17,13 @@ use ko_protocol::{Opcode, Packet, PacketReader};
 /// Maximum number of text IDs in an NPC_SAY dialog.
 const MAX_SAY_TEXT_IDS: usize = 8;
 
+/// Native starter quest shown by the client's small helper character.
+/// Verified against the v2615 Quest_Guide/Quest_Helper tables and 01_main.lua.
+pub const STARTER_SEED_QUEST_ID: u16 = 500;
+const STARTER_SEED_KARUS_HELPER_ID: u32 = 5002;
+const STARTER_SEED_ELMORAD_HELPER_ID: u32 = 5005;
+const STARTER_SEED_WORMS: [u16; 4] = [700, 701, 750, 751];
+
 use crate::handler::zone_change;
 use crate::session::{ClientSession, SessionState};
 use crate::world::types::ZONE_MORADON;
@@ -747,6 +754,51 @@ pub async fn load_quest_data(session: &mut ClientSession) -> anyhow::Result<()> 
         }
     });
 
+    // Quest 500 is the native one-time "Rescuing Sid" starter quest.  It has
+    // no NPC acceptance step: the v2615 tables route a Worm death directly to
+    // helper 5002/5005 and 01_main.lua EVENT 502.  Seed it as ongoing only
+    // when the character has never completed it; this deliberately has no
+    // upper-level restriction, matching Quest_Guide's 1..100 range.
+    let starter_seed_needs_initialising = rows
+        .iter()
+        .find(|row| row.quest_id as u16 == STARTER_SEED_QUEST_ID)
+        .map(|row| row.quest_state == 0)
+        .unwrap_or(true);
+    if starter_seed_needs_initialising {
+        world.update_session(sid, |h| {
+            h.quests.insert(
+                STARTER_SEED_QUEST_ID,
+                crate::world::UserQuestInfo {
+                    quest_state: 1,
+                    kill_counts: [0; 4],
+                },
+            );
+        });
+
+        if let Err(error) = repo
+            .save_user_quest(
+                &char_id,
+                STARTER_SEED_QUEST_ID as i16,
+                1,
+                [0; 4],
+            )
+            .await
+        {
+            tracing::error!(
+                char_name = %char_id,
+                quest_id = STARTER_SEED_QUEST_ID,
+                %error,
+                "failed to initialise native starter quest"
+            );
+        } else {
+            tracing::info!(
+                char_name = %char_id,
+                quest_id = STARTER_SEED_QUEST_ID,
+                "native Rescuing Sid quest initialised as ongoing"
+            );
+        }
+    }
+
     tracing::debug!(
         "[{}] Loaded {} quest entries for {}",
         session.addr(),
@@ -755,6 +807,132 @@ pub async fn load_quest_data(session: &mut ClientSession) -> anyhow::Result<()> 
     );
 
     Ok(())
+}
+
+/// Complete the v2615 native "Rescuing Sid" flow after the first starter Worm
+/// kill.  The first EVENT 502 result is emitted here because NPC death code
+/// holds `&WorldState`; subsequent dialog buttons continue through 01_main.lua
+/// using the stored helper ID exactly like a normal SelectMsg chain.
+pub fn complete_starter_seed_quest_on_worm_kill(
+    world: &crate::world::WorldState,
+    sid: SessionId,
+    npc_proto_id: u16,
+) -> bool {
+    if !STARTER_SEED_WORMS.contains(&npc_proto_id) {
+        return false;
+    }
+
+    let (quest_state, nation) = match world.with_session(sid, |h| {
+        (
+            h.quests
+                .get(&STARTER_SEED_QUEST_ID)
+                .map(|quest| quest.quest_state)
+                .unwrap_or(0),
+            h.character.as_ref().map(|ch| ch.nation).unwrap_or(0),
+        )
+    }) {
+        Some(values) => values,
+        None => return false,
+    };
+    if quest_state != 1 {
+        return false;
+    }
+
+    let (helper_id, header_text, button_text) = match nation {
+        1 => (STARTER_SEED_KARUS_HELPER_ID, 5002, 5001),
+        2 => (STARTER_SEED_ELMORAD_HELPER_ID, 5003, 5004),
+        _ => return false,
+    };
+    let helper = match world.get_quest_helper(helper_id) {
+        Some(helper)
+            if helper.s_event_data_index == STARTER_SEED_QUEST_ID as i16
+                && helper.b_event_status == 2
+                && helper.n_event_trigger_index == 502
+                && helper.str_lua_filename.eq_ignore_ascii_case("01_main.lua") => helper,
+        Some(helper) => {
+            tracing::error!(
+                sid,
+                helper_id,
+                event_data = helper.s_event_data_index,
+                event_status = helper.b_event_status,
+                trigger = helper.n_event_trigger_index,
+                lua = %helper.str_lua_filename,
+                "v2615 Rescuing Sid helper contract mismatch"
+            );
+            return false;
+        }
+        None => {
+            tracing::error!(sid, helper_id, "v2615 Rescuing Sid helper is missing");
+            return false;
+        }
+    };
+
+    // 01_main.lua EVENT 502 starts with SaveEvent(5002/5005), whose helper
+    // maps quest 500 to state 2.  NPC=0 is significant for this system dialog.
+    world.update_session(sid, |h| {
+        if let Some(quest) = h.quests.get_mut(&STARTER_SEED_QUEST_ID) {
+            quest.quest_state = 2;
+        }
+        h.quest_helper_id = helper_id;
+        h.event_sid = 0;
+        h.event_nid = -1;
+    });
+
+    let mut state_packet = Packet::new(Opcode::WizQuest as u8);
+    state_packet.write_u8(2);
+    state_packet.write_u16(STARTER_SEED_QUEST_ID);
+    state_packet.write_u8(2);
+    world.send_to_session_owned(sid, state_packet);
+
+    let mut button_texts = [-1i32; 12];
+    let mut button_events = [-1i32; 12];
+    button_texts[0] = button_text;
+    button_events[0] = 505;
+    super::select_msg::send_select_msg(
+        world,
+        sid,
+        6,
+        STARTER_SEED_QUEST_ID as i32,
+        header_text,
+        &button_texts,
+        &button_events,
+        &helper.str_lua_filename,
+    );
+
+    if let (Some(pool), Some(character)) = (world.db_pool(), world.get_character_info(sid)) {
+        let pool = pool.clone();
+        let char_name = character.name;
+        tokio::spawn(async move {
+            let repo = QuestRepository::new(&pool);
+            if let Err(error) = repo
+                .save_user_quest(
+                    &char_name,
+                    STARTER_SEED_QUEST_ID as i16,
+                    2,
+                    [0; 4],
+                )
+                .await
+            {
+                tracing::error!(
+                    char_name,
+                    quest_id = STARTER_SEED_QUEST_ID,
+                    %error,
+                    "failed to persist Rescuing Sid completion"
+                );
+            }
+        });
+    }
+
+    tracing::info!(
+        sid,
+        npc_proto_id,
+        quest_id = STARTER_SEED_QUEST_ID,
+        helper_id,
+        lua = %helper.str_lua_filename,
+        event_id = 502,
+        "Rescuing Sid completed through the v2615 starter quest flow"
+    );
+    true
 }
 
 /// Build a WIZ_NPC_SAY (0x56) packet for NPC dialog text.

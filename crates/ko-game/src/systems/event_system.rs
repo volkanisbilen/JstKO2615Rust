@@ -56,31 +56,35 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
         world.despawn_room_npcs(juraid::ZONE_JURAID, room_id as u16);
 
         let mut bridge_trap = 1u8;
-        let main_rows = juraid::main_monster_rows(world, &rows);
         let mut spawned_total = 0usize;
         let mut spawned_monsters = 0usize;
         let mut spawned_bridges = 0usize;
+        let mut spawned_merchants = 0usize;
+        let mut spawned_deva = 0usize;
         for row in rows {
-            let is_monster = row.b_type == 0;
             let is_deva = juraid::is_deva_bird(row.s_sid as u16);
             let is_bridge = juraid::is_bridge(row.s_sid as u16);
             let is_wave_monster = juraid::is_wave_monster(&row);
 
-            if is_deva {
-                continue;
-            }
-            if is_wave_monster
-                && !main_rows
-                    .iter()
-                    .any(|main| main.s_index == row.s_index && main.s_sid == row.s_sid)
-            {
-                continue;
-            }
-            if !is_wave_monster && !is_bridge {
+            // The MSSQL table is already the complete Juraid layout.  In
+            // particular, each of the six main rows has s_count=5 (three
+            // groups per nation).  Truncating those rows and forcing count=1
+            // left rooms empty and made progression impossible.
+            let is_merchant = row.b_type == 1;
+            if !is_wave_monster && !is_deva && !is_bridge && !is_merchant {
                 continue;
             }
 
-            let count = 1;
+            // PID 6700 is a static bridge/gate object, not a combat monster.
+            // A matching non-monster template is seeded by the runtime fixes
+            // migration so v2615 receives isMonster=2 while retaining the
+            // exact bridge model/size from K_MONSTER2369.
+            let is_monster = is_wave_monster || is_deva;
+            let count = if is_wave_monster {
+                row.s_count.max(1) as u16
+            } else {
+                1
+            };
             let trap_number = if is_bridge {
                 let trap = bridge_trap;
                 bridge_trap = bridge_trap.saturating_add(1);
@@ -90,8 +94,12 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
             };
             let summon_type = if is_wave_monster {
                 juraid::SUMMON_JURAID_MAIN
-            } else {
+            } else if is_deva {
+                juraid::SUMMON_JURAID_DEVA
+            } else if is_bridge {
                 juraid::SUMMON_JURAID_BRIDGE
+            } else {
+                0
             };
 
             let ids = world.spawn_event_npc_ex(
@@ -111,17 +119,27 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
             }
             if is_wave_monster {
                 spawned_monsters += ids.len();
+            } else if is_deva {
+                spawned_deva += ids.len();
             } else if is_bridge {
                 spawned_bridges += ids.len();
+            } else if is_merchant {
+                spawned_merchants += ids.len();
             }
             spawned_total += ids.len();
         }
+
+        let spawned_monuments = juraid::spawn_deva_room_monuments(world, room_id);
+        spawned_total += spawned_monuments;
 
         tracing::info!(
             room_id,
             family,
             spawned_monsters,
             spawned_bridges,
+            spawned_merchants,
+            spawned_deva,
+            spawned_monuments,
             spawned_total,
             "Juraid room NPCs spawned from monster_juraid_respawn_list"
         );
@@ -328,21 +346,9 @@ pub fn start_event_system_task(
                             if let Some(rs) = juraid_mgr.room_states.get(&room_id) {
                                 world.set_juraid_bridge_state(room_id, rs.bridges.clone());
                             }
-                            if bridge_idx + 1 == juraid::NUM_BRIDGES {
-                                let spawned = juraid::spawn_deva_bird(&world, room_id);
-                                if spawned > 0 {
-                                    tracing::info!(room_id, spawned, "Juraid Deva Bird spawned");
-                                }
-                                let monument_spawned =
-                                    juraid::spawn_deva_room_monuments(&world, room_id);
-                                if monument_spawned > 0 {
-                                    tracing::info!(
-                                        room_id,
-                                        monument_spawned,
-                                        "Juraid Deva room Monuments spawned"
-                                    );
-                                }
-                            }
+                            // Deva and both monuments are part of the static
+                            // room layout and are spawned at event start behind
+                            // the closed gates. Do not duplicate them here.
                         }
 
                         tracing::info!(
@@ -2424,7 +2430,7 @@ pub async fn distribute_juraid_rewards(world: &WorldState, winner_results: &[(u8
         };
 
         for (sid, nation) in participants {
-            if nation != winner_nation || winner_nation == 0 {
+            if winner_nation == 0 {
                 continue;
             }
 
@@ -2434,18 +2440,36 @@ pub async fn distribute_juraid_rewards(world: &WorldState, winner_results: &[(u8
             let level = ch.level;
             let rebirth_level = ch.rebirth_level;
             if let Some(gem_id) = juraid::juraid_winner_gem(level, rebirth_level) {
-                if !world.give_item(sid, gem_id, 1) {
+                let gem_count = juraid::juraid_reward_gem_count(nation == winner_nation);
+                if !world.give_item(sid, gem_id, gem_count) {
                     tracing::warn!(
                         sid,
                         gem_id,
+                        gem_count,
                         "Juraid reward gem could not be delivered"
+                    );
+                } else {
+                    tracing::info!(
+                        sid,
+                        room_id,
+                        is_winner = nation == winner_nation,
+                        gem_id,
+                        gem_count,
+                        "Juraid gem reward granted"
                     );
                 }
             }
 
+            let is_winner = nation == winner_nation;
             let is_premium = world.with_session(sid, |h| h.premium_in_use).unwrap_or(0) != 0;
-            let exp = if is_premium { 50_000_000 } else { 20_000_000 };
-            crate::handler::level::exp_change_with_bonus(world, sid, exp, true).await;
+            let exp = if is_winner {
+                if is_premium { 50_000_000 } else { 20_000_000 }
+            } else {
+                0
+            };
+            if exp > 0 {
+                crate::handler::level::exp_change_with_bonus(world, sid, exp, true).await;
+            }
 
             tracing::info!(
                 sid,
@@ -2453,9 +2477,10 @@ pub async fn distribute_juraid_rewards(world: &WorldState, winner_results: &[(u8
                 nation,
                 level,
                 rebirth_level,
+                is_winner,
                 is_premium,
                 exp,
-                "Juraid winner reward granted"
+                "Juraid participation reward granted"
             );
         }
     }
@@ -3593,7 +3618,7 @@ mod tests {
             s.start_time = start_time;
         });
 
-        // Bridge 0 opens at bridge_start + 1200
+        // At +1200, the 10- and 20-minute section fallbacks have opened.
         let action = event_tick_at(
             &erm,
             &mut bdw_mgr,
@@ -3601,9 +3626,9 @@ mod tests {
             &mut chaos_mgr,
             start_time + 1200,
         );
-        assert_eq!(action, EventTickAction::JuraidBridgesOpened(vec![0]));
+        assert_eq!(action, EventTickAction::JuraidBridgesOpened(vec![0, 1]));
 
-        // Bridge 1 at +1800
+        // Bridge 2 at +1800
         let action = event_tick_at(
             &erm,
             &mut bdw_mgr,
@@ -3611,9 +3636,9 @@ mod tests {
             &mut chaos_mgr,
             start_time + 1800,
         );
-        assert_eq!(action, EventTickAction::JuraidBridgesOpened(vec![1]));
+        assert_eq!(action, EventTickAction::JuraidBridgesOpened(vec![2]));
 
-        // Bridge 2 at +2400
+        // No bridge remains at +2400.
         let action = event_tick_at(
             &erm,
             &mut bdw_mgr,
@@ -3621,7 +3646,7 @@ mod tests {
             &mut chaos_mgr,
             start_time + 2400,
         );
-        assert_eq!(action, EventTickAction::JuraidBridgesOpened(vec![2]));
+        assert_eq!(action, EventTickAction::None);
 
         // No more bridges
         let action = event_tick_at(

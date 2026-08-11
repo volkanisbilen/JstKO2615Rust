@@ -47,8 +47,12 @@ end
 if (EVENT == 105) then
 	MagicBag = HowmuchItem(UID, 800440000);
 	if (MagicBag > 0) then
-		RobItem(UID, 800440000, 1)
-		GiveItem(UID, 700011001, 1,2)
+		if (CheckGiveSlot(UID, 1)) then
+			RobItem(UID, 800440000, 1)
+			GiveItem(UID, 700011001, 1,2)
+		else
+			SelectMsg(UID, 2, -1, 8900, NPC, 10, -1)
+		end
 	else
 		SelectMsg(UID, 2, -1, 823, NPC, 10, 3001)
 	end
@@ -57,8 +61,12 @@ end
 if (EVENT == 106) then
 	ITEM = HowmuchItem(UID, 800450000);
 	if (ITEM > 0) then
-		RobItem(UID, 800450000, 1)	
-		GiveItem(UID, 700012000, 1,30)
+		if (CheckGiveSlot(UID, 1)) then
+			RobItem(UID, 800450000, 1)	
+			GiveItem(UID, 700012000, 1,30)
+		else
+			SelectMsg(UID, 2, -1, 8900, NPC, 10, -1)
+		end
 	else
 		SelectMsg(UID, 2, -1, 824, NPC, 10, 3001)
 	end
@@ -109,9 +117,13 @@ if (EVENT == 607) then
 end
 
 if (EVENT == 608) then
-	GiveItem(UID, 600001000, 1)
-	GiveItem(UID, 389191000, 5)
-	SaveEvent(UID, 5403);
+	if (CheckGiveSlot(UID, 2)) then
+		GiveItem(UID, 600001000, 1)
+		GiveItem(UID, 389191000, 5)
+		SaveEvent(UID, 5403);
+	else
+		SelectMsg(UID, 2, -1, 8900, NPC, 10, -1)
+	end
 end
 
 if (EVENT == 3002) then
@@ -122,3 +134,17 @@ if (EVENT == 5000) then
 	--InsertRepurchase(UID)
 end
 
+
+-- ═══════════════════════════════════════════════════════════════════
+-- AUTO-GENERATED EVENT HANDLERS (ko-quest-gen)
+-- ═══════════════════════════════════════════════════════════════════
+
+-- [AUTO-GEN] quest=78 status=255 n_index=5400
+if (EVENT == 100) then
+	SearchQuest(UID, 13016);
+end
+
+-- [AUTO-GEN] quest=79 status=4 n_index=10002
+if (EVENT == 600) then
+	SelectMsg(UID, 2, 79, 4706, NPC, 10, -1);
+end
