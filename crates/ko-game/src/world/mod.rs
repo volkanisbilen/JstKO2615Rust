@@ -13,6 +13,16 @@ pub mod tables;
 pub mod trade;
 pub mod zone;
 
+fn initial_item_serial() -> u64 {
+    // Seed the process-local counter from Unix microseconds so item serials do
+    // not restart at 1 and collide with persisted inventory after a restart.
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .min(i64::MAX as u128) as u64
+}
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
@@ -951,7 +961,7 @@ impl WorldState {
             alliances: DashMap::new(),
             ground_bundles: DashMap::new(),
             next_bundle_id: AtomicU32::new(1),
-            next_item_serial: std::sync::atomic::AtomicU64::new(1),
+            next_item_serial: std::sync::atomic::AtomicU64::new(initial_item_serial()),
             quest_helpers: DashMap::new(),
             quest_monsters: DashMap::new(),
             quest_npc_list: DashMap::new(),
@@ -1190,7 +1200,7 @@ impl WorldState {
             alliances: DashMap::new(),
             ground_bundles: DashMap::new(),
             next_bundle_id: AtomicU32::new(1),
-            next_item_serial: std::sync::atomic::AtomicU64::new(1),
+            next_item_serial: std::sync::atomic::AtomicU64::new(initial_item_serial()),
             quest_helpers: DashMap::new(),
             quest_monsters: DashMap::new(),
             quest_npc_list: DashMap::new(),

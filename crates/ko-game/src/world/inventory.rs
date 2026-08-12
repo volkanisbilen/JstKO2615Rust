@@ -3790,9 +3790,9 @@ mod tests {
         let s1 = world.generate_item_serial();
         let s2 = world.generate_item_serial();
         let s3 = world.generate_item_serial();
-        assert_eq!(s1, 1);
-        assert_eq!(s2, 2);
-        assert_eq!(s3, 3);
+        assert!(s1 > 0);
+        assert_eq!(s2, s1 + 1);
+        assert_eq!(s3, s2 + 1);
     }
 
     #[test]

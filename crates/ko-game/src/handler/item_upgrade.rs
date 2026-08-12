@@ -2832,11 +2832,22 @@ async fn item_seal_bound(
     world: &std::sync::Arc<crate::world::WorldState>,
     sid: crate::zone::SessionId,
 ) -> anyhow::Result<()> {
-    // v2615 ITEM_BOUND wire layout is exactly 12 bytes after the operation:
-    // u16 unk1, u32 item_id, u8 slot, u8 unk3, u32 unk2.  Reading unk1 as
-    // u32 shifted item_id/slot by two bytes and made every restoration request
-    // fail with [ITEM_SEAL, ITEM_BOUND, SealErrorFailed].
-    let (_unk1, item_id, src_pos, _unk3, _unk2) = read_item_bound_fields(reader);
+    // Live v2615 evidence (2026-08-12) proves the 12 bytes after ITEM_BOUND are:
+    // u32 unk0, u32 item_id, u8 inventory_pos, u8 unk1, u16 unk2.
+    // Example for DB slot 34 / item 278005111:
+    //   00 00 00 00 | 77 05 92 10 | 14 | 01 | 00 31
+    // The older C++ layout decoded this as item=91684864/slot=146.
+    let (unk0, item_id, src_pos, unk1, unk2) = read_item_bound_fields(reader);
+
+    tracing::info!(
+        sid,
+        unk0,
+        item_id,
+        src_pos,
+        unk1,
+        unk2,
+        "ITEM_BOUND request decoded"
+    );
 
     // C++ early return if item_id == 0
     if item_id == 0 {
@@ -2860,15 +2871,41 @@ async fn item_seal_bound(
         || inv_item.flag == ITEM_FLAG_RENTED
         || inv_item.serial_num == 0
     {
+        tracing::warn!(
+            sid,
+            item_id,
+            src_pos,
+            inventory_item_id = inv_item.item_id,
+            count = inv_item.count,
+            flag = inv_item.flag,
+            serial_num = inv_item.serial_num,
+            expire_time = inv_item.expire_time,
+            "ITEM_BOUND rejected by inventory validation"
+        );
         return send_seal_result(session, SEAL_BOUND, 2, item_id, src_pos).await;
     }
 
     // Item must not be countable
     let item_table = match world.get_item(item_id) {
         Some(t) => t,
-        None => return send_seal_result(session, SEAL_BOUND, 2, item_id, src_pos).await,
+        None => {
+            tracing::warn!(
+                sid,
+                item_id,
+                src_pos,
+                "ITEM_BOUND rejected: item table row missing"
+            );
+            return send_seal_result(session, SEAL_BOUND, 2, item_id, src_pos).await;
+        }
     };
     if item_table.countable.unwrap_or(0) != 0 {
+        tracing::warn!(
+            sid,
+            item_id,
+            src_pos,
+            countable = item_table.countable,
+            "ITEM_BOUND rejected: countable item"
+        );
         return send_seal_result(session, SEAL_BOUND, 2, item_id, src_pos).await;
     }
 
@@ -2892,13 +2929,13 @@ async fn item_seal_bound(
     send_seal_result(session, SEAL_BOUND, 1, item_id, src_pos).await
 }
 
-fn read_item_bound_fields(reader: &mut PacketReader<'_>) -> (u16, u32, u8, u8, u32) {
+fn read_item_bound_fields(reader: &mut PacketReader<'_>) -> (u32, u32, u8, u8, u16) {
     (
+        reader.read_u32().unwrap_or(0),
+        reader.read_u32().unwrap_or(0),
+        reader.read_u8().unwrap_or(0),
+        reader.read_u8().unwrap_or(0),
         reader.read_u16().unwrap_or(0),
-        reader.read_u32().unwrap_or(0),
-        reader.read_u8().unwrap_or(0),
-        reader.read_u8().unwrap_or(0),
-        reader.read_u32().unwrap_or(0),
     )
 }
 
@@ -3449,16 +3486,16 @@ mod tests {
     #[test]
     fn test_v2615_item_bound_packet_layout() {
         let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-        pkt.write_u16(0x1234);
-        pkt.write_u32(1_310_515_301);
-        pkt.write_u8(7);
-        pkt.write_u8(0x56);
-        pkt.write_u32(0x89AB_CDEF);
+        pkt.write_u32(0);
+        pkt.write_u32(278_005_111);
+        pkt.write_u8(20);
+        pkt.write_u8(1);
+        pkt.write_u16(0x3100);
 
         assert_eq!(pkt.data.len(), 12);
         let mut reader = PacketReader::new(&pkt.data);
         let fields = read_item_bound_fields(&mut reader);
-        assert_eq!(fields, (0x1234, 1_310_515_301, 7, 0x56, 0x89AB_CDEF));
+        assert_eq!(fields, (0, 278_005_111, 20, 1, 0x3100));
         assert_eq!(reader.remaining(), 0);
     }
 

@@ -7,6 +7,7 @@
 //! 5. Creates a GroundBundle at the NPC's position
 //! 6. Sends WIZ_ITEM_DROP to the killer (or party)
 
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
@@ -141,6 +142,162 @@ fn npc_item_to_monster_item(npc_row: &ko_db::models::NpcItemRow) -> ko_db::model
         item12: npc_row.item12,
         percent12: npc_row.percent12,
     }
+}
+
+/// Aggregated result produced by the C++ compatible GM `+drop` tester.
+pub struct DropTestSummary {
+    pub npc_name: String,
+    pub coins: u64,
+    pub items: Vec<(u32, u32, String)>,
+}
+
+/// Simulate a selected NPC's loot table without killing it.
+///
+/// This follows `CNpc::DropTesterHaveItem()` and the live Rust loot modifiers,
+/// aggregating all rolls so the GM can inspect and receive the result.
+pub fn simulate_npc_drops(
+    world: &WorldState,
+    tester_sid: SessionId,
+    npc_id: NpcId,
+    roll_count: u16,
+) -> Result<DropTestSummary, String> {
+    let npc = world
+        .get_npc_instance(npc_id)
+        .ok_or_else(|| "Target NPC not found.".to_string())?;
+    let tmpl = world
+        .get_npc_template(npc.proto_id, npc.is_monster)
+        .ok_or_else(|| "Target NPC template not found.".to_string())?;
+    let tester_room = world
+        .with_session(tester_sid, |h| (h.position.zone_id, h.event_room))
+        .ok_or_else(|| "GM session not found.".to_string())?;
+    if npc.zone_id != tester_room.0 || npc.event_room != tester_room.1 {
+        return Err("Target NPC is not in your zone/event room.".to_string());
+    }
+
+    let drop_table = if tmpl.item_table == 0 {
+        None
+    } else if tmpl.is_monster {
+        world.get_monster_item(tmpl.item_table)
+    } else {
+        world
+            .get_npc_item(tmpl.item_table)
+            .map(|row| npc_item_to_monster_item(&row))
+    };
+    let drop_slots = drop_table.as_ref().map(extract_drop_slots);
+    let nation = world
+        .get_character_info(tester_sid)
+        .map(|ch| ch.nation)
+        .unwrap_or(0);
+    let premium = world.get_premium_property(tester_sid, PremiumProperty::DropPercent);
+    let scroll = world
+        .with_session(tester_sid, |h| h.drop_scroll_amount)
+        .unwrap_or(0) as i32;
+    let clan = world.get_clan_premium_property(tester_sid, PremiumProperty::DropPercent);
+    let flame_level = crate::systems::flash::get_flame_level(world, tester_sid);
+    let flame_drop = if flame_level > 0 {
+        world
+            .get_burning_feature(flame_level)
+            .map(|feature| feature.drop_rate.max(0) as i32)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let drop_event = world
+        .game_time_weather()
+        .drop_event_amount
+        .load(Ordering::Relaxed) as i32;
+    let coin_event = world
+        .game_time_weather()
+        .coin_event_amount
+        .load(Ordering::Relaxed) as u64;
+    let perk = world
+        .with_session(tester_sid, |h| {
+            world.compute_perk_bonus(&h.perk_levels, 4, false)
+        })
+        .unwrap_or(0);
+
+    let mut rng = rand::thread_rng();
+    let mut coins = 0u64;
+    let mut aggregate: BTreeMap<u32, u32> = BTreeMap::new();
+    for _ in 0..roll_count {
+        if tmpl.money > 0 {
+            let pct = rng.gen_range(70..=100) as u64;
+            let base = ((tmpl.money as u64 * pct) / 100).min(32_000);
+            coins = coins.saturating_add((base * (100 + coin_event) / 100).min(u16::MAX as u64));
+        }
+
+        let Some(slots) = drop_slots else { continue };
+        for (item_code, percent) in slots {
+            if item_code == 0 || percent <= 0 {
+                continue;
+            }
+            let mut chance = percent as i32;
+            if premium > 0 {
+                chance += chance * premium / 100;
+            }
+            if scroll > 0 {
+                chance = chance * (100 + scroll) / 100;
+            }
+            if clan > 0 {
+                chance += chance * clan / 100;
+            }
+            if flame_drop > 0 {
+                chance += chance * flame_drop / 100;
+            }
+            if drop_event > 0 {
+                chance = chance * (100 + drop_event) / 100;
+            }
+            if perk > 0 {
+                chance += chance * perk / 100;
+            }
+            chance = chance.clamp(0, 10_000);
+            if rng.gen_range(0..10_000) >= chance {
+                continue;
+            }
+
+            let resolved = if item_code >= 100_000_000 {
+                item_code as u32
+            } else if item_code < 100 {
+                super::item_production::item_production(world, item_code, tmpl.level as i32, nation)
+            } else if let Some(group) = world.get_make_item_group(item_code) {
+                if group.items.is_empty() {
+                    0
+                } else {
+                    group.items[rng.gen_range(0..group.items.len())] as u32
+                }
+            } else {
+                0
+            };
+            if resolved == 0 {
+                continue;
+            }
+            let amount = if (391_010_000..=392_010_000).contains(&resolved) {
+                20
+            } else {
+                1
+            };
+            aggregate
+                .entry(resolved)
+                .and_modify(|count| *count = count.saturating_add(amount))
+                .or_insert(amount);
+        }
+    }
+
+    let items = aggregate
+        .into_iter()
+        .map(|(item_id, count)| {
+            let name = world
+                .get_item(item_id)
+                .and_then(|item| item.str_name)
+                .unwrap_or_else(|| format!("Item {}", item_id));
+            (item_id, count, name)
+        })
+        .collect();
+    Ok(DropTestSummary {
+        npc_name: tmpl.name.clone(),
+        coins,
+        items,
+    })
 }
 
 /// Generate loot for a killed NPC and create a ground bundle.

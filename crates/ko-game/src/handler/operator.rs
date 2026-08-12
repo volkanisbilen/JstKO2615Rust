@@ -265,6 +265,7 @@ pub async fn process_chat_command(
         "money_add" => handle_money_add(session, &args)?,
         "np_add" => handle_np_add(session, &args)?,
         "drop_add" => handle_drop_add(session, &args)?,
+        "drop" => handle_drop_test(session, &args)?,
         "np_change" => handle_np_change(session, &args)?,
         "exp_change" => handle_exp_change(session, &args)?,
         "hapis" => handle_prison(session, &args)?,
@@ -1516,6 +1517,7 @@ fn handle_help(session: &mut ClientSession) -> anyhow::Result<()> {
         "-- Events --",
         "exp_add Pct - EXP event | money_add - Gold event",
         "np_add Pct - NP event | drop_add - Drop event",
+        "drop Count - Test selected NPC drops (max 9999)",
         "war_open/close Type - War event",
         "open1-6 / close - Nation war gates",
         "snow - Snow war | bifroststart/close",
@@ -5997,6 +5999,84 @@ fn handle_npc_info(session: &mut ClientSession) -> anyhow::Result<()> {
         ),
     );
 
+    Ok(())
+}
+
+/// +drop <count> — C++ compatible selected NPC/monster drop tester.
+fn handle_drop_test(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    let count: u16 = match args.first().and_then(|value| value.parse::<u16>().ok()) {
+        Some(count @ 1..=9999) => count,
+        _ => {
+            send_help(
+                session,
+                "Usage: select an NPC/monster and use +drop Count (1-9999)",
+            );
+            return Ok(());
+        }
+    };
+    let world = session.world().clone();
+    let sid = session.session_id();
+    let target_id = world.with_session(sid, |h| h.target_id).unwrap_or(0);
+    if target_id < crate::npc::NPC_BAND {
+        send_help(session, "No NPC/monster targeted. Select one first.");
+        return Ok(());
+    }
+
+    let summary = match super::npc_loot::simulate_npc_drops(&world, sid, target_id, count) {
+        Ok(summary) => summary,
+        Err(message) => {
+            send_help(session, &message);
+            return Ok(());
+        }
+    };
+
+    send_help(
+        session,
+        &format!(
+            "--------------------{}--------------------",
+            summary.npc_name
+        ),
+    );
+    send_help(
+        session,
+        &format!("[Drop Test] Total Coins: {}", summary.coins),
+    );
+    world.gold_gain_with_bonus(sid, summary.coins.min(u32::MAX as u64) as u32);
+
+    for (item_id, item_count, item_name) in &summary.items {
+        send_help(
+            session,
+            &format!(
+                "[Drop Test] ItemName: {}, ItemID: {}, ItemCount: {}",
+                item_name, item_id, item_count
+            ),
+        );
+        let mut remaining = *item_count;
+        while remaining > 0 {
+            let batch = remaining.min(crate::world::ITEMCOUNT_MAX as u32) as u16;
+            if !world.give_item(sid, *item_id, batch) {
+                send_help(
+                    session,
+                    &format!(
+                        "[Drop Test] Inventory full; could not give {} x{}.",
+                        item_name, remaining
+                    ),
+                );
+                break;
+            }
+            remaining -= batch as u32;
+        }
+    }
+    send_help(session, "------------------------------------------");
+    info!(
+        "[{}] GM +drop: npc={} target_id={} rolls={} coins={} distinct_items={}",
+        session.addr(),
+        summary.npc_name,
+        target_id,
+        count,
+        summary.coins,
+        summary.items.len()
+    );
     Ok(())
 }
 

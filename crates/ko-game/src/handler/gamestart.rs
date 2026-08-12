@@ -81,7 +81,46 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
         }
     };
 
-    let items = items_result?;
+    let mut items = items_result?;
+
+    // C++ requires every real inventory item to have a non-zero serial before
+    // ITEM_BOUND/ITEM_LOCK can succeed.  Legacy imports and the original
+    // CREATE_NEW_CHAR_SET insert path left serial_num=0, which made v2615 show
+    // "Item restoration failed" whenever one of those items was equipped.
+    // Repair both the login snapshot and PostgreSQL before MyInfo is built so
+    // existing characters and newly-created characters are fixed permanently.
+    let mut repaired_serials = 0usize;
+    for item in items
+        .iter_mut()
+        .filter(|item| item.item_id > 0 && item.serial_num <= 0)
+    {
+        let serial = session.world().generate_item_serial().max(1);
+        item.serial_num = serial as i64;
+        repaired_serials += 1;
+    }
+    if repaired_serials > 0 {
+        let repaired_items: Vec<_> = items
+            .iter()
+            .map(|item| ko_db::repositories::character::SaveItemParams {
+                char_id: &char_id,
+                slot_index: item.slot_index,
+                item_id: item.item_id,
+                durability: item.durability,
+                count: item.count,
+                flag: item.flag,
+                original_flag: item.original_flag,
+                serial_num: item.serial_num,
+                expire_time: item.expire_time,
+            })
+            .collect();
+        char_repo.save_items_batch(&repaired_items).await?;
+        tracing::info!(
+            "[sid={}] GAMESTART: repaired {} zero item serial(s) for {}",
+            session.session_id(),
+            repaired_serials,
+            char_id
+        );
+    }
 
     // Restore the equipped pet from pet_user_data.
     //

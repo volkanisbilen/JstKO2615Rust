@@ -630,23 +630,6 @@ impl WorldState {
             // Set gate_open = 2
             self.update_npc_gate_open(npc.nid, 2);
 
-            // v2615 keeps the bridge's collision object separately from its
-            // NPC_INOUT model. CNpc::SendJuraidBridgeFlag() explicitly sends
-            // WIZ_OBJECT_EVENT/OBJECT_GATE with a boolean open flag; without
-            // this packet the model refreshes but the client collision stays
-            // closed.
-            let mut gate_pkt = Packet::new(Opcode::WizObjectEvent as u8);
-            gate_pkt.write_u8(crate::object_event_constants::OBJECT_GATE);
-            gate_pkt.write_u8(1);
-            gate_pkt.write_u32(npc.nid);
-            gate_pkt.write_u8(1);
-            self.broadcast_to_zone_event_room(
-                ZONE_JURAID,
-                room_id,
-                Arc::new(gate_pkt),
-                None,
-            );
-
             // Build INOUT_OUT packet (despawn closed gate)
             let mut out_pkt = Packet::new(Opcode::WizNpcInout as u8);
             out_pkt.write_u8(NPC_OUT);
@@ -721,6 +704,33 @@ impl WorldState {
         event_room: u16,
         summon_type: u8,
     ) -> Vec<NpcId> {
+        self.spawn_event_npc_ex_with_direction(
+            s_sid,
+            is_monster,
+            zone_id,
+            x,
+            z,
+            count,
+            event_room,
+            summon_type,
+            0,
+        )
+    }
+
+    /// Event spawn variant preserving the authoritative DB facing direction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_event_npc_ex_with_direction(
+        &self,
+        s_sid: u16,
+        is_monster: bool,
+        zone_id: u16,
+        x: f32,
+        z: f32,
+        count: u16,
+        event_room: u16,
+        summon_type: u8,
+        direction: u8,
+    ) -> Vec<NpcId> {
         let tmpl = match self.get_npc_template(s_sid, is_monster) {
             Some(t) => t,
             None => return Vec::new(),
@@ -758,7 +768,7 @@ impl WorldState {
                 x: spawn_x,
                 y: 0.0,
                 z: spawn_z,
-                direction: 0,
+                direction,
                 region_x,
                 region_z,
                 gate_open: 0,

@@ -75,11 +75,12 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
                 continue;
             }
 
-            // PID 6700 is a static bridge/gate object, not a combat monster.
-            // A matching non-monster template is seeded by the runtime fixes
-            // migration so v2615 receives isMonster=2 while retaining the
-            // exact bridge model/size from K_MONSTER2369.
-            let is_monster = is_wave_monster || is_deva;
+            // C++ loads PID 6700 from K_MONSTER and sends it through the
+            // monster NPC_INOUT layout.  v2615 uses that wire flag to attach
+            // the Juraid bridge model/collision object; cloning it as K_NPC
+            // made the server open the gate while the client kept no walkable
+            // bridge. Its zero search range keeps this static gate out of AI.
+            let is_monster = is_wave_monster || is_deva || is_bridge;
             let count = if is_wave_monster {
                 row.s_count.max(1) as u16
             } else {
@@ -102,7 +103,7 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
                 0
             };
 
-            let ids = world.spawn_event_npc_ex(
+            let ids = world.spawn_event_npc_ex_with_direction(
                 row.s_sid as u16,
                 is_monster,
                 juraid::ZONE_JURAID,
@@ -111,6 +112,7 @@ fn spawn_juraid_room_npcs(world: &WorldState) {
                 count,
                 room_id as u16,
                 summon_type,
+                row.by_direction.clamp(0, u8::MAX as i16) as u8,
             );
             if trap_number > 0 {
                 for nid in &ids {
