@@ -1526,9 +1526,12 @@ pub async fn handle_chaotic_exchange(
     // Process each exchange count
     let multiple = count > 1;
     for _ in 0..count {
-        // Build weighted random array
-        let mut rand_array = vec![0u32; 10000];
-        let mut offset = 0usize;
+        // Build the complete weighted pool. The former fixed 10,000-slot
+        // array truncated large pools in DashMap iteration order, which could
+        // silently exclude low-rate rewards such as Fortified Sterling's
+        // accessory entries. Keep every positive TBL weight instead.
+        let mut weighted_items = Vec::with_capacity(exchanges.len());
+        let mut total_weight = 0u64;
 
         for ex in &exchanges {
             if ex.random_flag >= 101 {
@@ -1542,25 +1545,21 @@ pub async fn handle_chaotic_exchange(
             ) {
                 continue;
             }
-            let fill_count = (ex.exchange_item_count1 / 5) as usize;
-            for i in 0..fill_count {
-                if offset + i >= 9999 {
-                    break;
-                }
-                rand_array[offset + i] = ex.exchange_item_num1 as u32;
+            if ex.exchange_item_num1 <= 0 || ex.exchange_item_count1 <= 0 {
+                continue;
             }
-            offset += fill_count;
-            if offset >= 9999 {
-                break;
-            }
+            let weight = ex.exchange_item_count1 as u64;
+            total_weight = total_weight.saturating_add(weight);
+            weighted_items.push((ex.exchange_item_num1 as u32, weight));
         }
 
-        if offset == 0 {
+        if total_weight == 0 {
             return send_bifrost_fail(session, error_code).await;
         }
 
-        let rand_slot = rand::random::<usize>() % offset;
-        let give_item_id = rand_array[rand_slot];
+        let roll = rand::random::<u64>() % total_weight;
+        let give_item_id = select_weighted_exchange_item(&weighted_items, roll)
+            .ok_or_else(|| anyhow::anyhow!("Chaotic Generator weighted pool was inconsistent"))?;
 
         let give_tmpl = match world.get_item(give_item_id) {
             Some(t) => t,
@@ -1650,6 +1649,21 @@ pub async fn handle_chaotic_exchange(
         }
     }
     Ok(())
+}
+
+/// Select a generator reward using a zero-based roll in `[0, total_weight)`.
+/// Kept independent from RNG so pool-boundary behavior is unit-testable.
+fn select_weighted_exchange_item(weighted_items: &[(u32, u64)], mut roll: u64) -> Option<u32> {
+    for &(item_id, weight) in weighted_items {
+        if weight == 0 {
+            continue;
+        }
+        if roll < weight {
+            return Some(item_id);
+        }
+        roll -= weight;
+    }
+    None
 }
 
 /// Send chaotic exchange result notification.
@@ -3092,6 +3106,22 @@ pub(crate) fn build_zindan_logout() -> Packet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weighted_generator_selection_keeps_low_rate_tail_reachable() {
+        let pool = [(100, 10_000), (1310515301, 5), (1310518304, 5)];
+        assert_eq!(select_weighted_exchange_item(&pool, 0), Some(100));
+        assert_eq!(select_weighted_exchange_item(&pool, 9_999), Some(100));
+        assert_eq!(
+            select_weighted_exchange_item(&pool, 10_000),
+            Some(1310515301)
+        );
+        assert_eq!(
+            select_weighted_exchange_item(&pool, 10_009),
+            Some(1310518304)
+        );
+        assert_eq!(select_weighted_exchange_item(&pool, 10_010), None);
+    }
 
     #[test]
     fn test_compute_money_req_premium_12_free() {
