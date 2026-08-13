@@ -263,6 +263,13 @@ impl WorldState {
     pub fn achieve_main(&self, s_index: i32) -> Option<AchieveMainRow> {
         self.achieve_main.get(&s_index).map(|r| r.clone())
     }
+    /// Snapshot all achievement master definitions.
+    pub fn all_achieve_main(&self) -> Vec<AchieveMainRow> {
+        self.achieve_main
+            .iter()
+            .map(|r| r.value().clone())
+            .collect()
+    }
     /// Look up an achievement title by title index.
     ///
     pub fn achieve_title(&self, s_index: i32) -> Option<AchieveTitleRow> {
@@ -273,20 +280,38 @@ impl WorldState {
     pub fn achieve_war(&self, s_index: i32) -> Option<AchieveWarRow> {
         self.achieve_war.get(&s_index).map(|r| r.clone())
     }
+    pub fn all_achieve_war(&self) -> Vec<AchieveWarRow> {
+        self.achieve_war.iter().map(|r| r.value().clone()).collect()
+    }
     /// Look up a normal-type achievement by s_index.
     ///
     pub fn achieve_normal(&self, s_index: i32) -> Option<AchieveNormalRow> {
         self.achieve_normal.get(&s_index).map(|r| r.clone())
+    }
+    pub fn all_achieve_normal(&self) -> Vec<AchieveNormalRow> {
+        self.achieve_normal
+            .iter()
+            .map(|r| r.value().clone())
+            .collect()
     }
     /// Look up a monster-kill achievement by s_index.
     ///
     pub fn achieve_monster(&self, s_index: i32) -> Option<AchieveMonsterRow> {
         self.achieve_monster.get(&s_index).map(|r| r.clone())
     }
+    pub fn all_achieve_monster(&self) -> Vec<AchieveMonsterRow> {
+        self.achieve_monster
+            .iter()
+            .map(|r| r.value().clone())
+            .collect()
+    }
     /// Look up a composite (requirement-based) achievement by s_index.
     ///
     pub fn achieve_com(&self, s_index: i32) -> Option<AchieveComRow> {
         self.achieve_com.get(&s_index).map(|r| r.clone())
+    }
+    pub fn all_achieve_com(&self) -> Vec<AchieveComRow> {
+        self.achieve_com.iter().map(|r| r.value().clone()).collect()
     }
     /// Get filtered mining/fishing item list based on table type and tool type.
     ///
@@ -1083,16 +1108,11 @@ impl WorldState {
         if !(1..=2).contains(&nation) || amount == 0 {
             return;
         }
-        let zone_id = self
-            .with_session(sid, |h| h.position.zone_id)
-            .unwrap_or(0);
+        let zone_id = self.with_session(sid, |h| h.position.zone_id).unwrap_or(0);
         let mut loyalty_daily = amount;
         let mut loyalty_premium_bonus = 0;
         self.update_session(sid, |h| {
-            h.pk_loyalty_daily = h
-                .pk_loyalty_daily
-                .saturating_add(amount)
-                .min(2_100_000_000);
+            h.pk_loyalty_daily = h.pk_loyalty_daily.saturating_add(amount).min(2_100_000_000);
             loyalty_daily = h.pk_loyalty_daily;
             loyalty_premium_bonus = h.pk_loyalty_premium_bonus;
         });

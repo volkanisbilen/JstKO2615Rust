@@ -1439,6 +1439,12 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
                 );
             }
         }
+        let initialized = super::achieve::initialize_achievement_map(&world, sid);
+        if initialized > 0 {
+            tracing::info!(sid, character = %char_id, initialized,
+                total = world.all_achieve_main().len(),
+                "Achievement map synchronized with v2615 definitions");
+        }
         match achieve_repo.load_user_achieve_summary(&char_id).await {
             Ok(Some(summary)) => {
                 world.update_session(sid, |h| {
@@ -1454,11 +1460,6 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
                     ];
                     h.achieve_summary.cover_id = summary.cover_id as u16;
                     h.achieve_summary.skill_id = summary.skill_id as u16;
-                    // Set login time for play_time tracking
-                    h.achieve_login_time = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as u32;
                 });
 
                 // 14c. Restore skill title stat bonuses from DB
@@ -1551,6 +1552,7 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
         if level >= 1 {
             achieve_normal_reach_level(&world, sid, level, zone_id);
         }
+        super::achieve::evaluate_achievement_dependencies(&world, sid);
     }
 
     // 16. KnightsClanBuffUpdate(true) — increment online member count, broadcast bonus

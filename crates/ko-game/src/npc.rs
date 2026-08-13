@@ -718,8 +718,8 @@ mod tests {
         write_npc_info_base(&mut pkt, &npc, &tmpl);
 
         assert_eq!(pkt.data.len(), 2 + 4 + 43);
-        assert_eq!(pkt.data[48], 130);
-        assert_eq!(pkt.data[49], 1);
+        assert_eq!(pkt.data[47], 130);
+        assert_eq!(pkt.data[48], 1);
     }
 
     #[test]

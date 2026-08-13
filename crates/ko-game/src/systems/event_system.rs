@@ -2463,6 +2463,9 @@ pub async fn distribute_juraid_rewards(world: &WorldState, winner_results: &[(u8
             }
 
             let is_winner = nation == winner_nation;
+            if is_winner {
+                crate::handler::achieve::on_war_event_result(world, sid, 6);
+            }
             let is_premium = world.with_session(sid, |h| h.premium_in_use).unwrap_or(0) != 0;
             let exp = if is_winner {
                 if is_premium { 50_000_000 } else { 20_000_000 }

@@ -699,9 +699,7 @@ fn calculate_r_damage_with_class_bonus(
 
             damage.max(1) as i16
         }
-        _ => {
-            0
-        }
+        _ => 0,
     }
 }
 
@@ -1182,10 +1180,11 @@ fn handle_player_attack(
     }
 
     if damage > 0 && is_mage(attacker.class) {
-        damage = (damage as f64 * world.get_plus_damage_from_item_ids(
-            attacker_snap.left_hand_item_id,
-            attacker_snap.right_hand_item_id,
-        )) as i16;
+        damage = (damage as f64
+            * world.get_plus_damage_from_item_ids(
+                attacker_snap.left_hand_item_id,
+                attacker_snap.right_hand_item_id,
+            )) as i16;
     }
 
     // ── R-attack damage multiplier for level>30 non-priests ──────────
@@ -1214,12 +1213,16 @@ fn handle_player_attack(
     // Reduces damage based on target's weapon-type-specific armor resistances (PvP only).
     if damage > 0 {
         let right_kind = if attacker_snap.right_hand_item_id != 0 {
-            world.get_item(attacker_snap.right_hand_item_id).and_then(|w| w.kind)
+            world
+                .get_item(attacker_snap.right_hand_item_id)
+                .and_then(|w| w.kind)
         } else {
             None
         };
         let left_kind = if attacker_snap.left_hand_item_id != 0 {
-            world.get_item(attacker_snap.left_hand_item_id).and_then(|w| w.kind)
+            world
+                .get_item(attacker_snap.left_hand_item_id)
+                .and_then(|w| w.kind)
         } else {
             None
         };
@@ -1331,7 +1334,9 @@ fn handle_player_attack(
                 }
                 // Convert absorbed damage to MP
                 world.update_character_stats(target_sid, |ch| {
-                    ch.mp = (ch.mp as i32).saturating_add(absorbed as i32).min(ch.max_mp as i32) as i16;
+                    ch.mp = (ch.mp as i32)
+                        .saturating_add(absorbed as i32)
+                        .min(ch.max_mp as i32) as i16;
                 });
                 // Decrement absorb count for pct==15 skills
                 if absorb_pct == 15 {
@@ -1587,6 +1592,8 @@ fn handle_player_attack(
             h.achieve_summary.user_death_count =
                 h.achieve_summary.user_death_count.saturating_add(1);
         });
+        crate::handler::achieve::on_enemy_user_killed(world, attacker_sid, attacker_pos.zone_id);
+        crate::handler::achieve::on_player_died(world, target_sid);
 
         // v2525: Send updated PvP kill counter to attacker's HUD (0xA5)
         if let Some(count) =
@@ -2092,10 +2099,11 @@ async fn handle_npc_attack(
     };
 
     if damage > 0 && is_mage(attacker.class) {
-        damage = (damage as f64 * world.get_plus_damage_from_item_ids(
-            npc_attacker_snap.left_hand_item_id,
-            npc_attacker_snap.right_hand_item_id,
-        )) as i16;
+        damage = (damage as f64
+            * world.get_plus_damage_from_item_ids(
+                npc_attacker_snap.left_hand_item_id,
+                npc_attacker_snap.right_hand_item_id,
+            )) as i16;
     }
 
     // ── R-attack damage multiplier for level>30 non-priests ──────────
@@ -2111,7 +2119,8 @@ async fn handle_npc_attack(
     // ── Elemental weapon damage bonuses (GetMagicDamage) ─────────────
     // Uses NPC template elemental resistances instead of player session values.
     if damage > 0 {
-        damage = apply_elemental_weapon_damage_npc(&npc_attacker_snap.equipped_stats, &tmpl, damage);
+        damage =
+            apply_elemental_weapon_damage_npc(&npc_attacker_snap.equipped_stats, &tmpl, damage);
     }
 
     if damage > 0 {
@@ -2140,25 +2149,25 @@ async fn handle_npc_attack(
     // Manes uses an isolated level 1-30 combat curve. Normal character
     // equipment/stats must not let a level-1 participant one-shot the outer
     // ring. Scale the existing hit from 15% at level 1 to 87.5% at level 30.
-    let damage = if crate::systems::manes_survival::ZONES_MANES_SURVIVAL
-        .contains(&attacker_pos.zone_id)
-    {
-        let level = world
-            .manes_survival_manager
-            .progress(attacker_sid)
-            .map(|state| state.level)
-            .unwrap_or(1);
-        let scale_tenths =
-            i32::from(crate::systems::manes_survival::attack_scale_per_mille(level));
-        let scaled = ((damage as i32 * scale_tenths) / 1_000).max(1);
-        let bonus = world
-            .manes_survival_manager
-            .combat_bonuses(attacker_sid)
-            .attack_pct as i32;
-        (scaled * (100 + bonus) / 100).clamp(1, i16::MAX as i32) as i16
-    } else {
-        damage
-    };
+    let damage =
+        if crate::systems::manes_survival::ZONES_MANES_SURVIVAL.contains(&attacker_pos.zone_id) {
+            let level = world
+                .manes_survival_manager
+                .progress(attacker_sid)
+                .map(|state| state.level)
+                .unwrap_or(1);
+            let scale_tenths = i32::from(crate::systems::manes_survival::attack_scale_per_mille(
+                level,
+            ));
+            let scaled = ((damage as i32 * scale_tenths) / 1_000).max(1);
+            let bonus = world
+                .manes_survival_manager
+                .combat_bonuses(attacker_sid)
+                .attack_pct as i32;
+            (scaled * (100 + bonus) / 100).clamp(1, i16::MAX as i32) as i16
+        } else {
+            damage
+        };
 
     // Cap damage at MAX_DAMAGE — matches player attack path
     let damage = if is_gm {
@@ -2281,10 +2290,7 @@ pub(crate) fn flush_manes_progress(world: &WorldState, sid: SessionId) {
         let offer = world.manes_survival_manager.create_offer(sid);
         world.send_to_session_owned(
             sid,
-            crate::handler::survival::build_skill_selection_open(
-                &offer.skills,
-                &offer.potions,
-            ),
+            crate::handler::survival::build_skill_selection_open(&offer.skills, &offer.potions),
         );
         tracing::info!(
             sid,
@@ -2421,11 +2427,7 @@ pub(crate) fn scale_manes_magic_damage(
     (scaled * (100 + bonus) / 100).clamp(1, i16::MAX as i32) as i16
 }
 
-pub(crate) fn broadcast_npc_death(
-    world: &WorldState,
-    killer_sid: SessionId,
-    npc_id: NpcId,
-) {
+pub(crate) fn broadcast_npc_death(world: &WorldState, killer_sid: SessionId, npc_id: NpcId) {
     let mut death_pkt = Packet::new(Opcode::WizDead as u8);
     death_pkt.write_u32(npc_id);
 
@@ -2480,6 +2482,7 @@ pub(crate) async fn handle_npc_death(
     world.update_session(killer_sid, |h| {
         h.dr_mh_total_kill += 1;
     });
+    crate::handler::achieve::on_monster_killed(world, killer_sid, tmpl.s_sid as u16, npc.zone_id);
 
     // ── Achievement: MonsterDefeatCount++ ────────────────────────────
     // Called via AchieveMonsterCountAdd() on each NPC death.
@@ -2610,19 +2613,21 @@ pub(crate) async fn handle_npc_death(
                     let mut eligible: Vec<(SessionId, u8)> = Vec::with_capacity(8);
                     for &member_sid in &party.active_members() {
                         // Single DashMap read: alive + in-range + level (3 reads → 1)
-                        let member_level = world.with_session(member_sid, |h| {
-                            let ch = h.character.as_ref()?;
-                            if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
-                                return None;
-                            }
-                            let dx = h.position.x - npc_x;
-                            let dz = h.position.z - npc_z;
-                            if dx * dx + dz * dz <= RANGE_50M {
-                                Some(ch.level)
-                            } else {
-                                None
-                            }
-                        }).flatten();
+                        let member_level = world
+                            .with_session(member_sid, |h| {
+                                let ch = h.character.as_ref()?;
+                                if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
+                                    return None;
+                                }
+                                let dx = h.position.x - npc_x;
+                                let dz = h.position.z - npc_z;
+                                if dx * dx + dz * dz <= RANGE_50M {
+                                    Some(ch.level)
+                                } else {
+                                    None
+                                }
+                            })
+                            .flatten();
                         if let Some(level) = member_level {
                             eligible.push((member_sid, level));
                         }
@@ -3441,6 +3446,7 @@ async fn draki_tower_monster_kill(world: &WorldState, killer_sid: SessionId, eve
             // Persist progress + rift rank (C++ DrakiTowerSavedUserInfo + achievement)
             draki_tower_save_progress(world, killer_sid, now).await;
             draki_tower_update_rank(world, killer_sid, elapsed_seconds).await;
+            crate::handler::achieve::on_war_event_result(world, killer_sid, 21);
 
             tracing::info!(
                 "Draki Tower COMPLETE! room={}, elapsed={}s",
@@ -4629,8 +4635,12 @@ fn apply_elemental_weapon_damage_pvp(
     target_pct_poison_r: u8,
     base_damage: i16,
 ) -> i16 {
-    let (pct_fire, pct_cold, pct_lightning, pct_poison) =
-        (target_pct_fire_r, target_pct_cold_r, target_pct_lightning_r, target_pct_poison_r);
+    let (pct_fire, pct_cold, pct_lightning, pct_poison) = (
+        target_pct_fire_r,
+        target_pct_cold_r,
+        target_pct_lightning_r,
+        target_pct_poison_r,
+    );
 
     let resist_bonus = target_stats.resistance_bonus as i32;
     let mut elemental_bonus: i32 = 0;

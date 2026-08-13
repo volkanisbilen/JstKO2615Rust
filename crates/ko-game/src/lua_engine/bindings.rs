@@ -122,6 +122,10 @@ pub fn register_all(lua: &Lua) -> LuaResult<()> {
     g.set("GiveItem", lua.create_function(lua_give_item)?)?;
     g.set("GiveItemLua", lua.create_function(lua_give_item)?)?;
     g.set("RobItem", lua.create_function(lua_rob_item)?)?;
+    g.set(
+        "ExchangeItemForAchievement",
+        lua.create_function(lua_exchange_item_for_achievement)?,
+    )?;
     g.set("GoldGain", lua.create_function(lua_gold_gain)?)?;
     g.set("GoldLose", lua.create_function(lua_gold_lose)?)?;
     g.set("ExpChange", lua.create_function(lua_exp_change)?)?;
@@ -774,6 +778,10 @@ fn lua_save_event(lua: &Lua, (uid, quest_helper_id): (i32, u16)) -> LuaResult<()
         });
     }
 
+    if status == 2 {
+        crate::handler::achieve::on_quest_completed(&w, sid);
+    }
+
     Ok(())
 }
 
@@ -874,6 +882,20 @@ fn lua_give_item(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
 fn lua_rob_item(lua: &Lua, (uid, item_id, count): (i32, u32, u16)) -> LuaResult<()> {
     get_world(lua)?.rob_item(uid as SessionId, item_id, count);
     Ok(())
+}
+
+fn lua_exchange_item_for_achievement(
+    lua: &Lua,
+    (uid, item_id, item_count, achievement_id): (i32, u32, u16, u16),
+) -> LuaResult<i32> {
+    let world = get_world(lua)?;
+    Ok(crate::handler::achieve::exchange_item_for_achievement(
+        &world,
+        uid as SessionId,
+        item_id,
+        item_count,
+        achievement_id,
+    ))
 }
 
 fn lua_gold_gain(lua: &Lua, (uid, amount): (i32, u32)) -> LuaResult<()> {
@@ -1596,8 +1618,7 @@ fn lua_show_map(lua: &Lua, (uid, mid): (i32, Option<u32>)) -> LuaResult<()> {
 /// IDs, so the Lua must be able to choose the matching SaveEvent/exchange row.
 fn lua_get_quest_helper_id(lua: &Lua, uid: i32) -> LuaResult<u32> {
     let w = get_world(lua)?;
-    Ok(w
-        .with_session(uid as SessionId, |h| h.quest_helper_id)
+    Ok(w.with_session(uid as SessionId, |h| h.quest_helper_id)
         .unwrap_or(0))
 }
 
@@ -3531,14 +3552,8 @@ fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -
 /// C++ cape logic: flag==1 → cape=-1 (training), otherwise cape=0.
 fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     let mut iter = args.into_iter();
-    let uid: i32 = iter
-        .next()
-        .and_then(|v| lua.unpack(v).ok())
-        .unwrap_or(0);
-    let flag: i16 = iter
-        .next()
-        .and_then(|v| lua.unpack(v).ok())
-        .unwrap_or(2); // default ClanTypePromoted
+    let uid: i32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
+    let flag: i16 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(2); // default ClanTypePromoted
 
     let w = get_world(lua)?;
     let sid = uid as SessionId;
@@ -5005,7 +5020,12 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
         })
         .map(|s| (s.id, s.draki_stage as u16, s.draki_sub_stage as u16));
     let Some((stage_id, resolved_stage, resolved_sub_stage)) = resolved else {
-        tracing::warn!(sid, stage, sub_stage, "DrakiRiftChange: no monster stage found");
+        tracing::warn!(
+            sid,
+            stage,
+            sub_stage,
+            "DrakiRiftChange: no monster stage found"
+        );
         return Ok(());
     };
 
@@ -5498,9 +5518,7 @@ fn lua_send_warp_list(lua: &Lua, uid: i32) -> LuaResult<()> {
     let w = get_world(lua)?;
     let sid = uid as SessionId;
 
-    let zone_id = w
-        .with_session(sid, |h| h.position.zone_id)
-        .unwrap_or(0);
+    let zone_id = w.with_session(sid, |h| h.position.zone_id).unwrap_or(0);
 
     if zone_id == 0 {
         tracing::warn!(sid, "SendWarpList: zone_id=0");
@@ -5626,6 +5644,7 @@ mod tests {
             "SaveEvent",
             "GiveItem",
             "RobItem",
+            "ExchangeItemForAchievement",
             "GoldGain",
             "GoldLose",
             "NpcSay",

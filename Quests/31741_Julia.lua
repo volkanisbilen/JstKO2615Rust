@@ -27,7 +27,7 @@ end
 
 -- header=45422 flag=2
 if (EVENT == 104) then
-	SelectMsg(UID, 2, -1, 45422, NPC, 45054, 201, 40852, 202, 45331, 203, 45356, 204, 45332, 205, 45357, 206, 40855, 207, 40856, 208, 45359, 209, 45333, 210);
+	SelectMsg(UID, 2, -1, 45422, NPC, 45054, 201, 40852, 202, 45331, 203, 40906, 204, 45332, 205, 45357, 206, 40855, 207, 45055, 208, 45359, 209, 45333, 210);
 end
 
 local function ExchangeManesOrb(required, reward, reward_count, expiry_days)
@@ -38,11 +38,14 @@ local function ExchangeManesOrb(required, reward, reward_count, expiry_days)
 	if (CheckGiveSlot(UID, 1) == false) then
 		return;
 	end
-	RobItem(UID, 978026000, required);
+	local delivered = false;
 	if (expiry_days > 0) then
-		GiveItem(UID, reward, reward_count, expiry_days);
+		delivered = GiveItem(UID, reward, reward_count, expiry_days);
 	else
-		GiveItem(UID, reward, reward_count);
+		delivered = GiveItem(UID, reward, reward_count);
+	end
+	if (delivered == true) then
+		RobItem(UID, 978026000, required);
 	end
 end
 
@@ -71,12 +74,20 @@ if (EVENT == 203) then
 	end
 end
 
-if (EVENT == 204) then ExchangeManesOrb(30, 931695000, 1, 7); end
+if (EVENT == 204) then ExchangeManesOrb(20, 931695000, 1, 7); end
 if (EVENT == 205) then ExchangeManesOrb(45, 814038000, 1, 1); end
-if (EVENT == 206) then ExchangeManesOrb(50, 890226000, 1, 0); end
+if (EVENT == 206) then ExchangeManesOrb(50, 890226896, 1, 0); end
 if (EVENT == 207) then ExchangeManesOrb(100, 508070000, 1, 7); end
-if (EVENT == 208) then ExchangeManesOrb(150, 379099000, 1, 0); end
-if (EVENT == 209) then ExchangeManesOrb(300, 1931761028, 1, 0); end
+if (EVENT == 208) then ExchangeManesOrb(150, 379099000, 10, 0); end
+
+if (EVENT == 209) then
+	local result = ExchangeItemForAchievement(UID, 978026000, 300, 471);
+	if (result == 2) then
+		SelectMsg(UID, 2, -1, 44759, NPC, 27, -1);
+	elseif (result == 3) then
+		SelectMsg(UID, 2, -1, 10596, NPC, 18, 5000);
+	end
+end
 if (EVENT == 210) then ExchangeManesOrb(450, 931751000, 1, 15); end
 
 -- Close dialog

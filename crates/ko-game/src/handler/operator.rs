@@ -375,7 +375,9 @@ pub async fn process_chat_command(
         "rouletteopen" => handle_native_event_toggle(session, "roulette", true).await?,
         "rouletteclose" => handle_native_event_toggle(session, "roulette", false).await?,
         "puzzleopen" | "jigsawopen" => handle_native_event_toggle(session, "jigsaw", true).await?,
-        "puzzleclose" | "jigsawclose" => handle_native_event_toggle(session, "jigsaw", false).await?,
+        "puzzleclose" | "jigsawclose" => {
+            handle_native_event_toggle(session, "jigsaw", false).await?
+        }
         "coinopen" => handle_native_event_toggle(session, "coin", true).await?,
         "coinclose" => handle_native_event_toggle(session, "coin", false).await?,
         "marbleopen" => handle_native_event_toggle(session, "marble", true).await?,
@@ -386,9 +388,15 @@ pub async fn process_chat_command(
             world.reload_user_rankings(pool).await;
             let moraranker_result = world.reload_moraranker(pool, true).await;
             if let Err(error) = moraranker_result {
-                send_help(session, &format!("+reloadranks: MORANKER reload failed: {error}"));
+                send_help(
+                    session,
+                    &format!("+reloadranks: MORANKER reload failed: {error}"),
+                );
             } else {
-                send_help(session, "+reloadranks: Rankings and MORANKER statues reloaded.");
+                send_help(
+                    session,
+                    "+reloadranks: Rankings and MORANKER statues reloaded.",
+                );
             }
             info!("[{}] +reloadranks: rankings reloaded", session.addr());
         }
@@ -416,12 +424,41 @@ pub async fn process_chat_command(
         "seasonitem" => handle_season_item(session, &args)?,
         "effect" => handle_effect(session, &args)?,
         "collection" => handle_collection_notify(session, &args)?,
+        "achieve" => handle_achieve_unlock(session, &args)?,
         "clannotify" => handle_clannotify(session, &args)?,
         "stateflag" => handle_stateflag(session, &args)?,
         _ => return Ok(false),
     }
 
     Ok(true)
+}
+
+/// Unlock all v2615 achievements/titles for an online character.
+fn handle_achieve_unlock(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<()> {
+    if args.len() != 1 {
+        send_help(session, "Usage: +achieve CharacterName");
+        return Ok(());
+    }
+    let world = session.world().clone();
+    let Some(target_sid) = world.find_session_by_name(args[0]) else {
+        send_help(session, &format!("+achieve: '{}' is not online.", args[0]));
+        return Ok(());
+    };
+    let changed = super::achieve::unlock_all_achievements(&world, target_sid);
+    let total = world.all_achieve_main().len();
+    let gm_name = world
+        .get_session_name(session.session_id())
+        .unwrap_or_default();
+    tracing::info!(gm = %gm_name, target = %args[0], changed, total,
+        "GM unlocked all achievements");
+    send_help(
+        session,
+        &format!(
+            "+achieve: {} achievement entries synchronized for '{}' ({} newly unlocked).",
+            total, args[0], changed
+        ),
+    );
+    Ok(())
 }
 /// Send a help/feedback message to the GM via PUBLIC_CHAT.
 /// Uses WIZ_CHAT with PUBLIC_CHAT type, sent only to the GM who issued the command.
@@ -458,12 +495,20 @@ async fn handle_native_event_toggle(
     let pool = session.pool().clone();
     let repo = ko_db::repositories::native_events::NativeEventsRepository::new(&pool);
     if !repo.set_active(event_key, active).await? {
-        send_help(session, "Native event configuration row was not found. Run migrations first.");
+        send_help(
+            session,
+            "Native event configuration row was not found. Run migrations first.",
+        );
         return Ok(());
     }
     let state = if active { "opened" } else { "closed" };
     send_help(session, &format!("Native {event_key} event {state}."));
-    info!("[{}] native event toggle: key={} active={}", session.addr(), event_key, active);
+    info!(
+        "[{}] native event toggle: key={} active={}",
+        session.addr(),
+        event_key,
+        active
+    );
     Ok(())
 }
 
@@ -2113,7 +2158,10 @@ fn handle_pk_bots(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<
         }
     };
 
-    if args.first().is_some_and(|arg| arg.eq_ignore_ascii_case("clear")) {
+    if args
+        .first()
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("clear"))
+    {
         let Some(zone_arg) = args.get(1) else {
             send_help(session, "Usage: +pkbots clear <ZoneID|here>");
             return Ok(());
@@ -2123,14 +2171,20 @@ fn handle_pk_bots(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<
             return Ok(());
         };
         if !matches!(zone_id, ZONE_RONARK_LAND | ZONE_ARDREAM) {
-            send_help(session, "Error: PK bot waves currently support Ronark Land (71) and Ardream (72).");
+            send_help(
+                session,
+                "Error: PK bot waves currently support Ronark Land (71) and Ardream (72).",
+            );
             return Ok(());
         }
 
         let removed = bot_ai::despawn_gm_pk_bots_in_zone(&world, zone_id);
         send_help(
             session,
-            &format!("Removed {} temporary GM PK bot(s) from zone {}.", removed, zone_id),
+            &format!(
+                "Removed {} temporary GM PK bot(s) from zone {}.",
+                removed, zone_id
+            ),
         );
         info!(
             "[{}] GM +pkbots clear: removed {} temporary PK bots from zone {}",
@@ -2154,7 +2208,10 @@ fn handle_pk_bots(session: &mut ClientSession, args: &[&str]) -> anyhow::Result<
         return Ok(());
     };
     if !matches!(zone_id, ZONE_RONARK_LAND | ZONE_ARDREAM) {
-        send_help(session, "Error: PK bot waves currently support Ronark Land (71) and Ardream (72).");
+        send_help(
+            session,
+            "Error: PK bot waves currently support Ronark Land (71) and Ardream (72).",
+        );
         return Ok(());
     }
 
@@ -6362,7 +6419,10 @@ fn handle_under_castle_open(session: &mut ClientSession, args: &[&str]) -> anyho
         .unwrap_or(180);
     let spawn_count = world.utc_spawns().read().len();
     if spawn_count == 0 {
-        send_help(session, "Under The Castle: monster_under_the_castle table is empty.");
+        send_help(
+            session,
+            "Under The Castle: monster_under_the_castle table is empty.",
+        );
         return Ok(());
     }
 
@@ -6373,7 +6433,10 @@ fn handle_under_castle_open(session: &mut ClientSession, args: &[&str]) -> anyho
         crate::handler::under_castle::MIN_LEVEL_UNDER_CASTLE,
         83,
     ) {
-        send_help(session, "Under The Castle is already active or duration is invalid.");
+        send_help(
+            session,
+            "Under The Castle is already active or duration is invalid.",
+        );
         return Ok(());
     }
 
@@ -6399,10 +6462,7 @@ fn handle_under_castle_open(session: &mut ClientSession, args: &[&str]) -> anyho
 fn handle_under_castle_close(session: &mut ClientSession) -> anyhow::Result<()> {
     let world = session.world().clone();
     let state = world.under_the_castle_state();
-    if !state
-        .is_active
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
+    if !state.is_active.load(std::sync::atomic::Ordering::Relaxed) {
         send_help(session, "Under The Castle is not active.");
         return Ok(());
     }
@@ -6416,7 +6476,10 @@ fn handle_under_castle_close(session: &mut ClientSession) -> anyhow::Result<()> 
         None,
     );
     send_help(session, "Under The Castle close submitted.");
-    info!("[{}] +utcclose: Under The Castle close submitted", session.addr());
+    info!(
+        "[{}] +utcclose: Under The Castle close submitted",
+        session.addr()
+    );
     Ok(())
 }
 
@@ -9233,7 +9296,10 @@ fn handle_manes_survival_open(session: &mut ClientSession) -> anyhow::Result<()>
     }
     crate::handler::survival::broadcast_registration_status(&world, 0);
 
-    send_help(session, "Manes Survival registration opened; the Apply window was sent to online players.");
+    send_help(
+        session,
+        "Manes Survival registration opened; the Apply window was sent to online players.",
+    );
     info!("[{}] +manesopen: registration UI opened", session.addr());
     Ok(())
 }
@@ -9272,7 +9338,10 @@ fn handle_manes_survival_close(session: &mut ClientSession) -> anyhow::Result<()
     if !world.manes_survival_manager.is_active()
         && !world.manes_survival_manager.is_registration_open()
     {
-        send_help(session, "Manes Survival is not active and registration is closed.");
+        send_help(
+            session,
+            "Manes Survival is not active and registration is closed.",
+        );
         return Ok(());
     }
 
@@ -9283,7 +9352,9 @@ fn handle_manes_survival_close(session: &mut ClientSession) -> anyhow::Result<()
         Vec::new()
     };
     let (rewarded, failed) = if active {
-        world.manes_survival_manager.reward_rankings_and_stop(&world)
+        world
+            .manes_survival_manager
+            .reward_rankings_and_stop(&world)
     } else {
         world.manes_survival_manager.stop(&world);
         (0, 0)
