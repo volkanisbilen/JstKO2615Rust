@@ -21,6 +21,7 @@ pub mod flash;
 pub mod heartbeat_probe;
 pub mod juraid;
 pub mod knights_save;
+pub mod letter_admin_notify;
 pub mod loyalty;
 pub mod manes_survival;
 pub mod monster_stone;

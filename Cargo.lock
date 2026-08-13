@@ -878,6 +878,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ko-letter-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "ko-login-server"
 version = "0.1.0"
 dependencies = [

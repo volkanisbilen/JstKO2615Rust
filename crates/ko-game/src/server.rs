@@ -158,6 +158,12 @@ impl GameServer {
         ));
         info!("Timed notice system started");
 
+        bg_tasks.push(crate::systems::letter_admin_notify::start_letter_admin_notify_task(
+            self.world.clone(),
+            self.pool.clone(),
+        ));
+        info!("Letter admin realtime notification started (500ms interval)");
+
         bg_tasks.push(crate::systems::pet_tick::start_pet_tick_task(
             self.world.clone(),
         ));

@@ -11,6 +11,7 @@ members = [
     "crates/ko-tbl-import",
     "crates/ko-quest-audit",
     "crates/ko-quest-gen",
+    "crates/ko-letter-admin",
 ]
 
 [workspace.package]
