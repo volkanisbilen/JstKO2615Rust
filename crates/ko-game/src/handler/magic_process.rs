@@ -43,10 +43,10 @@ use crate::inventory_constants::{LEFTHAND, RIGHTHAND};
 use crate::magic_constants::{
     ABNORMAL_BLINKING, ABNORMAL_DWARF, ABNORMAL_GIANT, ABNORMAL_GIANT_TARGET, ABNORMAL_NORMAL,
     MAGIC_CANCEL, MAGIC_CANCEL2, MAGIC_CANCEL_TRANSFORMATION, MAGIC_CASTING,
-    MAGIC_DURATION_EXPIRED, MAGIC_EFFECTING, MAGIC_FAIL, MAGIC_FLYING, MAGIC_TYPE4_EXTEND,
-    MORAL_ALL, MORAL_AREA_ALL, MORAL_AREA_ENEMY, MORAL_AREA_FRIEND, MORAL_ENEMY,
-    MORAL_FRIEND_EXCEPTME, MORAL_FRIEND_WITHME, MORAL_PARTY, MORAL_PARTY_ALL, MORAL_SELF,
-    MORAL_SELF_AREA, SKILLMAGIC_FAIL_ATTACKZERO, SKILLMAGIC_FAIL_NOEFFECT,
+    MAGIC_DURATION_EXPIRED, MAGIC_EFFECTING, MAGIC_FAIL, MAGIC_FLYING, MAGIC_TRANSFORM_LIST,
+    MAGIC_TYPE4_EXTEND, MORAL_ALL, MORAL_AREA_ALL, MORAL_AREA_ENEMY, MORAL_AREA_FRIEND,
+    MORAL_ENEMY, MORAL_FRIEND_EXCEPTME, MORAL_FRIEND_WITHME, MORAL_PARTY, MORAL_PARTY_ALL,
+    MORAL_SELF, MORAL_SELF_AREA, SKILLMAGIC_FAIL_ATTACKZERO, SKILLMAGIC_FAIL_NOEFFECT,
 };
 use crate::npc_type_constants::{
     NPC_BIFROST_MONUMENT, NPC_BORDER_MONUMENT, NPC_CLAN_WAR_MONUMENT, NPC_DESTROYED_ARTIFACT,
@@ -54,7 +54,9 @@ use crate::npc_type_constants::{
     NPC_OBJECT_FLAG, NPC_PARTNER_TYPE, NPC_PHOENIX_GATE, NPC_PRISON, NPC_PVP_MONUMENT, NPC_REFUGEE,
     NPC_SOCCER_BAAL, NPC_SPECIAL_GATE, NPC_TREE, NPC_VICTORY_GATE,
 };
-use crate::state_change_constants::{STATE_CHANGE_ABNORMAL, STATE_CHANGE_WEAPONS_DISABLED};
+use crate::state_change_constants::{
+    STATE_CHANGE_ABNORMAL, STATE_CHANGE_TRANSFORMATION, STATE_CHANGE_WEAPONS_DISABLED,
+};
 
 /// Snow Battle event snowball skill — only this skill is allowed during Snow Battle.
 const SNOW_EVENT_SKILL: u32 = 490077;
@@ -137,6 +139,13 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let mut s_data = [0i32; 7];
     for d in &mut s_data {
         *d = reader.read_u32().unwrap_or(0) as i32;
+    }
+
+    // v2615 sends transformation cancellation as a one-byte sub-packet.
+    // Handle it before skill/caster validation because those fields are absent.
+    if b_opcode == MAGIC_CANCEL_TRANSFORMATION {
+        cancel_transformation(&world, sid);
+        return Ok(());
     }
 
     // Pet summon skill: Type 9 state_change=8 is not stealth.
@@ -770,6 +779,31 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         MAGIC_EFFECTING => {
             // Phase 3: Execute the actual skill effect
 
+            // v2615 transformation-selection items first request the client list.
+            // These rows use type1=0, type2!=0 and a non-zero item ID.
+            if skill.type1.unwrap_or(0) == 0
+                && skill.type2.unwrap_or(0) != 0
+                && skill.use_item.unwrap_or(0) != 0
+                && !matches!(caster_pos.zone_id, 71..=73)
+            {
+                let required_item = skill.use_item.unwrap_or(0) as u32;
+                if world.check_exist_item(sid, required_item, 1) {
+                    let mut list_pkt = Packet::new(Opcode::WizMagicProcess as u8);
+                    list_pkt.write_u8(MAGIC_TRANSFORM_LIST);
+                    list_pkt.write_u32(skill_id);
+                    world.send_to_session_owned(sid, list_pkt);
+                    tracing::info!(
+                        "[sid={}] MagicProcess: opened transformation list skill={} item={}",
+                        sid,
+                        skill_id,
+                        required_item,
+                    );
+                } else {
+                    world.send_to_session_owned(sid, instance.build_fail_packet());
+                }
+                return Ok(());
+            }
+
             // ── Cast position validation ──────────────────────────────
             // If the skill has NO flying effect, validate position on EFFECTING phase.
             if skill.flying_effect.unwrap_or(0) == 0 {
@@ -802,12 +836,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                     });
                     instance.data[3] = SKILLMAGIC_FAIL_ATTACKZERO;
                     world.send_to_session_owned(sid, instance.build_fail_packet());
-                    tracing::debug!(
-                        sid,
-                        skill_id,
-                        success_rate,
-                        "Manes offensive skill missed"
-                    );
+                    tracing::debug!(sid, skill_id, success_rate, "Manes offensive skill missed");
                     return Ok(());
                 }
             }
@@ -997,15 +1026,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
             // Type6Cancel — cancel transformation
             if world.is_transformed(sid) && world.get_magic_type6(skill.magic_num).is_some() {
-                world.clear_transformation(sid);
-                // Send MAGIC_CANCEL_TRANSFORMATION to caster
-                let mut cancel_pkt = Packet::new(Opcode::WizMagicProcess as u8);
-                cancel_pkt.write_u8(MAGIC_CANCEL_TRANSFORMATION);
-                world.send_to_session_owned(sid, cancel_pkt);
-                world.set_user_ability(sid);
-                world.send_item_move_refresh(sid);
-                // Remove saved magic for the transform skill
-                world.remove_saved_magic(sid, skill_id);
+                cancel_transformation(&world, sid);
             }
 
             // Type9Cancel — cancel stealth/lupine
@@ -1102,6 +1123,46 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     }
 
     Ok(())
+}
+
+/// Cancel the active Type 6 transformation and fully restore the character.
+/// v2615 can request this without a skill ID in a one-byte packet.
+fn cancel_transformation(world: &WorldState, sid: SessionId) {
+    let transform_skill_id = world
+        .with_session(sid, |h| {
+            (h.transformation_type != 0).then_some(h.transform_skill_id)
+        })
+        .flatten();
+    let Some(transform_skill_id) = transform_skill_id else {
+        return;
+    };
+
+    world.clear_transformation(sid);
+
+    world.update_session(sid, |h| {
+        h.old_abnormal_type = h.abnormal_type;
+        h.abnormal_type = ABNORMAL_NORMAL;
+    });
+
+    let mut cancel_pkt = Packet::new(Opcode::WizMagicProcess as u8);
+    cancel_pkt.write_u8(MAGIC_CANCEL_TRANSFORMATION);
+    world.send_to_session_owned(sid, cancel_pkt);
+
+    let mut state_pkt = Packet::new(Opcode::WizStateChange as u8);
+    state_pkt.write_u32(sid as u32);
+    state_pkt.write_u8(STATE_CHANGE_TRANSFORMATION);
+    state_pkt.write_u32(0);
+    broadcast_to_caster_region(world, sid, &state_pkt);
+
+    world.set_user_ability(sid);
+    world.send_item_move_refresh(sid);
+    world.remove_saved_magic(sid, transform_skill_id);
+
+    tracing::info!(
+        "[sid={}] MagicProcess: transformation cancelled skill={}",
+        sid,
+        transform_skill_id,
+    );
 }
 
 // ── Pre-instance skill failed packet ──────────────────────────────────────
@@ -1905,15 +1966,7 @@ async fn execute_type1_aoe(
             world.notify_npc_damaged(npc_id, caster_sid);
         } else if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
             let is_manes = super::attack::is_manes_survival_npc(&npc);
-            super::attack::handle_npc_death(
-                world,
-                caster_sid,
-                npc_id,
-                &npc,
-                &tmpl,
-                is_manes,
-            )
-            .await;
+            super::attack::handle_npc_death(world, caster_sid, npc_id, &npc, &tmpl, is_manes).await;
             if is_manes {
                 manes_dead_npcs.push(npc_id);
             }
@@ -2175,12 +2228,7 @@ async fn execute_type2(
 /// send the same fields as direct world units.  Both representations are
 /// unambiguous in normal play because the valid cast point is the candidate
 /// nearest to the caster.
-fn resolve_aoe_center(
-    raw_x: i32,
-    raw_z: i32,
-    caster_x: f32,
-    caster_z: f32,
-) -> (f32, f32) {
+fn resolve_aoe_center(raw_x: i32, raw_z: i32, caster_x: f32, caster_z: f32) -> (f32, f32) {
     if raw_x == 0 && raw_z == 0 {
         return (caster_x, caster_z);
     }
@@ -3026,14 +3074,7 @@ async fn execute_type3(
                         &aoe_player_ctx,
                         &mut aoe_rng,
                     );
-                    d = apply_magic_class_bonus(
-                        d,
-                        &caster,
-                        &target,
-                        world,
-                        caster_sid,
-                        target_sid,
-                    );
+                    d = apply_magic_class_bonus(d, &caster, &target, world, caster_sid, target_sid);
                     d
                 } else {
                     (-first_damage).max(0) as i16
@@ -3178,13 +3219,7 @@ async fn execute_type3(
 
                 let bot_ctx = build_npc_ctx(world, bot.id, aoe_attr, caster_sid);
                 let mut bot_damage = if aoe_use_magic_formula {
-                    compute_magic_damage(
-                        &caster,
-                        first_damage,
-                        mag_atk_aoe,
-                        &bot_ctx,
-                        &mut aoe_rng,
-                    )
+                    compute_magic_damage(&caster, first_damage, mag_atk_aoe, &bot_ctx, &mut aoe_rng)
                 } else {
                     (-first_damage).max(0) as i16
                 };
@@ -3194,19 +3229,15 @@ async fn execute_type3(
                 }
 
                 apply_skill_damage_to_npc(
-                    world,
-                    caster_sid,
-                    bot.id,
-                    instance,
-                    bot_damage,
-                    skill,
-                    aoe_attr,
+                    world, caster_sid, bot.id, instance, bot_damage, skill, aoe_attr,
                 )
                 .await;
 
                 if time_damage != 0
                     && duration > 0
-                    && world.get_bot(bot.id).is_some_and(|target| target.is_alive())
+                    && world
+                        .get_bot(bot.id)
+                        .is_some_and(|target| target.is_alive())
                 {
                     let mut tick_count = (duration / 2).clamp(1, 255) as u8;
                     if caster_pos.zone_id == ZONE_CHAOS_DUNGEON {
@@ -3346,12 +3377,8 @@ async fn execute_type3(
                 } else {
                     (-first_damage).max(0) as i16
                 };
-                let npc_damage = super::attack::scale_manes_magic_damage(
-                    world,
-                    caster_sid,
-                    &npc,
-                    npc_damage,
-                );
+                let npc_damage =
+                    super::attack::scale_manes_magic_damage(world, caster_sid, &npc, npc_damage);
                 let npc_damage = gm_fixed_skill_damage(world, caster_sid, npc_damage);
 
                 // Apply damage to NPC
@@ -3371,12 +3398,7 @@ async fn execute_type3(
                     if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
                         let is_manes = super::attack::is_manes_survival_npc(&npc);
                         super::attack::handle_npc_death(
-                            world,
-                            caster_sid,
-                            npc_id,
-                            &npc,
-                            &tmpl,
-                            is_manes,
+                            world, caster_sid, npc_id, &npc, &tmpl, is_manes,
                         )
                         .await;
                         if is_manes {
@@ -4667,20 +4689,13 @@ pub(crate) fn apply_bot_type4_support(
     pkt.write_u32(skill_id);
     pkt.write_u32(bot_id);
     pkt.write_u32(target_sid as u32);
-    let data = [
-        0,
-        1,
-        0,
-        duration as i32,
-        0,
-        type4.speed.unwrap_or(0),
-        0,
-    ];
+    let data = [0, 1, 0, duration as i32, 0, type4.speed.unwrap_or(0), 0];
     for value in data {
         pkt.write_u32(value as u32);
     }
 
-    if let Some((pos, event_room)) = world.with_session(target_sid, |h| (h.position, h.event_room)) {
+    if let Some((pos, event_room)) = world.with_session(target_sid, |h| (h.position, h.event_room))
+    {
         world.broadcast_to_region_sync(
             pos.zone_id,
             pos.region_x,
@@ -6925,6 +6940,14 @@ fn execute_type6(
         .map(|p| p.zone_id)
         .unwrap_or(0);
 
+    // Type 6 is exempt from the generic item check, so direct v2615 scrolls
+    // must be validated here before applying their transformation.
+    let required_item = resolve_consume_item(skill);
+    if required_item != 0 && !world.check_exist_item(caster_sid, required_item, 1) {
+        send_skill_failed(world, caster_sid, instance);
+        return false;
+    }
+
     // ── Zone-specific transformation validation ──────────────────────
     // user_skill_use values follow the C++ TransformationSkillUse enum:
     //   0 = Siege, 1 = Monster, 3 = NPC, 4 = Special,
@@ -6986,19 +7009,18 @@ fn execute_type6(
         return false;
     }
 
-    let duration = type6_data.duration as u16;
+    let duration = type6_data.duration.clamp(0, u16::MAX as i32) as u16;
     let transform_id = type6_data.transform_id;
 
     // Determine transformation type from user_skill_use
-    let transformation_type = match type6_data.user_skill_use {
-        1 => TRANSFORMATION_MONSTER,       // TransformationSkillUseMonster
-        2 | 5 => TRANSFORMATION_NPC,       // TransformationSkillUseNPC / MamaPag
-        3 | 4 | 6 => TRANSFORMATION_SIEGE, // Siege / MovingTower / OreadsGuard
-        _ => {
-            send_skill_failed(world, caster_sid, instance);
-            return false;
-        }
-    };
+    let transformation_type =
+        match transformation_type_from_user_skill_use(type6_data.user_skill_use) {
+            Some(value) => value,
+            None => {
+                send_skill_failed(world, caster_sid, instance);
+                return false;
+            }
+        };
 
     // Store transformation state on the session
     let now_ms = std::time::SystemTime::now()
@@ -7015,10 +7037,22 @@ fn execute_type6(
         duration as u64 * 1000, // C++ stores in milliseconds
     );
 
-    // Store transformation state on the character
-    world.update_character_stats(caster_sid, |ch| {
-        ch.res_hp_type = 3; // Transformed state (C++ StateChangeServerDirect(3, nSkillID))
+    // A GM must first be made visible, otherwise its entity is absent from
+    // the region when the client rebuilds the transformation model.
+    if caster.authority == 0 {
+        let mut visible_pkt = Packet::new(Opcode::WizStateChange as u8);
+        visible_pkt.write_u32(caster_sid as u32);
+        visible_pkt.write_u8(5);
+        visible_pkt.write_u32(1);
+        broadcast_to_caster_region(world, caster_sid, &visible_pkt);
+    }
+
+    world.update_session(caster_sid, |h| {
+        h.old_abnormal_type = h.abnormal_type;
+        h.abnormal_type = skill.magic_num as u32;
     });
+
+    // res_hp_type must remain untouched: value 3 means USER_DEAD here.
 
     // C++ line 5192-5194: sData[1]=1, sData[3]=duration, SendSkill()
     instance.data[1] = 1;
@@ -7027,11 +7061,11 @@ fn execute_type6(
     let pkt = instance.build_packet(MAGIC_EFFECTING);
     broadcast_to_caster_region(world, caster_sid, &pkt);
 
-    // Broadcast state change (transformation) to region
-    // C++ line 5190: StateChangeServerDirect(3, nSkillID)
+    // v2615 client sub_8544D0: state 0x13 resolves this skill ID through
+    // sub_9173E0 and rebuilds the character as the Type6 transform model.
     let mut state_pkt = Packet::new(Opcode::WizStateChange as u8);
     state_pkt.write_u32(caster_sid as u32);
-    state_pkt.write_u8(3); // type 3 = transformation
+    state_pkt.write_u8(STATE_CHANGE_TRANSFORMATION);
     state_pkt.write_u32(skill.magic_num as u32);
     broadcast_to_caster_region(world, caster_sid, &state_pkt);
 
@@ -7052,6 +7086,18 @@ fn execute_type6(
 }
 
 // ── Type 7: Summon / CC ─────────────────────────────────────────────────
+
+/// Map the v2615 Skill_Magic_6 `user_skill_use` enum to runtime state.
+fn transformation_type_from_user_skill_use(user_skill_use: i32) -> Option<u8> {
+    Some(match user_skill_use {
+        1 => TRANSFORMATION_MONSTER,
+        // NPC, Special (event/snowman), and MamaPag.
+        3 | 4 | 7 => TRANSFORMATION_NPC,
+        // Siege, OreadsGuard, and MovingTower.
+        0 | 5 | 6 => TRANSFORMATION_SIEGE,
+        _ => return None,
+    })
+}
 
 /// Execute Type 7 skill -- summoning / crowd control / target change.
 /// Handles target-change effects, NPC sleep/stun, and NPC damage.
@@ -8539,12 +8585,36 @@ mod tests {
 
     #[test]
     fn test_transformation_type_from_user_skill_use() {
-        // user_skill_use=1 => TransformationMonster
-        assert_eq!(1u8, TRANSFORMATION_MONSTER);
-        // user_skill_use=2 => TransformationNPC
-        assert_eq!(2u8, TRANSFORMATION_NPC);
-        // user_skill_use=3 => TransformationSiege
-        assert_eq!(3u8, TRANSFORMATION_SIEGE);
+        assert_eq!(
+            transformation_type_from_user_skill_use(1),
+            Some(TRANSFORMATION_MONSTER)
+        );
+        for value in [3, 4, 7] {
+            assert_eq!(
+                transformation_type_from_user_skill_use(value),
+                Some(TRANSFORMATION_NPC)
+            );
+        }
+        for value in [0, 5, 6] {
+            assert_eq!(
+                transformation_type_from_user_skill_use(value),
+                Some(TRANSFORMATION_SIEGE)
+            );
+        }
+        assert_eq!(transformation_type_from_user_skill_use(2), None);
+        assert_eq!(transformation_type_from_user_skill_use(0xFF), None);
+    }
+
+    #[test]
+    fn test_transform_list_packet_format() {
+        let mut pkt = Packet::new(Opcode::WizMagicProcess as u8);
+        pkt.write_u8(MAGIC_TRANSFORM_LIST);
+        pkt.write_u32(472001);
+
+        let mut reader = PacketReader::new(&pkt.data);
+        assert_eq!(reader.read_u8(), Some(9));
+        assert_eq!(reader.read_u32(), Some(472001));
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]
@@ -8563,6 +8633,48 @@ mod tests {
         assert_eq!(r.read_u32(), Some(1)); // sid
         assert_eq!(r.read_u8(), Some(3)); // type
         assert_eq!(r.read_u32(), Some(450001)); // skill_id as abnormal
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_gm_transform_visibility_packet_format() {
+        let mut pkt = Packet::new(Opcode::WizStateChange as u8);
+        pkt.write_u32(1);
+        pkt.write_u8(5);
+        pkt.write_u32(1);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u32(), Some(1));
+        assert_eq!(r.read_u8(), Some(5));
+        assert_eq!(r.read_u32(), Some(1));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_v2615_transformation_state_packet_format() {
+        let mut pkt = Packet::new(Opcode::WizStateChange as u8);
+        pkt.write_u32(42);
+        pkt.write_u8(STATE_CHANGE_TRANSFORMATION);
+        pkt.write_u32(500564);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u32(), Some(42));
+        assert_eq!(r.read_u8(), Some(0x13));
+        assert_eq!(r.read_u32(), Some(500564));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_v2615_transformation_reset_packet_format() {
+        let mut pkt = Packet::new(Opcode::WizStateChange as u8);
+        pkt.write_u32(42);
+        pkt.write_u8(STATE_CHANGE_TRANSFORMATION);
+        pkt.write_u32(0);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u32(), Some(42));
+        assert_eq!(r.read_u8(), Some(0x13));
+        assert_eq!(r.read_u32(), Some(0));
         assert_eq!(r.remaining(), 0);
     }
 
