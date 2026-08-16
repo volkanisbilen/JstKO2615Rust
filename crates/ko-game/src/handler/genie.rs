@@ -21,7 +21,7 @@
 
 use ko_protocol::{Opcode, Packet, PacketReader};
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::session::{ClientSession, SessionState};
 
@@ -97,9 +97,16 @@ const GENIE_ACTIVATED: u8 = 7;
 /// Status: genie active.
 const GENIE_STATUS_ACTIVE: u8 = 1;
 
-/// Size of genie options blob (bytes).
-/// v2600 sniff verified: 46 bytes (was 256 in older protocol versions).
-const GENIE_OPTIONS_SIZE: usize = 46;
+/// Default Genie options blob length used when no saved settings exist.
+///
+/// The v2615 client uses a variable-length payload: the current runtime log
+/// contains both 48-byte and 64-byte WIZ_GENIE packets (2 command bytes plus
+/// 46/62 option bytes).  Do not truncate the 62-byte form to the older 46-byte
+/// layout.
+const GENIE_OPTIONS_DEFAULT_SIZE: usize = 62;
+/// Native C++ storage is `char m_GenieOptions[100]`; cap malformed packets at
+/// that proven upper bound while preserving every byte sent by v2615.
+const GENIE_OPTIONS_MAX_SIZE: usize = 100;
 
 /// Convert absolute genie timestamp to DB i32 for storage.
 /// C++ and in-memory both use absolute UNIX timestamp (`uint32`).
@@ -129,6 +136,13 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         Some(v) => v,
         None => return Ok(()),
     };
+
+    debug!(
+        "[{}] WIZ_GENIE: command={} payload_len={}",
+        session.addr(),
+        command,
+        pkt.data.len()
+    );
 
     match command {
         GENIE_INFO_REQUEST => handle_info_request(session, &mut r).await,
@@ -216,6 +230,13 @@ async fn handle_info_request(
         Some(v) => v,
         None => return Ok(()),
     };
+
+    debug!(
+        "[{}] WIZ_GENIE: InfoRequest sub={} remaining_bytes={}",
+        session.addr(),
+        sub_command,
+        r.remaining()
+    );
 
     match sub_command {
         GENIE_USE_SPIRING_POTION => handle_genie_use_spirit(session, r).await,
@@ -344,7 +365,8 @@ async fn handle_load_options(session: &mut ClientSession) -> anyhow::Result<()> 
     // Get saved options from session data (or default zeros)
     let options = world
         .with_session(sid, |h| h.genie_options.clone())
-        .unwrap_or_else(|| vec![0u8; GENIE_OPTIONS_SIZE]);
+        .filter(|saved| !saved.is_empty())
+        .unwrap_or_else(|| vec![0u8; GENIE_OPTIONS_DEFAULT_SIZE]);
 
     let mut resp = Packet::new(Opcode::WizGenie as u8);
     resp.write_u8(GENIE_INFO_REQUEST);
@@ -369,14 +391,10 @@ fn handle_save_options(
     let sid = session.session_id();
     let world = session.world();
 
-    // Read up to GENIE_OPTIONS_SIZE bytes
-    let mut options = Vec::with_capacity(GENIE_OPTIONS_SIZE);
-    for _ in 0..GENIE_OPTIONS_SIZE {
-        match r.read_u8() {
-            Some(b) => options.push(b),
-            None => break,
-        }
-    }
+    // v2615 sends a variable-length options block. Preserve the complete
+    // payload (up to the native C++ 100-byte array) instead of cutting it at
+    // the older 46-byte sniff length.
+    let options = r.read_remaining()[..r.remaining().min(GENIE_OPTIONS_MAX_SIZE)].to_vec();
 
     world.update_session(sid, |h| {
         h.genie_options = options.clone();
@@ -405,12 +423,21 @@ async fn handle_genie_start(session: &mut ClientSession) -> anyhow::Result<()> {
         .with_session(sid, |h| (h.premium_in_use > 0, h.genie_time_abs))
         .unwrap_or((false, 0));
     if requires_premium && !has_premium {
+        warn!(
+            "[{}] WIZ_GENIE: Start rejected — premium required but inactive",
+            session.addr()
+        );
         return Ok(());
     }
 
     // Time check — genie must have remaining time.
     let remaining = genie_remaining_from_abs(abs);
     if remaining == 0 {
+        warn!(
+            "[{}] WIZ_GENIE: Start rejected — no remaining time (abs={})",
+            session.addr(),
+            abs
+        );
         return Ok(());
     }
 
@@ -440,7 +467,8 @@ async fn handle_genie_start(session: &mut ClientSession) -> anyhow::Result<()> {
     let mut region_pkt = Packet::new(Opcode::WizGenie as u8);
     region_pkt.write_u8(GENIE_INFO_REQUEST);
     region_pkt.write_u8(GENIE_ACTIVATED);
-    region_pkt.write_u32(sid as u32);
+    // Native C++ serialises GetID() as uint16 here.
+    region_pkt.write_u16(sid);
     region_pkt.write_u8(1); // active
 
     if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
@@ -492,7 +520,7 @@ pub(crate) async fn handle_genie_stop(session: &mut ClientSession) -> anyhow::Re
     let mut region_pkt = Packet::new(Opcode::WizGenie as u8);
     region_pkt.write_u8(GENIE_INFO_REQUEST);
     region_pkt.write_u8(GENIE_ACTIVATED);
-    region_pkt.write_u32(sid as u32);
+    region_pkt.write_u16(sid);
     region_pkt.write_u8(0); // inactive
 
     if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
@@ -583,7 +611,7 @@ pub fn check_genie_time_tick(
             let mut region_pkt = Packet::new(Opcode::WizGenie as u8);
             region_pkt.write_u8(GENIE_INFO_REQUEST);
             region_pkt.write_u8(GENIE_ACTIVATED);
-            region_pkt.write_u32(sid as u32);
+            region_pkt.write_u16(sid);
             region_pkt.write_u8(0);
             if let Some(pos) = world.get_position(sid) {
                 world.broadcast_to_zone(pos.zone_id, Arc::new(region_pkt), None);
@@ -628,7 +656,8 @@ mod tests {
         assert_eq!(GENIE_REMAINING_TIME, 6);
         assert_eq!(GENIE_ACTIVATED, 7);
         assert_eq!(GENIE_STATUS_ACTIVE, 1); // C++ GenieStatusActive = 1
-        assert_eq!(GENIE_OPTIONS_SIZE, 46); // v2600 sniff verified
+        assert_eq!(GENIE_OPTIONS_DEFAULT_SIZE, 62); // v2615 64-byte packet minus commands
+        assert_eq!(GENIE_OPTIONS_MAX_SIZE, 100); // native C++ m_GenieOptions
     }
 
     #[test]
@@ -673,13 +702,13 @@ mod tests {
         let mut pkt = Packet::new(Opcode::WizGenie as u8);
         pkt.write_u8(GENIE_INFO_REQUEST);
         pkt.write_u8(GENIE_ACTIVATED);
-        pkt.write_u32(42); // session ID
+        pkt.write_u16(42); // native C++ GetID() is uint16
         pkt.write_u8(1); // active
 
         let mut r = PacketReader::new(&pkt.data);
         assert_eq!(r.read_u8(), Some(GENIE_INFO_REQUEST));
         assert_eq!(r.read_u8(), Some(GENIE_ACTIVATED));
-        assert_eq!(r.read_u32(), Some(42));
+        assert_eq!(r.read_u16(), Some(42));
         assert_eq!(r.read_u8(), Some(1));
         assert_eq!(r.remaining(), 0);
 
@@ -687,13 +716,13 @@ mod tests {
         let mut pkt2 = Packet::new(Opcode::WizGenie as u8);
         pkt2.write_u8(GENIE_INFO_REQUEST);
         pkt2.write_u8(GENIE_ACTIVATED);
-        pkt2.write_u32(42);
+        pkt2.write_u16(42);
         pkt2.write_u8(0); // inactive
 
         let mut r2 = PacketReader::new(&pkt2.data);
         assert_eq!(r2.read_u8(), Some(GENIE_INFO_REQUEST));
         assert_eq!(r2.read_u8(), Some(GENIE_ACTIVATED));
-        assert_eq!(r2.read_u32(), Some(42));
+        assert_eq!(r2.read_u16(), Some(42));
         assert_eq!(r2.read_u8(), Some(0));
         assert_eq!(r2.remaining(), 0);
     }
@@ -703,14 +732,13 @@ mod tests {
         let mut resp = Packet::new(Opcode::WizGenie as u8);
         resp.write_u8(GENIE_INFO_REQUEST);
         resp.write_u8(GENIE_LOAD_OPTIONS);
-        let options = vec![0u8; GENIE_OPTIONS_SIZE];
+        let options = vec![0u8; GENIE_OPTIONS_DEFAULT_SIZE];
         resp.data.extend_from_slice(&options);
 
         let mut r = PacketReader::new(&resp.data);
         assert_eq!(r.read_u8(), Some(GENIE_INFO_REQUEST));
         assert_eq!(r.read_u8(), Some(GENIE_LOAD_OPTIONS));
-        // Remaining should be GENIE_OPTIONS_SIZE bytes
-        assert_eq!(r.remaining(), GENIE_OPTIONS_SIZE);
+        assert_eq!(r.remaining(), GENIE_OPTIONS_DEFAULT_SIZE);
     }
 
     #[test]
@@ -807,7 +835,8 @@ mod tests {
     /// Genie options blob size is 256 bytes.
     #[test]
     fn test_genie_options_size() {
-        assert_eq!(GENIE_OPTIONS_SIZE, 46); // v2600 sniff verified
+        assert_eq!(GENIE_OPTIONS_DEFAULT_SIZE, 62);
+        assert_eq!(GENIE_OPTIONS_MAX_SIZE, 100);
     }
 
     /// get_genie_hours: 0→0, <3600→1, 3600→1, 7200→2.

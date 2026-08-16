@@ -1718,6 +1718,10 @@ impl WorldState {
     async fn load_knights(&self, pool: &DbPool) -> anyhow::Result<()> {
         let knights_repo = KnightsRepository::new(pool);
         let knights_rows = knights_repo.load_all().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         for row in &knights_rows {
             let info = KnightsInfo {
                 id: row.id_num as u16,
@@ -1745,7 +1749,7 @@ impl WorldState {
                     Vec::new()
                 },
                 alliance: row.s_alliance_knights as u16,
-                castellan_cape: row.s_cast_cape >= 0 && row.b_cast_time > 0,
+                castellan_cape: row.s_cast_cape >= 0 && i64::from(row.b_cast_time) >= now,
                 cast_cape_id: row.s_cast_cape,
                 cast_cape_r: row.b_cast_cape_r as u8,
                 cast_cape_g: row.b_cast_cape_g as u8,

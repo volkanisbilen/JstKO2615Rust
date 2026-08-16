@@ -62,7 +62,7 @@ if (EVENT == 308) then
 	if (ItemA < 0) then
 		SelectMsg(UID, 2, 81, 602, NPC, 18, 309);
 	else
-		SelectMsg(UID, 4, 81, 602, NPC, 41, 306, 27, -1);
+		SelectMsg(UID, 5, 81, 602, NPC, 41, 306, 27, -1);
 	end
 end
 
@@ -412,4 +412,3 @@ end
 if (EVENT == 4021) then
 	ShowMap(UID, 21);
 end
-

@@ -618,7 +618,11 @@ impl WorldState {
             // ── Castellan cape bonuses (C++ User.cpp:2377-2391) ──────
             if ch.knights_id > 0 {
                 if let Some(knights) = self.get_knights(ch.knights_id) {
-                    let cape_row = if knights.castellan_cape {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as u32;
+                    let cape_row = if knights.castellan_cape && knights.cast_cape_time >= now {
                         self.get_knights_cape(knights.cast_cape_id)
                     } else {
                         self.get_knights_cape(knights.cape as i16)
@@ -4293,7 +4297,7 @@ mod tests {
             cast_cape_r: 0,
             cast_cape_g: 0,
             cast_cape_b: 0,
-            cast_cape_time: 0,
+            cast_cape_time: u32::MAX,
             alliance_req: 0,
             clan_point_method: 0,
             premium_time: 0,

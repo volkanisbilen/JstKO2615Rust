@@ -360,6 +360,28 @@ pub fn generate_npc_loot(
         }
     }
 
+    // Captain Fargo's quest uses the isolated Zone 82 / Family 71 room.
+    // Keep these drops scoped to that room; the same monster prototypes can
+    // be used elsewhere and must not inherit quest-certificate drops.
+    if let Some((item_id, chance_per_10k)) = monster_stone_family_71_drop(world, npc) {
+        if chance_per_10k == 10_000 || rng.gen_range(0..10_000) < chance_per_10k {
+            items[item_count as usize] = LootItem {
+                item_id,
+                count: 1,
+                slot_id: item_count as u16,
+            };
+            item_count += 1;
+            tracing::debug!(
+                npc_id,
+                npc_proto = npc.proto_id,
+                event_room = npc.event_room,
+                item_id,
+                chance_per_10k,
+                "Captain Fargo Monster Stone quest item dropped"
+            );
+        }
+    }
+
     // -- Slots 1-7: Item drops --
     if let Some(ref table) = drop_table {
         let drop_slots = extract_drop_slots(table);
@@ -549,6 +571,34 @@ pub fn generate_npc_loot(
     Some(bundle_id)
 }
 
+/// Return the fixed quest drop contract for Captain Fargo's Monster Stone.
+fn monster_stone_family_71_drop(world: &WorldState, npc: &NpcInstance) -> Option<(u32, i32)> {
+    if npc.zone_id != 82 || npc.event_room == 0 {
+        return None;
+    }
+    let room_id = npc.event_room - 1;
+    let is_family_71 = world
+        .monster_stone_read()
+        .get_room(room_id)
+        .is_some_and(|room| room.active && room.zone_id == 82 && room.monster_family == 71);
+    if !is_family_71 {
+        return None;
+    }
+
+    monster_stone_family_71_drop_contract(npc.proto_id)
+}
+
+fn monster_stone_family_71_drop_contract(proto_id: u16) -> Option<(u32, i32)> {
+    const CERTIFICATE_OF_HUNTING: u32 = 910_138_000;
+    const GRIEF_REAPER_CERTIFICATE: u32 = 910_135_000;
+
+    match proto_id {
+        7005..=7007 => Some((CERTIFICATE_OF_HUNTING, 4_000)), // 40%
+        7008 => Some((GRIEF_REAPER_CERTIFICATE, 10_000)),     // 100%
+        _ => None, // Gates and support NPCs never receive quest loot.
+    }
+}
+
 /// Manes Survival has an isolated, fixed loot contract: no gold, ordinary
 /// monster table, premium, scroll, clan or global-event modifiers apply.
 fn generate_manes_survival_loot(
@@ -598,7 +648,10 @@ fn generate_manes_survival_loot(
     drop_pkt.write_u32(bundle_id);
     drop_pkt.write_u8(1);
 
-    if let Some(party) = world.get_party_id(killer_sid).and_then(|id| world.get_party(id)) {
+    if let Some(party) = world
+        .get_party_id(killer_sid)
+        .and_then(|id| world.get_party(id))
+    {
         for member_sid in party.active_members() {
             world.send_to_session(member_sid, &drop_pkt);
         }
@@ -1001,6 +1054,22 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_captain_fargo_family_71_drop_contract() {
+        for proto_id in 7005..=7007 {
+            assert_eq!(
+                monster_stone_family_71_drop_contract(proto_id),
+                Some((910_138_000, 4_000))
+            );
+        }
+        assert_eq!(
+            monster_stone_family_71_drop_contract(7008),
+            Some((910_135_000, 10_000))
+        );
+        assert_eq!(monster_stone_family_71_drop_contract(7033), None);
+        assert_eq!(monster_stone_family_71_drop_contract(16062), None);
+    }
 
     #[test]
     fn test_is_show_box_normal_monster() {

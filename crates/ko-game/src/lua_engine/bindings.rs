@@ -1390,9 +1390,18 @@ fn lua_check_weight(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
     }
     Ok(true)
 }
-fn lua_is_room_for_item(lua: &Lua, (uid, item_id, _count): (i32, u32, u16)) -> LuaResult<i32> {
+/// Return an inventory slot suitable for the requested item.
+///
+/// The original C++ Lua API declares the stack size as optional and defaults it
+/// to one (`LUA_ARG_OPTIONAL(uint16, 1, 3)`).  A large number of the production
+/// quest scripts, including Captain Fargo's starter-item events, therefore call
+/// this function with only `(UID, item_id)`.
+fn lua_is_room_for_item(
+    lua: &Lua,
+    (uid, item_id, count): (i32, u32, Option<u16>),
+) -> LuaResult<i32> {
     Ok(get_world(lua)?
-        .find_slot_for_item(uid as SessionId, item_id, 1)
+        .find_slot_for_item(uid as SessionId, item_id, count.unwrap_or(1))
         .map(|p| p as i32)
         .unwrap_or(-1))
 }
@@ -3432,10 +3441,33 @@ fn lua_rob_clan_point(lua: &Lua, (uid, amount): (i32, i32)) -> LuaResult<()> {
         return Ok(());
     }
     let deduct = amount as i64;
+    let mut new_fund = 0u32;
     w.update_knights(knights_id, |k| {
         let result = (k.clan_point_fund as i64) - deduct;
         k.clan_point_fund = result.clamp(0, 2_100_000_000) as u32;
+        new_fund = k.clan_point_fund;
     });
+
+    // Clan rank-up Lua scripts spend from the persistent clan fund. Without
+    // this update the deduction returns after a restart even though the rank
+    // itself was saved.
+    if let Some(pool) = w.db_pool() {
+        let pool = pool.clone();
+        let kid = knights_id as i16;
+        tokio::spawn(async move {
+            let repo = ko_db::repositories::knights::KnightsRepository::new(&pool);
+            if let Err(e) = repo
+                .update_clan_point_fund(kid, new_fund.min(i32::MAX as u32) as i32)
+                .await
+            {
+                tracing::warn!(
+                    "RobClanPoint: failed to save clan point fund for clan {}: {}",
+                    kid,
+                    e
+                );
+            }
+        });
+    }
     Ok(())
 }
 
@@ -3498,19 +3530,7 @@ fn lua_zone_change_party(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) 
     };
 
     for member_sid in members {
-        let mut pkt = Packet::new(Opcode::WizZoneChange as u8);
-        pkt.write_u8(2);
-        pkt.write_u16(zone_id);
-        pkt.write_f32(x);
-        pkt.write_f32(0.0);
-        pkt.write_f32(z);
-        pkt.write_u8(0);
-        w.send_to_session_owned(member_sid, pkt);
-        w.update_session(member_sid, |h| {
-            h.position.zone_id = zone_id;
-            h.position.x = x;
-            h.position.z = z;
-        });
+        crate::handler::zone_change::server_teleport_to_zone(&w, member_sid, zone_id, x, z);
     }
     Ok(())
 }
@@ -3529,19 +3549,7 @@ fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -
     let clan_sids: Vec<SessionId> = w.get_online_knights_session_ids(knights_id);
 
     for member_sid in clan_sids {
-        let mut pkt = Packet::new(Opcode::WizZoneChange as u8);
-        pkt.write_u8(2);
-        pkt.write_u16(zone_id);
-        pkt.write_f32(x);
-        pkt.write_f32(0.0);
-        pkt.write_f32(z);
-        pkt.write_u8(0);
-        w.send_to_session_owned(member_sid, pkt);
-        w.update_session(member_sid, |h| {
-            h.position.zone_id = zone_id;
-            h.position.x = x;
-            h.position.z = z;
-        });
+        crate::handler::zone_change::server_teleport_to_zone(&w, member_sid, zone_id, x, z);
     }
     Ok(())
 }
@@ -3549,7 +3557,8 @@ fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -
 /// PromoteKnight(uid, flag) -> void
 /// C++ alias: `PromoteKnight` = `PromoteClan` (lua_bindings.cpp:427)
 /// Promote the player's clan to the given grade (flag).
-/// C++ cape logic: flag==1 → cape=-1 (training), otherwise cape=0.
+/// C++ cape logic: training sets cape=-1, promotion sets cape=0, and later
+/// Accredited/Royal rank changes preserve the clan's purchased cape.
 fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     let mut iter = args.into_iter();
     let uid: i32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
@@ -3562,7 +3571,15 @@ fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
         return Ok(());
     }
 
-    let cape: i16 = if flag == 1 { -1 } else { 0 };
+    let current_cape = w
+        .get_knights(knights_id)
+        .map(|k| k.cape as i16)
+        .unwrap_or(-1);
+    let cape: i16 = match flag {
+        1 => -1,
+        2 => 0,
+        _ => current_cape,
+    };
 
     w.update_knights(knights_id, |k| {
         k.flag = flag as u8; // i16 → u8 intentional (grade values fit in u8)
@@ -5310,26 +5327,149 @@ fn lua_run_mining_exchange(lua: &Lua, (uid, ore_type): (i32, i32)) -> LuaResult<
 // Lua runtime errors.
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Sets quest state to "ongoing" (1) for the given quest_id, marking
-/// the player as participating in the Monster Stone quest. The actual
-/// Monster Stone event entry happens through WIZ_EVENT (item activation).
-/// Not in C++ source — custom private server feature.
-/// Used by 42+ quest scripts (Bros, Sace, Forkwain, Hwargo, councilor, etc.)
-fn lua_monster_stone_quest_join(lua: &Lua, (uid, quest_id): (i32, i32)) -> LuaResult<()> {
+/// Enter the quest-backed Monster Stone instance.
+///
+/// This mirrors CUser::MonsterStoneQuestJoin() from the reference server.
+/// Older Lua scripts pass only `(UID, 199)` and therefore use Stone 1,
+/// family 4; newer scripts may explicitly provide zone and family.
+fn lua_monster_stone_quest_join(
+    lua: &Lua,
+    (uid, quest_id, target_zone, target_family): (i32, i32, Option<u8>, Option<u16>),
+) -> LuaResult<bool> {
+    use crate::systems::{event_room, monster_stone};
+
     let w = get_world(lua)?;
     let sid = uid as SessionId;
 
-    // Set quest state to ongoing (1) for this quest_id
-    let qid = quest_id as u16;
+    let fail = |error_id: u8, reason: &'static str| {
+        w.send_to_session_owned(sid, monster_stone::build_fail_packet(error_id));
+        tracing::warn!(sid, quest_id, reason, "MonsterStoneQuestJoin rejected");
+        false
+    };
+
+    if w.is_trading(sid) || w.is_merchanting(sid) || w.is_mining(sid) || w.is_fishing(sid) {
+        return Ok(false);
+    }
+
+    if !w
+        .get_server_settings()
+        .map(|settings| settings.monsterstone_status)
+        .unwrap_or(false)
+    {
+        return Ok(fail(1, "monster stone is disabled"));
+    }
+
+    if quest_id != 199 {
+        return Ok(fail(5, "invalid quest id"));
+    }
+
+    let Some(character) = w.get_character_info(sid) else {
+        return Ok(false);
+    };
+    if character.hp < character.max_hp / 2 {
+        return Ok(fail(9, "health is below fifty percent"));
+    }
+
+    let Some(position) = w.get_position(sid) else {
+        return Ok(false);
+    };
+    if position.zone_id == ZONE_PRISON
+        || monster_stone::is_monster_stone_zone(position.zone_id)
+        || event_room::is_in_temple_event_zone(position.zone_id)
+    {
+        return Ok(fail(1, "current zone does not permit entry"));
+    }
+
+    if w.with_session(sid, |h| h.monster_stone_status || h.event_room > 0)
+        .unwrap_or(true)
+    {
+        return Ok(fail(5, "player is already in an event room"));
+    }
+
+    let zone_id = target_zone.unwrap_or(monster_stone::ZONE_STONE1 as u8);
+    let family = target_family.unwrap_or(4);
+    if !monster_stone::is_monster_stone_zone(zone_id as u16) || family == 0 {
+        return Ok(fail(5, "invalid target zone or family"));
+    }
+
+    // Validate the spawn set before reserving a room. This prevents an empty
+    // instance and exactly matches the reference implementation's ordering.
+    let spawns = w.get_monster_stone_spawns(zone_id, family);
+    if spawns.is_empty() {
+        return Ok(fail(5, "spawn data was not found"));
+    }
+
+    let Some(room_id) = w.monster_stone_write().allocate_room() else {
+        return Ok(fail(5, "no available room"));
+    };
+    let event_room_id = room_id + 1;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    {
+        let mut manager = w.monster_stone_write();
+        if !manager.activate_room(room_id, zone_id, family, position.zone_id, now) {
+            return Ok(fail(5, "room activation failed"));
+        }
+        manager.add_user(room_id, sid);
+    }
+
     w.update_session(sid, |h| {
-        let quest = h.quests.entry(qid).or_default();
+        h.event_room = event_room_id;
+        h.monster_stone_status = true;
+        let quest = h.quests.entry(quest_id as u16).or_default();
         if quest.quest_state == 0 {
-            quest.quest_state = 1; // ongoing
+            quest.quest_state = 1;
         }
     });
 
-    tracing::info!(sid, quest_id, "MonsterStoneQuestJoin: player joined quest");
-    Ok(())
+    for row in &spawns {
+        w.spawn_event_npc_ex_with_direction(
+            row.s_sid as u16,
+            row.b_type == 0,
+            zone_id as u16,
+            row.x as f32,
+            row.z as f32,
+            row.s_count.max(1) as u16,
+            event_room_id,
+            u8::from(row.is_boss),
+            row.by_direction.clamp(0, u8::MAX as i16) as u8,
+        );
+    }
+
+    let vendor_coords: [(f32, f32); 3] = match zone_id {
+        81 => [(204.0, 201.0), (204.0, 197.0), (204.0, 193.0)],
+        82 => [(203.0, 202.0), (203.0, 197.0), (203.0, 193.0)],
+        83 => [(204.0, 207.0), (204.0, 200.0), (204.0, 194.0)],
+        _ => unreachable!("Monster Stone zone was validated above"),
+    };
+    for (npc_sid, (x, z)) in [16062, 12117, 31508].into_iter().zip(vendor_coords) {
+        w.spawn_event_npc_ex(npc_sid, false, zone_id as u16, x, z, 1, event_room_id, 0);
+    }
+
+    crate::handler::zone_change::server_teleport_to_zone(&w, sid, zone_id as u16, 0.0, 0.0);
+    w.send_to_session_owned(
+        sid,
+        monster_stone::build_timer_packet(monster_stone::ROOM_DURATION_SECS as u16),
+    );
+    w.send_to_session_owned(
+        sid,
+        monster_stone::build_select_msg_timer(monster_stone::ROOM_DURATION_SECS as u16),
+    );
+
+    tracing::info!(
+        sid,
+        quest_id,
+        room_id,
+        event_room_id,
+        zone_id,
+        family,
+        spawn_count = spawns.len(),
+        "MonsterStoneQuestJoin: room activated and player teleported"
+    );
+    Ok(true)
 }
 
 /// GiveCash(uid, amount) — gives Knight Cash to a player
@@ -7029,11 +7169,13 @@ mod tests {
         assert_eq!(k.flag, 2); // ClanTypePromoted
         assert_eq!(k.cape, 0);
 
-        // Explicit flag=3 (Accredited)
+        // Explicit flag=3 (Accredited) preserves a cape purchased after the
+        // initial promotion, matching UpdateKnightsGrade in the C++ server.
+        world.update_knights(102, |k| k.cape = 42);
         lua.load("PromoteKnight(1, 3)").exec().unwrap();
         let k = world.get_knights(102).unwrap();
         assert_eq!(k.flag, 3);
-        assert_eq!(k.cape, 0);
+        assert_eq!(k.cape, 42);
 
         // Flag=1 (Training) -> cape should be -1 (0xFFFF as u16)
         lua.load("PromoteKnight(1, 1)").exec().unwrap();

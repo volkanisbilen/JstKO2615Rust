@@ -24,6 +24,11 @@ use crate::npc_type_constants::{
 /// NPC type: Cape mark NPC (clan cape customization).
 const NPC_MARK: u8 = 25;
 
+/// WIZ_KNIGHTS_PROCESS sub-opcode used by the v2615 client to open the
+/// clan-cape palette.  This is `KnightsPacket::KNIGHTS_CAPE_NPC` (27/0x1B),
+/// not the older/incorrect 0x14 value.
+const KNIGHTS_CAPE_NPC: u8 = 0x1B;
+
 /// NPC type: Captain NPC (class change).
 const NPC_CAPTAIN: u8 = 35;
 
@@ -373,7 +378,7 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
             NPC_MARK => {
                 // Cape mark NPC — open clan cape customization UI
                 let mut pkt = Packet::new(Opcode::WizKnightsProcess as u8);
-                pkt.write_u8(0x14); // KNIGHTS_CAPE_NPC sub-opcode
+                pkt.write_u8(KNIGHTS_CAPE_NPC);
                 session.send_packet(&pkt).await?;
                 debug!(
                     "[{}] ClientEvent: NPC {} (MARK/CAPE)",
@@ -405,10 +410,22 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
                 return Ok(());
             }
             NPC_WAREHOUSE => {
-                // Warehouse NPC — open warehouse
+                // v2615 warehouse flow:
+                // WIZ_WAREHOUSE/sub=0x10 only creates/shows the integrated
+                // warehouse window. Feed the normal warehouse-open request
+                // through its canonical handler so the first page is filled.
+                //
+                // VIP storage is intentionally not opened here. The client
+                // sends WIZ_VIPWAREHOUSE/VIP_OPEN only after the player picks
+                // the VIP tab/button; opening it during the NPC click makes
+                // Inn Hostess jump straight past the normal warehouse.
                 let mut pkt = Packet::new(Opcode::WizWarehouse as u8);
                 pkt.write_u8(0x10); // WAREHOUSE_REQ
                 session.send_packet(&pkt).await?;
+
+                let mut warehouse_open = Packet::new(Opcode::WizWarehouse as u8);
+                warehouse_open.write_u8(0x01); // WAREHOUSE_OPEN
+                super::warehouse::handle(session, warehouse_open).await?;
                 debug!(
                     "[{}] ClientEvent: NPC {} (WAREHOUSE)",
                     session.addr(),
@@ -751,13 +768,13 @@ mod tests {
         assert_eq!(r.remaining(), 0);
     }
 
-    /// Cape mark NPC → WIZ_KNIGHTS_PROCESS sub=0x14.
+    /// Cape mark NPC → WIZ_KNIGHTS_PROCESS/KNIGHTS_CAPE_NPC (27/0x1B).
     #[test]
     fn test_cape_mark_npc_response() {
         let mut pkt = Packet::new(Opcode::WizKnightsProcess as u8);
-        pkt.write_u8(0x14); // KNIGHTS_CAPE_NPC
+        pkt.write_u8(KNIGHTS_CAPE_NPC);
         assert_eq!(pkt.data.len(), 1);
-        assert_eq!(pkt.data[0], 0x14);
+        assert_eq!(pkt.data[0], 0x1B);
     }
 
     /// Rental NPC → WIZ_RENTAL sub=3, enabled=1, selling_group.

@@ -48,6 +48,12 @@ const TAX_EXEMPT_SCROLLS: [u32; 5] = [379068000, 379107000, 379109000, 379110000
 /// C++ detects loyalty merchants by `m_iSellingGroup == 249000`, NOT by NPC type.
 const LOYALTY_SELLING_GROUP: u32 = 249000;
 
+/// Dedicated Moradon fixed-price scroll shop (selling group 280000).
+/// The v2615 buy packet does not carry a unit price, so this group must be
+/// priced server-side instead of changing the shared item definitions.
+const MORADON_FIXED_SCROLL_SELLING_GROUP: u32 = 280000;
+const MORADON_FIXED_SCROLL_PRICE: u64 = 50_000_000;
+
 // ── Tax Zone Classification ──────────────────────────────────────────────
 
 /// Zone tax type classification for tariff calculation.
@@ -149,6 +155,21 @@ pub fn calculate_item_tax(
 /// Check if an item is exempt from tariff/tax.
 fn is_tax_exempt(item_id: u32) -> bool {
     TAX_EXEMPT_SCROLLS.contains(&item_id)
+}
+
+fn npc_buy_unit_price(
+    selling_group: u32,
+    is_loyalty: bool,
+    gold_price: u64,
+    loyalty_price: u64,
+) -> u64 {
+    if selling_group == MORADON_FIXED_SCROLL_SELLING_GROUP {
+        MORADON_FIXED_SCROLL_PRICE
+    } else if is_loyalty {
+        loyalty_price
+    } else {
+        gold_price
+    }
 }
 
 use crate::npc_type_constants::{MAX_NPC_RANGE, NPC_LOYALTY_MERCHANT, NPC_MERCHANT, NPC_TINKER};
@@ -427,18 +448,22 @@ async fn handle_buy(
         };
 
         // Loyalty merchants use NP price; regular merchants use gold price
-        let unit_price = if is_loyalty {
-            item_def.np_buy_price.unwrap_or(0) as u64
-        } else {
-            item_def.buy_price.unwrap_or(0) as u64
-        };
+        let unit_price = npc_buy_unit_price(
+            selling_group,
+            is_loyalty,
+            item_def.buy_price.unwrap_or(0) as u64,
+            item_def.np_buy_price.unwrap_or(0) as u64,
+        );
         let base_price = unit_price * item.count as u64;
         if base_price > COIN_MAX as u64 {
             return { tracing::warn!("[{}] BUY_FAIL_25 line 463", session.addr()); send_fail(session, 25) }.await;
         }
 
         // Apply tariff/tax (gold purchases only, non-exempt items)
-        let transaction_price = if !is_loyalty && !is_tax_exempt(item.item_id) {
+        let transaction_price = if !is_loyalty
+            && selling_group != MORADON_FIXED_SCROLL_SELLING_GROUP
+            && !is_tax_exempt(item.item_id)
+        {
             let (taxed, tax_amount) = calculate_item_tax(
                 base_price as u32,
                 zone_tax_type,
@@ -1584,6 +1609,19 @@ mod tests {
 
         assert_eq!(loyalty_cost, 150);
         assert_eq!(gold_cost, 3000);
+    }
+
+    #[test]
+    fn test_moradon_fixed_scroll_shop_price_overrides_shared_item_price() {
+        assert_eq!(
+            npc_buy_unit_price(MORADON_FIXED_SCROLL_SELLING_GROUP, false, 2_000, 0),
+            50_000_000
+        );
+        assert_eq!(npc_buy_unit_price(255_000, false, 2_000, 0), 2_000);
+        assert_eq!(
+            npc_buy_unit_price(LOYALTY_SELLING_GROUP, true, 2_000, 75),
+            75
+        );
     }
 
     // ── Tax/Tariff Tests ──────────────────────────────────────────────────

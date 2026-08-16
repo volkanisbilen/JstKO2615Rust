@@ -611,7 +611,10 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             let npc_id = instance.target_id as u32;
             if let Some(npc) = world.get_npc_instance(npc_id) {
                 if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-                    if tmpl.group == 3 {
+                    // Runtime event NPCs may override their template nation.
+                    // Monster Stone support NPCs are sent as neutral nation 3
+                    // without mutating their global map templates.
+                    if tmpl.group == 3 || npc.nation == 3 {
                         let fail_pkt = instance.build_fail_packet();
                         world.send_to_session_owned(sid, fail_pkt);
                         return Ok(());
@@ -6331,7 +6334,7 @@ async fn apply_skill_damage_to_npc(
         }
 
         // Neutral peaceful NPCs (group/nation == 3) cannot be magic-attacked
-        if tmpl.group == 3 {
+        if tmpl.group == 3 || npc.nation == 3 {
             return;
         }
     }

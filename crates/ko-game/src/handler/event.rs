@@ -379,7 +379,7 @@ async fn handle_monster_stone(
         let is_monster = row.b_type == 0;
         let count = row.s_count.max(1) as u16;
         let summon_type = if row.is_boss { 1u8 } else { 0u8 };
-        world.spawn_event_npc_ex(
+        world.spawn_event_npc_ex_with_direction(
             row.s_sid as u16,
             is_monster,
             zone_id as u16,
@@ -388,6 +388,7 @@ async fn handle_monster_stone(
             count,
             event_room_id,
             summon_type,
+            row.by_direction.clamp(0, u8::MAX as i16) as u8,
         );
     }
 
@@ -1920,10 +1921,19 @@ mod tests {
     #[test]
     fn test_draki_tower_opcode_gaps() {
         // ENTER=33, LIST=34, TIMER=35 are contiguous
-        assert_eq!(sub_opcode::TEMPLE_DRAKI_TOWER_LIST - sub_opcode::TEMPLE_DRAKI_TOWER_ENTER, 1);
-        assert_eq!(sub_opcode::TEMPLE_DRAKI_TOWER_TIMER - sub_opcode::TEMPLE_DRAKI_TOWER_LIST, 1);
+        assert_eq!(
+            sub_opcode::TEMPLE_DRAKI_TOWER_LIST - sub_opcode::TEMPLE_DRAKI_TOWER_ENTER,
+            1
+        );
+        assert_eq!(
+            sub_opcode::TEMPLE_DRAKI_TOWER_TIMER - sub_opcode::TEMPLE_DRAKI_TOWER_LIST,
+            1
+        );
         // TOWN=38 skips OUT1(36) and OUT2(37)
-        assert_eq!(sub_opcode::TEMPLE_DRAKI_TOWER_TOWN - sub_opcode::TEMPLE_DRAKI_TOWER_TIMER, 3);
+        assert_eq!(
+            sub_opcode::TEMPLE_DRAKI_TOWER_TOWN - sub_opcode::TEMPLE_DRAKI_TOWER_TIMER,
+            3
+        );
     }
 
     /// Event types are non-contiguous i16 values.
@@ -1955,7 +1965,7 @@ mod tests {
         pkt.write_u8(sub_opcode::TEMPLE_EVENT);
         pkt.write_i16(-1); // no active event
         pkt.write_u16(0); // no remaining time
-        // sub(1) + active_event(2) + remain(2) = 5 bytes
+                          // sub(1) + active_event(2) + remain(2) = 5 bytes
         assert_eq!(pkt.data.len(), 5);
         assert_eq!(pkt.data[0], sub_opcode::TEMPLE_EVENT);
     }
@@ -1974,7 +1984,10 @@ mod tests {
     fn test_temple_event_join_disband_adjacent() {
         assert_eq!(sub_opcode::TEMPLE_EVENT_JOIN, 8);
         assert_eq!(sub_opcode::TEMPLE_EVENT_DISBAND, 9);
-        assert_eq!(sub_opcode::TEMPLE_EVENT_DISBAND - sub_opcode::TEMPLE_EVENT_JOIN, 1);
+        assert_eq!(
+            sub_opcode::TEMPLE_EVENT_DISBAND - sub_opcode::TEMPLE_EVENT_JOIN,
+            1
+        );
     }
 
     /// Server-sent sub-opcodes: FINISH (10) and COUNTER (16) are distinct from client sub-opcodes.
@@ -1982,7 +1995,10 @@ mod tests {
     fn test_server_sent_subopcodes_distinct() {
         assert_eq!(sub_opcode::TEMPLE_EVENT_FINISH, 10);
         assert_eq!(sub_opcode::TEMPLE_EVENT_COUNTER, 16);
-        assert_ne!(sub_opcode::TEMPLE_EVENT_FINISH, sub_opcode::TEMPLE_EVENT_COUNTER);
+        assert_ne!(
+            sub_opcode::TEMPLE_EVENT_FINISH,
+            sub_opcode::TEMPLE_EVENT_COUNTER
+        );
         // Both above client join/disband range
         assert!(sub_opcode::TEMPLE_EVENT_FINISH > sub_opcode::TEMPLE_EVENT_DISBAND);
         assert!(sub_opcode::TEMPLE_EVENT_COUNTER > sub_opcode::TEMPLE_EVENT_FINISH);
@@ -1997,9 +2013,13 @@ mod tests {
         assert_eq!(event_type::TEMPLE_EVENT_JURAD_MOUNTAIN, 100);
         assert_eq!(event_type::TEMPLE_EVENT_KNIGHT_BATTLE_ROYALE, 104);
         // Strictly increasing
-        assert!(event_type::TEMPLE_EVENT_BORDER_DEFENCE_WAR < event_type::TEMPLE_EVENT_MONSTER_STONE);
+        assert!(
+            event_type::TEMPLE_EVENT_BORDER_DEFENCE_WAR < event_type::TEMPLE_EVENT_MONSTER_STONE
+        );
         assert!(event_type::TEMPLE_EVENT_CHAOS < event_type::TEMPLE_EVENT_JURAD_MOUNTAIN);
-        assert!(event_type::TEMPLE_EVENT_JURAD_MOUNTAIN < event_type::TEMPLE_EVENT_KNIGHT_BATTLE_ROYALE);
+        assert!(
+            event_type::TEMPLE_EVENT_JURAD_MOUNTAIN < event_type::TEMPLE_EVENT_KNIGHT_BATTLE_ROYALE
+        );
     }
 
     /// Draki tower sub-opcodes: timer (35) sits between list (34) and town (38).

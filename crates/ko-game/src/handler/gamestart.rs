@@ -1078,6 +1078,50 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
 
     world.register_ingame(session.session_id(), char_info, position);
 
+    // Phase 1 needs Genie time to build WIZ_MYINFO, but the session is not
+    // registered in WorldState until this point. Its earlier update_session()
+    // therefore cannot persist the loaded state. Load it into the now-live
+    // SessionHandle so Start/Save/Disconnect all see the real DB values.
+    {
+        let ud_repo = ko_db::repositories::user_data::UserDataRepository::new(&pool);
+        match ud_repo.load_genie_data(&char_id).await {
+            Ok(Some(genie)) => {
+                let abs_ts = genie.genie_time.max(0) as u32;
+                let options_len = genie.genie_options.len();
+                world.update_session(session.session_id(), |h| {
+                    h.genie_time_abs = abs_ts;
+                    h.genie_options = genie.genie_options;
+                    h.genie_loaded = true;
+                });
+                tracing::info!(
+                    "[{}] Phase2 Genie state applied: char={}, abs={}, options={} bytes",
+                    session.addr(),
+                    char_id,
+                    abs_ts,
+                    options_len
+                );
+            }
+            Ok(None) => {
+                world.update_session(session.session_id(), |h| h.genie_loaded = true);
+                tracing::info!(
+                    "[{}] Phase2 Genie state initialized: char={}, no saved row",
+                    session.addr(),
+                    char_id
+                );
+            }
+            Err(e) => {
+                // Keep genie_loaded=false so a transient load failure can never
+                // overwrite a valid database row with zero on periodic save.
+                tracing::warn!(
+                    "[{}] Phase2 Genie load failed: char={}, err={}",
+                    session.addr(),
+                    char_id,
+                    e
+                );
+            }
+        }
+    }
+
     // 3-seal. Load sealed_exp from DB and apply to character.
     {
         let seal_repo = ko_db::repositories::user_data::UserDataRepository::new(&pool);

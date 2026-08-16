@@ -760,6 +760,17 @@ impl WorldState {
             let region_x = calc_region(spawn_x);
             let region_z = calc_region(spawn_z);
 
+            // Monster Stone support NPCs are neutral to both nations. Their
+            // global templates retain the original nation for normal map
+            // spawns; only private rooms override the runtime nation to 3.
+            let runtime_nation = if is_monster {
+                0
+            } else if event_room > 0 && matches!(zone_id, 81..=83) {
+                3
+            } else {
+                tmpl.group
+            };
+
             let instance = Arc::new(NpcInstance {
                 nid,
                 proto_id: s_sid,
@@ -773,7 +784,7 @@ impl WorldState {
                 region_z,
                 gate_open: 0,
                 object_type: 0,
-                nation: if is_monster { 0 } else { tmpl.group },
+                nation: runtime_nation,
                 special_type: 0,
                 trap_number: 0,
                 event_room,
@@ -1504,9 +1515,7 @@ impl WorldState {
             .iter()
             .filter(|entry| {
                 let inst = entry.value();
-                inst.zone_id == zone_id
-                    && inst.event_room == event_room
-                    && !inst.is_monster
+                inst.zone_id == zone_id && inst.event_room == event_room && !inst.is_monster
             })
             .map(|entry| *entry.key())
             .collect();

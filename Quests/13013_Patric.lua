@@ -157,7 +157,7 @@ if (EVENT == 305) then
 	if (MonsterCount < 5) then
 		SelectMsg(UID, 2, 65, 3153, NPC, 18, 306);
 	else
-		SelectMsg(UID, 4, 65, 3153, NPC, 41, 307, 27, -1);
+		SelectMsg(UID, 5, 65, 3159, NPC, 10, 307, 27, -1);
 	end
 end
 
@@ -211,7 +211,7 @@ if (EVENT == 405) then
 	if (MonsterCount < 5) then
 		SelectMsg(UID, 2, 67, 3161, NPC, 18, 406);
 	else
-		SelectMsg(UID, 4, 67, 3161, NPC, 41, 407, 27, -1);
+		SelectMsg(UID, 5, 67, 3167, NPC, 10, 407, 27, -1);
 	end
 end
 
@@ -265,7 +265,7 @@ if (EVENT == 505) then
 	if (MonsterCount < 5) then
 		SelectMsg(UID, 2, 70, 3169, NPC, 18, 506);
 	else
-		SelectMsg(UID, 4, 70, 3169, NPC, 41, 507, 27, -1);
+		SelectMsg(UID, 5, 70, 3175, NPC, 10, 507, 27, -1);
 	end
 end
 
@@ -320,7 +320,7 @@ if (EVENT == 605) then
 	if (MonsterCount < 5) then
 		SelectMsg(UID, 2, 80, 3194, NPC, 18, 606);
 	else
-		SelectMsg(UID, 4, 80, 3194, NPC, 41, 607, 27, -1);
+		SelectMsg(UID, 5, 80, 3189, NPC, 10, 607, 27, -1);
 	end
 end
 
@@ -375,7 +375,7 @@ if (EVENT == 705) then
 	if (MonsterCount < 5) then
 		SelectMsg(UID, 2, 83, 3801, NPC, 18, 706);
 	else
-		SelectMsg(UID, 4, 83, 3801, NPC, 41, 707, 27, -1);
+		SelectMsg(UID, 5, 83, 3807, NPC, 10, 707, 27, -1);
 	end
 end
 
@@ -430,7 +430,7 @@ if (EVENT == 9215) then
 	if (MonsterCount < 5) then
 		SelectMsg(UID, 2, 85, 8667, NPC, 18, 9216);
 	else
-		SelectMsg(UID, 4, 85, 8667, NPC, 41, 9217, 27, -1);
+		SelectMsg(UID, 5, 85, 8667, NPC, 10, 9217, 27, -1);
 	end
 end
 
@@ -459,8 +459,7 @@ if (EVENT == 190) then
 	if (QuestStatusCheck == 2) then
 		SelectMsg(UID, 2, -1, 8667, NPC, 10, -1);
 	else
-		RunQuestExchange(UID, 1080);
-		SaveEvent(UID, 5276);
+		SelectMsg(UID, 5, 85, 8667, NPC, 10, 9217, 27, -1);
 	end
 end
 
@@ -495,7 +494,7 @@ if (EVENT == 805) then
 	if (MonsterCount < 5) then
 		SelectMsg(UID, 2, 86, 3809, NPC, 18, 806);
 	else
-		SelectMsg(UID, 4, 86, 3809, NPC, 41, 807, 27, -1);
+		SelectMsg(UID, 5, 86, 3815, NPC, 10, 807, 27, -1);
 	end
 end
 
@@ -550,7 +549,7 @@ if (EVENT == 9235) then
 	if (MonsterCount < 10) then
 		SelectMsg(UID, 2, 87, 8668, NPC, 18, 9236);
 	else
-		SelectMsg(UID, 4, 87, 8668, NPC, 41, 9237, 27, -1);
+		SelectMsg(UID, 5, 87, 3175, NPC, 10, 9237, 27, -1);
 	end
 end
 
@@ -605,7 +604,7 @@ if (EVENT == 1005) then
 	if (MonsterCount < 5) then
 		SelectMsg(UID, 2, 90, 3836, NPC, 18, 1006);
 	else
-		SelectMsg(UID, 4, 90, 3836, NPC, 41, 1007, 27, -1);
+		SelectMsg(UID, 5, 90, 3843, NPC, 10, 1007, 27, -1);
 	end
 end
 
@@ -659,7 +658,7 @@ if (EVENT == 905) then
 	if (MonsterCount < 5) then
 		SelectMsg(UID, 2, 92, 3818, NPC, 18, 906);
 	else
-		SelectMsg(UID, 4, 92, 3818, NPC, 41, 907, 27, -1);
+		SelectMsg(UID, 5, 92, 3823, NPC, 10, 907, 27, -1);
 	end
 end
 
@@ -745,27 +744,70 @@ end
 -- ======= Quest 97 (level 20) =======
 -- Quest 97, pre-quest
 if (EVENT == 9431) then
+	SelectMsg(UID, 2, 97, 3798, NPC, 10, 9432);
+end
+
+if (EVENT == 9432) then
 	SaveEvent(UID, 5295);
 end
-if (EVENT == 9433) then SaveEvent(UID, 5295); end
+
+if (EVENT == 9433) then
+	SelectMsg(UID, 2, 97, 3799, NPC, 10, 9432);
+end
 
 -- Quest 97, not started
 if (EVENT == 9434) then
-	SelectMsg(UID, 2, 97, 8670, NPC, 22, 9435, 23, -1);
+	SelectMsg(UID, 2, 97, 8671, NPC, 10, 9435);
 end
 
 if (EVENT == 9435) then
+	SelectMsg(UID, 4, 97, 8672, NPC, 22, 9436, 23, -1);
+end
+
+if (EVENT == 9436) then
+	SelectMsg(UID, 2, 97, 3802, NPC, 14, -1);
 	SaveEvent(UID, 5296);
 end
 
 -- Quest 97, in progress
 if (EVENT == 9439) then
-	SelectMsg(UID, 2, 97, 8670, NPC, 10, -1);
+	ItemCount = HowmuchItem(UID, 810418000);
+	if (ItemCount < 5) then
+		SelectMsg(UID, 2, 97, 8671, NPC, 10, 9440);
+	else
+		SelectMsg(UID, 4, 97, 8672, NPC, 10, 9441, 27, 9440);
+	end
+end
+
+if (EVENT == 9440) then
+	ShowMap(UID, 523);
+end
+
+if (EVENT == 9441) then
+	QuestStatusCheck = GetQuestStatus(UID, 97);
+	if (QuestStatusCheck == 2) then
+		SelectMsg(UID, 2, -1, 187, NPC, 10, -1);
+	else
+		ItemCount = HowmuchItem(UID, 810418000);
+		if (ItemCount < 5) then
+			SelectMsg(UID, 2, 97, 8671, NPC, 10, 9440);
+		else
+			if (RunQuestExchange(UID, 1083)) then
+				SaveEvent(UID, 5297);
+			end
+		end
+	end
 end
 
 -- Quest 97 complete event
 if (EVENT == 9437) then
 	SaveEvent(UID, 5298);
+	Nation = CheckNation(UID);
+	if (Nation == 1) then
+		SelectMsg(UID, 2, 97, 8671, NPC, 14, -1);
+	else
+		SelectMsg(UID, 2, 97, 8672, NPC, 14, -1);
+	end
 end
 
 -- ======= Quest 98 (level 20) =======
@@ -850,7 +892,7 @@ if (EVENT == 9295) then
 	if (MonsterCount < 10) then
 		SelectMsg(UID, 2, 99, 8672, NPC, 18, 9296);
 	else
-		SelectMsg(UID, 4, 99, 8672, NPC, 41, 9297, 27, -1);
+		SelectMsg(UID, 5, 99, 3815, NPC, 10, 9297, 27, -1);
 	end
 end
 
@@ -908,7 +950,7 @@ if (EVENT == 8636) then
 	if (MonsterCount < 10) then
 		SelectMsg(UID, 2, 111, 8090, NPC, 18, 8637);
 	else
-		SelectMsg(UID, 4, 111, 8090, NPC, 41, 8638, 27, -1);
+		SelectMsg(UID, 5, 111, 8090, NPC, 41, 8638, 23, -1);
 	end
 end
 

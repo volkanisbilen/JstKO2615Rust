@@ -324,6 +324,35 @@ mod tests {
     }
 
     #[test]
+    fn test_all_workspace_quest_scripts_compile() {
+        let quest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("Quests");
+        let lua = Lua::new();
+        let mut failures = Vec::new();
+
+        for entry in std::fs::read_dir(&quest_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("lua") {
+                continue;
+            }
+
+            let source = std::fs::read_to_string(&path).unwrap();
+            if let Err(error) = lua.load(&source).set_name(path.display().to_string()).into_function()
+            {
+                failures.push(format!("{}: {error}", path.display()));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "quest Lua syntax errors:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
     fn test_lua_basic_execution() {
         let lua = Lua::new();
         lua.globals().set("UID", 1).unwrap();
