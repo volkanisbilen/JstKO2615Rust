@@ -2535,15 +2535,15 @@ fn lua_run_quest_exchange(lua: &Lua, (uid, exchange_id): (i32, i32)) -> LuaResul
         {
             continue;
         }
-        // Match C++ behavior: skip this output item if not in DB, don't abort entire exchange.
+        // Never complete a quest while silently dropping its selected reward.
         if w.get_item(item_id).is_none() {
             tracing::warn!(
                 sid,
                 exchange_id,
                 item_id,
-                "RunQuestExchange: output item_id not in items table — skipping (C++ parity)"
+                "RunQuestExchange: FAIL — output item_id not in items table"
             );
-            continue;
+            return Ok(false);
         }
         // Check if item can stack into existing slot
         if w.find_slot_for_item(sid, item_id, 1).is_none() {
@@ -2627,8 +2627,9 @@ fn lua_run_quest_exchange(lua: &Lua, (uid, exchange_id): (i32, i32)) -> LuaResul
                 exchange_id,
                 item_id,
                 count,
-                "RunQuestExchange: give_exchange_item failed (item lost!)"
+                "RunQuestExchange: FAIL — give_exchange_item failed"
             );
+            return Ok(false);
         }
     }
 
@@ -3535,9 +3536,17 @@ fn lua_zone_change_party(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) 
     Ok(())
 }
 
-/// ZoneChangeClan(uid, zone_id, x, z) -> void
-/// Teleport all online clan members to a zone.
-fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -> LuaResult<()> {
+/// ZoneChangeClan(uid, zone_id, x, z [, legacy_range]) -> void
+/// Teleport all online clan members to a zone. The official cape quest Lua
+/// passes a fifth legacy argument (`50`). The C++ binding ignores it, so parse
+/// a MultiValue here to preserve that v2615-compatible behaviour.
+fn lua_zone_change_clan(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
+    let mut iter = args.into_iter();
+    let uid: i32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
+    let zone_id: u16 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
+    let x: f32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0.0);
+    let z: f32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0.0);
+
     let w = get_world(lua)?;
     let sid = uid as SessionId;
 
@@ -3548,6 +3557,16 @@ fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -
 
     let clan_sids: Vec<SessionId> = w.get_online_knights_session_ids(knights_id);
 
+    tracing::info!(
+        uid,
+        knights_id,
+        zone_id,
+        x,
+        z,
+        online_members = clan_sids.len(),
+        "ZoneChangeClan: teleporting online clan members"
+    );
+
     for member_sid in clan_sids {
         crate::handler::zone_change::server_teleport_to_zone(&w, member_sid, zone_id, x, z);
     }
@@ -3557,8 +3576,9 @@ fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -
 /// PromoteKnight(uid, flag) -> void
 /// C++ alias: `PromoteKnight` = `PromoteClan` (lua_bindings.cpp:427)
 /// Promote the player's clan to the given grade (flag).
-/// C++ cape logic: training sets cape=-1, promotion sets cape=0, and later
-/// Accredited/Royal rank changes preserve the clan's purchased cape.
+/// The reference `CKnightsManager::UpdateKnightsGrade()` sets Training to
+/// cape=-1 and the first Promoted state to cape=0.  Keep that value intact:
+/// the client resolves the base promoted cape from `Cloak.tbl`.
 fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     let mut iter = args.into_iter();
     let uid: i32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
@@ -3586,8 +3606,19 @@ fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
         k.cape = cape as u16;
     });
 
+    tracing::info!(
+        uid,
+        knights_id,
+        flag,
+        cape,
+        "PromoteKnight: runtime clan promotion applied"
+    );
+
     // Broadcast KNIGHTS_UPDATE to all online clan members
     broadcast_knights_update_from_world(&w, knights_id);
+    // KNIGHTS_UPDATE refreshes the clan window. Re-send the promoted player as
+    // a region WARP with the fresh cape data for nearby clients.
+    refresh_promoted_clan_visual(&w, sid);
 
     // Persist flag+cape to DB (fire-and-forget)
     if let Some(pool) = w.db_pool() {
@@ -3601,11 +3632,83 @@ fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
                     kid,
                     e
                 );
+            } else {
+                tracing::info!(kid, flag, cape, "PromoteKnight: database promotion saved");
             }
         });
     }
 
     Ok(())
+}
+
+/// Rebuild the promoted member's visual state for the local client and nearby
+/// users. This is the same OUT/WARP refresh used after a job change, but keeps
+/// the complete clan/cape block that v2615 needs to attach a cloak model.
+fn refresh_promoted_clan_visual(w: &WorldState, sid: SessionId) {
+    let Some((pos, character, event_room)) =
+        w.with_session(sid, |h| (h.position, h.character.clone(), h.event_room))
+    else {
+        return;
+    };
+    let Some(character) = character else {
+        return;
+    };
+
+    let clan = (character.knights_id > 0)
+        .then(|| w.get_knights(character.knights_id))
+        .flatten();
+    let alliance_cape = clan
+        .as_ref()
+        .and_then(|ki| crate::handler::region::resolve_alliance_cape(ki, w));
+    let is_king = w.is_king(character.nation, &character.name);
+    let invisibility = w.get_invisibility_type(sid);
+    let abnormal = w.get_abnormal_type(sid);
+    let broadcast_state = w.get_broadcast_state(sid);
+    let equipment = crate::handler::region::get_equipped_visual(w, sid);
+
+    let out_packet = crate::handler::region::build_user_inout_with_clan(
+        crate::handler::region::INOUT_OUT,
+        sid,
+        Some(&character),
+        &pos,
+        clan.as_ref(),
+        alliance_cape,
+        is_king,
+        invisibility,
+        abnormal,
+        &broadcast_state,
+        &equipment,
+    );
+    w.broadcast_to_3x3(
+        pos.zone_id,
+        pos.region_x,
+        pos.region_z,
+        Arc::new(out_packet),
+        Some(sid),
+        event_room,
+    );
+
+    let warp_packet = crate::handler::region::build_user_inout_with_clan(
+        crate::handler::region::INOUT_WARP,
+        sid,
+        Some(&character),
+        &pos,
+        clan.as_ref(),
+        alliance_cape,
+        is_king,
+        invisibility,
+        abnormal,
+        &broadcast_state,
+        &equipment,
+    );
+    w.broadcast_to_3x3(
+        pos.zone_id,
+        pos.region_x,
+        pos.region_z,
+        Arc::new(warp_packet),
+        None,
+        event_room,
+    );
 }
 
 /// Build and broadcast a KNIGHTS_UPDATE packet for the given clan

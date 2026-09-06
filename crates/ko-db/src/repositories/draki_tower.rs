@@ -157,8 +157,8 @@ impl<'a> DrakiTowerRepository<'a> {
              draki_limit_reset_bucket = \
                  (CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Istanbul' - INTERVAL '18 hours')::date",
         )
-            .execute(self.pool)
-            .await?;
+        .execute(self.pool)
+        .await?;
         Ok(result.rows_affected())
     }
 

@@ -1956,12 +1956,11 @@ async fn item_disassemble(
     }
 
     if response_type == ITEM_ACCESSORY_DISASSEMBLE {
-        let reward_item_id = if let Some(recipe) =
-            world.find_upgrade_recipe_by_new_number_and_req_items(
+        let reward_item_id = if let Some(recipe) = world
+            .find_upgrade_recipe_by_new_number_and_req_items(
                 item_id as i32,
                 &ACCESSORY_UPGRADE_SCROLLS,
-            )
-        {
+            ) {
             recipe.origin_number as u32
         } else if item_id % 10 > 0 {
             let fallback = item_id - 1;

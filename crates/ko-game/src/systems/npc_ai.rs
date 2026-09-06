@@ -1222,7 +1222,7 @@ async fn npc_fighting(
     //     FindFriend(GetType() == NPC_BOSS ? MonSearchAny : MonSearchSameFamily);
     let is_boss = tmpl.npc_type == NPC_BOSS;
     if ai.has_friends || is_boss {
-        alert_pack(world, npc_id, ai, target_id, is_boss);
+        alert_pack(world, npc_id, ai, tmpl, target_id, is_boss);
     }
 
     // Ranged/magic attack — NPCs with direct_attack > 0 use skills
@@ -2509,6 +2509,7 @@ fn alert_pack(
     world: &WorldState,
     npc_id: NpcId,
     ai: &NpcAiState,
+    caller_template: &NpcTemplate,
     target_id: SessionId,
     is_boss: bool,
 ) {
@@ -2565,12 +2566,15 @@ fn alert_pack(
             continue;
         }
 
-        // Distance check — use tracing range
+        // C++ CNpc::FindFriendRegion() measures every candidate against the
+        // CALLER's m_byTracingRange. Using each ally's range here causes a
+        // long-range ally to pull itself (and then its whole pack) into combat,
+        // producing the map-wide chain aggro seen in game.
         let dx = ai.cur_x - ally_ai.cur_x;
         let dz = ai.cur_z - ally_ai.cur_z;
         let dist = (dx * dx + dz * dz).sqrt();
 
-        if dist > ally_tmpl.tracing_range.max(ally_tmpl.search_range) as f32 {
+        if caller_template.search_range == 0 || dist > caller_template.tracing_range as f32 {
             continue;
         }
 

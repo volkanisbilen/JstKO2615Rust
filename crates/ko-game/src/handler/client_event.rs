@@ -44,6 +44,14 @@ const NPC_CHAOTIC_GENERATOR2: u8 = 162;
 /// WIZ_ITEM_UPGRADE sub-opcode for Chaotic Generator dialog.
 const ITEM_BIFROST_REQ: u8 = 4;
 
+/// Build the Inn Hostess menu request. This packet must not contain warehouse
+/// page data; normal/VIP storage is opened by the client's next request.
+fn build_warehouse_menu_open() -> Packet {
+    let mut pkt = Packet::new(Opcode::WizWarehouse as u8);
+    pkt.write_u8(0x10); // WAREHOUSE_REQ
+    pkt
+}
+
 /// Build the Chaotic Generator dialog-open response.
 ///
 /// The v2525 client reads the NPC runtime ID as a 32-bit little-endian value.
@@ -65,6 +73,11 @@ const NPC_TREASURY: u8 = 80;
 /// NPC type: Event Manager NPC (v2603 IDA: type 174, shares handler with 171).
 /// Clicking opens the active event info dialog (WIZ_EVENT TEMPLE_EVENT).
 const NPC_EVENT_MANAGER: u8 = 174;
+
+/// Dedicated daily-quest NPC template. Its visual data is copied from a
+/// v2615-known model in the database migration, but it has its own proto ID
+/// and is never shared with an existing NPC.
+const NPC_DAILY_QUEST_MANAGER: u16 = 31999;
 
 /// Handle WIZ_CLIENT_EVENT from the client.
 pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
@@ -286,6 +299,11 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
         return Ok(());
     }
 
+    if proto_id == NPC_DAILY_QUEST_MANAGER {
+        super::daily_quest::open_daily_quest_manager(session, 0).await?;
+        return Ok(());
+    }
+
     // Look up template for NPC type
     let tmpl = world.get_npc_template(proto_id, npc.is_monster);
 
@@ -377,13 +395,23 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
             }
             NPC_MARK => {
                 // Cape mark NPC — open clan cape customization UI
+                let clan_state = session
+                    .world()
+                    .get_character_info(session.session_id())
+                    .and_then(|ch| session.world().get_knights(ch.knights_id))
+                    .map(|k| (k.id, k.flag, k.grade, k.cape, k.ranking));
+                // v2615 NPCHandler sends only this sub-opcode. The client
+                // already owns the clan/cape state from MyInfo; injecting a
+                // KNIGHTS_UPDATE before this packet leaves the mantle palette
+                // without its locally-filtered Cloak.tbl entries.
                 let mut pkt = Packet::new(Opcode::WizKnightsProcess as u8);
                 pkt.write_u8(KNIGHTS_CAPE_NPC);
                 session.send_packet(&pkt).await?;
                 debug!(
-                    "[{}] ClientEvent: NPC {} (MARK/CAPE)",
+                    "[{}] ClientEvent: NPC {} (MARK/CAPE), clan_state={:?}",
                     session.addr(),
-                    npc_nid
+                    npc_nid,
+                    clan_state
                 );
                 return Ok(());
             }
@@ -410,22 +438,12 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
                 return Ok(());
             }
             NPC_WAREHOUSE => {
-                // v2615 warehouse flow:
-                // WIZ_WAREHOUSE/sub=0x10 only creates/shows the integrated
-                // warehouse window. Feed the normal warehouse-open request
-                // through its canonical handler so the first page is filled.
-                //
-                // VIP storage is intentionally not opened here. The client
-                // sends WIZ_VIPWAREHOUSE/VIP_OPEN only after the player picks
-                // the VIP tab/button; opening it during the NPC click makes
-                // Inn Hostess jump straight past the normal warehouse.
-                let mut pkt = Packet::new(Opcode::WizWarehouse as u8);
-                pkt.write_u8(0x10); // WAREHOUSE_REQ
+                // v2615/reference flow: the NPC click only asks the client to
+                // show the integrated warehouse menu. The client sends the
+                // normal/VIP open request after the player makes a selection.
+                // Opening either store here skips that menu entirely.
+                let pkt = build_warehouse_menu_open();
                 session.send_packet(&pkt).await?;
-
-                let mut warehouse_open = Packet::new(Opcode::WizWarehouse as u8);
-                warehouse_open.write_u8(0x01); // WAREHOUSE_OPEN
-                super::warehouse::handle(session, warehouse_open).await?;
                 debug!(
                     "[{}] ClientEvent: NPC {} (WAREHOUSE)",
                     session.addr(),
@@ -775,6 +793,15 @@ mod tests {
         pkt.write_u8(KNIGHTS_CAPE_NPC);
         assert_eq!(pkt.data.len(), 1);
         assert_eq!(pkt.data[0], 0x1B);
+    }
+
+    /// Inn Hostess sends only the menu request; storage page data must wait
+    /// for the player's normal/VIP selection.
+    #[test]
+    fn test_warehouse_npc_opens_selection_menu_only() {
+        let pkt = build_warehouse_menu_open();
+        assert_eq!(pkt.opcode, Opcode::WizWarehouse as u8);
+        assert_eq!(pkt.data, [0x10]);
     }
 
     /// Rental NPC → WIZ_RENTAL sub=3, enabled=1, selling_group.

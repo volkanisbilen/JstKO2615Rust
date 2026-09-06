@@ -369,11 +369,7 @@ fn load_item_exchange(data_dir: &Path) -> anyhow::Result<HashMap<i32, TblItemExc
         for i in 0..5 {
             let item_id = cell_to_i32(&row[13 + i * 2]);
             let count = cell_to_i32(&row[14 + i * 2]);
-            let time = if i < 4 {
-                cell_to_i32(&row[23 + i])
-            } else {
-                0
-            };
+            let time = if i < 4 { cell_to_i32(&row[23 + i]) } else { 0 };
             if item_id != 0 {
                 exchange_items.push((item_id, count, time));
             }

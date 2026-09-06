@@ -933,6 +933,7 @@ pub async fn same_zone_warp(
     region::send_region_user_in_out_for_me(session).await?;
     region::send_merchant_user_in_out_for_me(session).await?;
     region::send_region_npc_info_for_me(session).await?;
+    region::send_nearby_npc_inouts(session).await?;
 
     // 7. Broadcast INOUT_WARP to new region
     region::broadcast_user_in_with_type(session, region::INOUT_WARP).await?;
@@ -959,6 +960,7 @@ async fn handle_loading(session: &mut ClientSession) -> anyhow::Result<()> {
     // Send NPC region list — client uses cached templates for rendering
     // C++ ZoneChangeWarpHandler.cpp:662 — only RegionNpcInfoForMe(), no NPC_INOUT
     region::send_region_npc_info_for_me(session).await?;
+    region::send_nearby_npc_inouts(session).await?;
 
     // Send user region list (WIZ_REGIONCHANGE 3-phase) + merchants
     region::send_region_user_in_out_for_me(session).await?;

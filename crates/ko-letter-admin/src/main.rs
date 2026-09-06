@@ -68,7 +68,10 @@ async fn items(pool: &PgPool, search: &str) -> Result<()> {
     let numeric = trimmed.parse::<i32>().ok();
     // A wildcard between words makes searches such as "VIP Vault" match
     // client names containing punctuation, e.g. "[VIP] Vault key".
-    let name_pattern = format!("%{}%", trimmed.split_whitespace().collect::<Vec<_>>().join("%"));
+    let name_pattern = format!(
+        "%{}%",
+        trimmed.split_whitespace().collect::<Vec<_>>().join("%")
+    );
     let rows = sqlx::query(
         "SELECT num, COALESCE(str_name, '') AS str_name, COALESCE(duration, 0) AS duration, \
                 COALESCE(countable, 0) AS countable, COALESCE(weight, 0) AS weight, \

@@ -641,7 +641,8 @@ impl EventRoomManager {
 
     /// List all rooms for an event type.
     pub fn list_rooms(&self, event_type: TempleEventType) -> Vec<u8> {
-        let mut rooms: Vec<u8> = self.rooms
+        let mut rooms: Vec<u8> = self
+            .rooms
             .iter()
             .filter(|r| r.key().0 == event_type)
             .map(|r| r.key().1)
@@ -1128,7 +1129,9 @@ pub fn send_winner_screen(world: &WorldState, active_event: i16, now: u64) {
                 world.set_invisibility_type(*sid, 0);
                 let sc_pkt =
                     build_state_change_broadcast(*sid as u32, STATE_CHANGE_INVISIBILITY, 0);
-                if let Some((pos, sender_event_room)) = world.with_session(*sid, |h| (h.position, h.event_room)) {
+                if let Some((pos, sender_event_room)) =
+                    world.with_session(*sid, |h| (h.position, h.event_room))
+                {
                     world.broadcast_to_region_sync(
                         pos.zone_id,
                         pos.region_x,
@@ -1304,10 +1307,7 @@ pub fn send_active_event_time(world: &WorldState, sid: SessionId) {
                 sid,
                 build_juraid_event_counter_packet(k_count, e_count, remain),
             );
-            world.send_to_session_owned(
-                sid,
-                build_juraid_counter_packet(k_count, e_count, remain),
-            );
+            world.send_to_session_owned(sid, build_juraid_counter_packet(k_count, e_count, remain));
             world.send_to_session_owned(
                 sid,
                 build_juraid_select_counter_packet(k_count, e_count, remain),

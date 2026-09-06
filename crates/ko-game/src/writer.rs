@@ -54,7 +54,8 @@ pub async fn writer_loop(
         if first_packet.opcode == 0xE9 {
             tracing::debug!(
                 "Writer DROP opcode=0x{:02X} len={} (blocked: causes v2600 client corruption)",
-                first_packet.opcode, first_packet.data.len()
+                first_packet.opcode,
+                first_packet.data.len()
             );
             continue;
         }
@@ -117,13 +118,27 @@ pub async fn writer_loop(
                 // header(2) + len(2) = 4 bytes minimum before payload
                 let payload_len = u16::from_le_bytes([buf[off + 2], buf[off + 3]]) as usize;
                 let frame_end = off + 4 + payload_len + 2; // header + len + payload + footer
-                if frame_end > buf.len() { break; }
-                let wire: String = buf[off..frame_end].iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+                if frame_end > buf.len() {
+                    break;
+                }
+                let wire: String = buf[off..frame_end]
+                    .iter()
+                    .map(|b| format!("{:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let flag = buf[off + 4]; // first payload byte (0x01=AES, else opcode)
-                let opcode = if flag == 0x01 && payload_len > 1 { "AES" } else { &format!("0x{:02X}", flag) };
+                let opcode = if flag == 0x01 && payload_len > 1 {
+                    "AES"
+                } else {
+                    &format!("0x{:02X}", flag)
+                };
                 tracing::info!(
                     "WIRE S2C #{} [{}] payload={} wire_len={}: {}",
-                    frame_idx, opcode, payload_len, frame_end - off, wire,
+                    frame_idx,
+                    opcode,
+                    payload_len,
+                    frame_end - off,
+                    wire,
                 );
                 off = frame_end;
                 frame_idx += 1;
@@ -221,11 +236,7 @@ fn build_frame(
 ///
 /// Wire format: `[0xAA 0x55] [len: u16le] [0x01 | AES_CBC(CRC32 + opcode + data)] [0x55 0xAA]`
 /// CRC32 is computed over the raw plaintext (opcode + data) and prepended before encryption.
-fn build_frame_aes(
-    aes: &AesCryption,
-    packet: &Packet,
-    buf: &mut Vec<u8>,
-) -> anyhow::Result<()> {
+fn build_frame_aes(aes: &AesCryption, packet: &Packet, buf: &mut Vec<u8>) -> anyhow::Result<()> {
     // Build plaintext: [opcode | data]
     // Wireshark-verified: NO CRC32 in either direction. Just raw opcode + data.
     let mut plaintext = Vec::with_capacity(1 + packet.data.len());

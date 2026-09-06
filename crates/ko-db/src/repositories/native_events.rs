@@ -1,8 +1,8 @@
 //! Server-authoritative persistence for the native v2615 event panels.
 
 use crate::models::native_events::{
-    NativeCoinState, NativeJigsawState, NativeMarbleState, NativeMarbleTile,
-    NativeRewardGrant, NativeRouletteHistory, NativeRoulettePending, NativeRouletteReward,
+    NativeCoinState, NativeJigsawState, NativeMarbleState, NativeMarbleTile, NativeRewardGrant,
+    NativeRouletteHistory, NativeRoulettePending, NativeRouletteReward,
 };
 use crate::DbPool;
 
@@ -16,12 +16,11 @@ impl<'a> NativeEventsRepository<'a> {
     }
 
     pub async fn is_active(&self, key: &str) -> Result<bool, sqlx::Error> {
-        let row: Option<(bool,)> = sqlx::query_as(
-            "SELECT active FROM native_event_config WHERE event_key = $1",
-        )
-        .bind(key)
-        .fetch_optional(self.pool)
-        .await?;
+        let row: Option<(bool,)> =
+            sqlx::query_as("SELECT active FROM native_event_config WHERE event_key = $1")
+                .bind(key)
+                .fetch_optional(self.pool)
+                .await?;
         Ok(row.map(|v| v.0).unwrap_or(false))
     }
 
@@ -40,11 +39,9 @@ impl<'a> NativeEventsRepository<'a> {
     /// Runtime GM close commands can still disable individual rows until the
     /// next restart.
     pub async fn activate_all(&self) -> Result<u64, sqlx::Error> {
-        let result = sqlx::query(
-            "UPDATE native_event_config SET active=TRUE, updated_at=NOW()",
-        )
-        .execute(self.pool)
-        .await?;
+        let result = sqlx::query("UPDATE native_event_config SET active=TRUE, updated_at=NOW()")
+            .execute(self.pool)
+            .await?;
         Ok(result.rows_affected())
     }
 
@@ -305,33 +302,59 @@ impl<'a> NativeEventsRepository<'a> {
             return Ok(None);
         }
         let mut tx = self.pool.begin().await?;
-        sqlx::query("INSERT INTO native_jigsaw_user(character_name) VALUES($1) ON CONFLICT DO NOTHING")
-            .bind(character).execute(&mut *tx).await?;
+        sqlx::query(
+            "INSERT INTO native_jigsaw_user(character_name) VALUES($1) ON CONFLICT DO NOTHING",
+        )
+        .bind(character)
+        .execute(&mut *tx)
+        .await?;
         let state: NativeJigsawState = sqlx::query_as(
             "SELECT piece_counts,reward_claimed FROM native_jigsaw_user WHERE character_name=$1 FOR UPDATE",
         ).bind(character).fetch_one(&mut *tx).await?;
         let reward: Option<(i16,i32,i16)> = sqlx::query_as(
             "SELECT required_total,item_id,item_count FROM native_jigsaw_reward WHERE reward_index=$1",
         ).bind(reward_index).fetch_optional(&mut *tx).await?;
-        let Some((required,item_id,item_count)) = reward else { tx.rollback().await?; return Ok(None); };
-        let claimed = state.reward_claimed.get(reward_index as usize).copied().unwrap_or(true);
+        let Some((required, item_id, item_count)) = reward else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let claimed = state
+            .reward_claimed
+            .get(reward_index as usize)
+            .copied()
+            .unwrap_or(true);
         let total: i32 = state.piece_counts.iter().map(|v| *v as i32).sum();
-        if claimed || total < required as i32 { tx.rollback().await?; return Ok(None); }
+        if claimed || total < required as i32 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         sqlx::query(
             "UPDATE native_jigsaw_user SET reward_claimed[$2+1]=TRUE,updated_at=NOW() WHERE character_name=$1",
         ).bind(character).bind(reward_index as i32).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(Some(NativeRewardGrant { item_id, item_count }))
+        Ok(Some(NativeRewardGrant {
+            item_id,
+            item_count,
+        }))
     }
 
     pub async fn coin_state(&self, character: &str) -> Result<NativeCoinState, sqlx::Error> {
-        sqlx::query("INSERT INTO native_coin_user(character_name) VALUES($1) ON CONFLICT DO NOTHING")
-            .bind(character).execute(self.pool).await?;
+        sqlx::query(
+            "INSERT INTO native_coin_user(character_name) VALUES($1) ON CONFLICT DO NOTHING",
+        )
+        .bind(character)
+        .execute(self.pool)
+        .await?;
         sqlx::query_as("SELECT points,reward_claimed FROM native_coin_user WHERE character_name=$1")
-            .bind(character).fetch_one(self.pool).await
+            .bind(character)
+            .fetch_one(self.pool)
+            .await
     }
 
-    pub async fn add_coin_point(&self, character: &str) -> Result<Option<NativeCoinState>, sqlx::Error> {
+    pub async fn add_coin_point(
+        &self,
+        character: &str,
+    ) -> Result<Option<NativeCoinState>, sqlx::Error> {
         self.coin_state(character).await?;
         sqlx::query_as(
             "UPDATE native_coin_user SET points=points+1,last_point_at=NOW(),updated_at=NOW() \
@@ -345,32 +368,61 @@ impl<'a> NativeEventsRepository<'a> {
         character: &str,
         reward_index: i16,
     ) -> Result<Option<NativeRewardGrant>, sqlx::Error> {
-        if !(0..10).contains(&reward_index) { return Ok(None); }
+        if !(0..10).contains(&reward_index) {
+            return Ok(None);
+        }
         let mut tx = self.pool.begin().await?;
-        sqlx::query("INSERT INTO native_coin_user(character_name) VALUES($1) ON CONFLICT DO NOTHING")
-            .bind(character).execute(&mut *tx).await?;
+        sqlx::query(
+            "INSERT INTO native_coin_user(character_name) VALUES($1) ON CONFLICT DO NOTHING",
+        )
+        .bind(character)
+        .execute(&mut *tx)
+        .await?;
         let state: NativeCoinState = sqlx::query_as(
             "SELECT points,reward_claimed FROM native_coin_user WHERE character_name=$1 FOR UPDATE",
-        ).bind(character).fetch_one(&mut *tx).await?;
+        )
+        .bind(character)
+        .fetch_one(&mut *tx)
+        .await?;
         let reward: Option<(i32,i32,i16)> = sqlx::query_as(
             "SELECT required_points,item_id,item_count FROM native_coin_reward WHERE reward_index=$1",
         ).bind(reward_index).fetch_optional(&mut *tx).await?;
-        let Some((required,item_id,item_count)) = reward else { tx.rollback().await?; return Ok(None); };
-        let claimed = state.reward_claimed.get(reward_index as usize).copied().unwrap_or(true);
-        if claimed || state.points < required { tx.rollback().await?; return Ok(None); }
+        let Some((required, item_id, item_count)) = reward else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let claimed = state
+            .reward_claimed
+            .get(reward_index as usize)
+            .copied()
+            .unwrap_or(true);
+        if claimed || state.points < required {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         sqlx::query("UPDATE native_coin_user SET reward_claimed[$2+1]=TRUE,updated_at=NOW() WHERE character_name=$1")
             .bind(character).bind(reward_index as i32).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(Some(NativeRewardGrant { item_id, item_count }))
+        Ok(Some(NativeRewardGrant {
+            item_id,
+            item_count,
+        }))
     }
 
     pub async fn marble_state(&self, character: &str) -> Result<NativeMarbleState, sqlx::Error> {
-        sqlx::query("INSERT INTO native_marble_user(character_name) VALUES($1) ON CONFLICT DO NOTHING")
-            .bind(character).execute(self.pool).await?;
+        sqlx::query(
+            "INSERT INTO native_marble_user(character_name) VALUES($1) ON CONFLICT DO NOTHING",
+        )
+        .bind(character)
+        .execute(self.pool)
+        .await?;
         sqlx::query(
             "UPDATE native_marble_user SET rolls_today=0,reset_date=CURRENT_DATE \
              WHERE character_name=$1 AND reset_date<>CURRENT_DATE",
-        ).bind(character).execute(self.pool).await?;
+        )
+        .bind(character)
+        .execute(self.pool)
+        .await?;
         sqlx::query_as(
             "SELECT position,laps,rolls_today,treasure_claimed FROM native_marble_user WHERE character_name=$1",
         ).bind(character).fetch_one(self.pool).await
@@ -381,14 +433,22 @@ impl<'a> NativeEventsRepository<'a> {
         character: &str,
         die: i16,
     ) -> Result<Option<(NativeMarbleState, NativeMarbleTile)>, sqlx::Error> {
-        if !(1..=6).contains(&die) { return Ok(None); }
+        if !(1..=6).contains(&die) {
+            return Ok(None);
+        }
         self.marble_state(character).await?;
         let mut tx = self.pool.begin().await?;
         let old: NativeMarbleState = sqlx::query_as(
             "SELECT position,laps,rolls_today,treasure_claimed FROM native_marble_user \
              WHERE character_name=$1 FOR UPDATE",
-        ).bind(character).fetch_one(&mut *tx).await?;
-        if old.rolls_today >= 12 { tx.rollback().await?; return Ok(None); }
+        )
+        .bind(character)
+        .fetch_one(&mut *tx)
+        .await?;
+        if old.rolls_today >= 12 {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         let raw = old.position as i32 + die as i32;
         let position = (raw % 24) as i16;
         let laps = old.laps + if raw >= 24 { 1 } else { 0 };
@@ -396,11 +456,16 @@ impl<'a> NativeEventsRepository<'a> {
             "UPDATE native_marble_user SET position=$2,laps=$3,rolls_today=rolls_today+1, \
              last_roll_at=NOW(),updated_at=NOW() WHERE character_name=$1 \
              RETURNING position,laps,rolls_today,treasure_claimed",
-        ).bind(character).bind(position).bind(laps).fetch_one(&mut *tx).await?;
+        )
+        .bind(character)
+        .bind(position)
+        .bind(laps)
+        .fetch_one(&mut *tx)
+        .await?;
         let tile: NativeMarbleTile = sqlx::query_as(
             "SELECT board_index,item_id,item_count,tile_type FROM native_marble_board WHERE board_index=$1",
         ).bind(position).fetch_one(&mut *tx).await?;
         tx.commit().await?;
-        Ok(Some((state,tile)))
+        Ok(Some((state, tile)))
     }
 }

@@ -124,8 +124,12 @@ fn pvp_monument_process(
     };
     world.npc_template_update(tmpl.s_sid, tmpl.is_monster, killer_nation, new_pid);
 
+    // PVP monuments are capture points, not ordinary one-life event NPCs.
+    // Rebuild it almost immediately from the newly-owned template.
+    world.update_npc_ai(npc.nid, |ai| ai.regen_time_ms = 250);
+
     debug!(
-        "PVP monument captured: zone={}, nation={}, proto={}",
+        "PVP monument captured: zone={}, nation={}, proto={}, respawn_ms=250",
         npc.zone_id, killer_nation, tmpl.s_sid
     );
 }

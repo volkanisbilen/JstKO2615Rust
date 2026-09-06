@@ -18,6 +18,7 @@ use crate::clan_constants::{
     CHIEF, CLAN_COIN_REQUIREMENT, CLAN_LEVEL_REQUIREMENT, COMMAND_CAPTAIN, MAX_CLAN_USERS, OFFICER,
     TRAINEE, VICECHIEF,
 };
+use crate::systems::daily_reset::get_knights_grade;
 /// Minimum NP required to donate (user must retain at least this much).
 const MIN_NP_TO_DONATE: u32 = 1000;
 
@@ -73,7 +74,23 @@ const WIZ_NOTICE: u8 = 0x2E;
 
 /// Handle WIZKNIGHTS_PROCESS from the client.
 pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
+    let mut reader = ko_protocol::PacketReader::new(&pkt.data);
+    let sub_opcode = match reader.read_u8() {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    // v2615 requests these read-only clan lists after character selection but
+    // before GAMESTART phase 2. They initialise the clan/cape UI; mutations
+    // remain strictly InGame-only.
     if session.state() != SessionState::InGame {
+        if session.state() == SessionState::CharacterSelected {
+            return match sub_opcode {
+                KNIGHTS_ALLY_LIST => handle_alliance_list(session).await,
+                KNIGHTS_UNK1 => handle_flags_list(session).await,
+                _ => Ok(()),
+            };
+        }
         return Ok(());
     }
 
@@ -81,12 +98,6 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     if session.world().is_player_dead(session.session_id()) {
         return Ok(());
     }
-
-    let mut reader = ko_protocol::PacketReader::new(&pkt.data);
-    let sub_opcode = match reader.read_u8() {
-        Some(v) => v,
-        None => return Ok(()),
-    };
 
     match sub_opcode {
         KNIGHTS_CREATE => handle_create(session, &mut reader).await,
@@ -281,10 +292,30 @@ async fn handle_create(
     } else {
         CLAN_TYPE_TRAINING as i16
     };
+    // The reference AutoRoyalG1 flow promotes through ClanTypePromoted first,
+    // which installs cape 0 and grade 1 before applying Royal1. Keeping -1/5
+    // with flag 12 leaves the client cape catalogue uninitialised.
+    // Clan grade is driven by Ladder Points (monthly NP), not lifetime NP.
+    // Seed the new clan from its founder's current monthly value; scheduled
+    // ranking refreshes subsequently sum every member's monthly NP.
+    let clan_points = ch.loyalty_monthly;
+    let clan_grade: u8 = if auto_royal {
+        1
+    } else {
+        get_knights_grade(clan_points)
+    };
+    let clan_cape: u16 = if auto_royal { 0 } else { 0xFFFF };
 
     // Create in DB
     if let Err(e) = repo
-        .create_knights(next_id, nation as i16, &clan_name, &char_name, clan_flag)
+        .create_knights(
+            next_id,
+            nation as i16,
+            &clan_name,
+            &char_name,
+            clan_flag,
+            clan_points.min(i32::MAX as u32) as i32,
+        )
         .await
     {
         warn!("[{}] Failed to create knights in DB: {}", session.addr(), e);
@@ -326,7 +357,7 @@ async fn handle_create(
         id: next_id as u16,
         flag: clan_flag as u8,
         nation,
-        grade: 5, // default
+        grade: clan_grade,
         ranking: 0,
         name: clan_name.clone(),
         chief: char_name.clone(),
@@ -334,10 +365,10 @@ async fn handle_create(
         vice_chief_2: String::new(),
         vice_chief_3: String::new(),
         members: 1,
-        points: 0,
+        points: clan_points,
         clan_point_fund: 0,
         notice: String::new(),
-        cape: 0xFFFF, // -1 as u16
+        cape: clan_cape,
         cape_r: 0,
         cape_g: 0,
         cape_b: 0,
@@ -369,12 +400,15 @@ async fn handle_create(
     result.write_u32(sid as u32);
     result.write_u16(next_id as u16);
     result.write_string(&clan_name);
-    result.write_u8(5); // grade
+    result.write_u8(clan_grade);
     result.write_u8(0); // ranking
     result.write_u32(new_gold);
 
     // Broadcast to region
-    if let Some((pos, event_room)) = session.world().with_session(sid, |h| (h.position, h.event_room)) {
+    if let Some((pos, event_room)) = session
+        .world()
+        .with_session(sid, |h| (h.position, h.event_room))
+    {
         session.world().broadcast_to_3x3(
             pos.zone_id,
             pos.region_x,
@@ -2925,7 +2959,7 @@ async fn handle_alliance_list(session: &mut ClientSession) -> anyhow::Result<()>
 /// - Main/sub alliance clans: show alliance leader's cape + their own RGB colors
 /// - Mercenary clans: show alliance leader's cape with no colors (u32(0))
 /// - Non-alliance clans: show their own cape + RGB colors
-fn send_knights_update(session: &ClientSession, clan_id: u16) {
+pub(crate) fn send_knights_update(session: &ClientSession, clan_id: u16) {
     let clan = match session.world().get_knights(clan_id) {
         Some(k) => k,
         None => return,
@@ -3040,7 +3074,11 @@ async fn handle_promote_clan_list(
 
     // S2C 2: clan data for requested page
     let start = ((page as usize) - 1) * PROMOTE_CLANS_PER_PAGE;
-    let page_clans: Vec<_> = clans.iter().skip(start).take(PROMOTE_CLANS_PER_PAGE).collect();
+    let page_clans: Vec<_> = clans
+        .iter()
+        .skip(start)
+        .take(PROMOTE_CLANS_PER_PAGE)
+        .collect();
 
     let mut data_pkt = Packet::new(WIZKNIGHTS_PROCESS);
     data_pkt.write_u8(KNIGHTS_PROMATE_CLAN);
@@ -3134,7 +3172,8 @@ const WIZKNIGHTS_LIST: u8 = 0x3E;
 /// This is called once on login. The C++ code sends it compressed, but
 /// we send it uncompressed for simplicity (client handles both).
 pub async fn handle_knights_list(session: &mut ClientSession, _pkt: Packet) -> anyhow::Result<()> {
-    if session.state() != SessionState::InGame && session.state() != SessionState::CharacterSelected {
+    if session.state() != SessionState::InGame && session.state() != SessionState::CharacterSelected
+    {
         return Ok(());
     }
     let all_clans = session.world().get_all_knights();
@@ -3414,10 +3453,42 @@ async fn handle_flags_list(session: &mut ClientSession) -> anyhow::Result<()> {
     send_top_clans(session, KNIGHTS_UNK1, 1).await
 }
 
-/// Handle KNIGHTS_LADDER_POINTS — ladder points ranking.
-/// Sends top-5 per nation same as TOP10 with sub-opcode 100.
+/// Handle KNIGHTS_LADDER_POINTS — current clan members' monthly NP ranking.
+///
+/// CKnightsManager::KnightsLadderPointList sends `[sub][u16 count]` followed
+/// by `DByte(name), u32(loyalty_monthly)` for every clan member, sorted high
+/// to low. The old implementation incorrectly reused the global top-clans
+/// response, which left the v2615 Ladder Points window empty.
 async fn handle_ladder_points(session: &mut ClientSession) -> anyhow::Result<()> {
-    send_top_clans(session, KNIGHTS_LADDER_POINTS, 0).await
+    let ch = match get_char_info(session) {
+        Some(c) if c.knights_id > 0 => c,
+        _ => return Ok(()),
+    };
+    let clan = match session.world().get_knights(ch.knights_id) {
+        Some(k) => k,
+        None => return Ok(()),
+    };
+
+    let mut members: Vec<(String, u32)> = session
+        .world()
+        .all_session_ids()
+        .into_iter()
+        .filter_map(|sid| {
+            session.world().get_character_info(sid).and_then(|member| {
+                (member.knights_id == clan.id).then_some((member.name, member.loyalty_monthly))
+            })
+        })
+        .collect();
+    members.sort_unstable_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+    let mut result = Packet::new(WIZKNIGHTS_PROCESS);
+    result.write_u8(KNIGHTS_LADDER_POINTS);
+    result.write_u16(members.len().min(u16::MAX as usize) as u16);
+    for (name, loyalty_monthly) in members.into_iter().take(u16::MAX as usize) {
+        result.write_string(&name);
+        result.write_u32(loyalty_monthly);
+    }
+    session.send_packet(&result).await
 }
 
 // ── KNIGHTS_MARK_VERSION_REQ (25) ────────────────────────────────────
@@ -4977,20 +5048,47 @@ mod tests {
     #[test]
     fn test_all_subopcodes_unique() {
         let ops: Vec<u8> = vec![
-            KNIGHTS_CREATE, KNIGHTS_JOIN, KNIGHTS_WITHDRAW, KNIGHTS_REMOVE,
-            KNIGHTS_DESTROY, KNIGHTS_ADMIT, KNIGHTS_REJECT, KNIGHTS_PUNISH,
-            KNIGHTS_CHIEF, KNIGHTS_VICECHIEF, KNIGHTS_OFFICER,
-            KNIGHTS_ALLLIST_REQ, KNIGHTS_MEMBER_REQ, KNIGHTS_CURRENT_REQ,
-            KNIGHTS_JOIN_REQ, KNIGHTS_USER_ONLINE, KNIGHTS_USER_OFFLINE,
-            KNIGHTS_MARK_VERSION_REQ, KNIGHTS_MARK_REGISTER,
-            KNIGHTS_ALLY_CREATE, KNIGHTS_ALLY_REQ, KNIGHTS_ALLY_INSERT,
-            KNIGHTS_ALLY_REMOVE, KNIGHTS_ALLY_PUNISH, KNIGHTS_ALLY_LIST,
-            KNIGHTS_MARK_REQ, KNIGHTS_UPDATE, KNIGHTS_MARK_REGION_REQ,
-            KNIGHTS_POINT_REQ, KNIGHTS_POINT_METHOD, KNIGHTS_DONATE_POINTS,
-            KNIGHTS_HANDOVER_VICECHIEF_LIST, KNIGHTS_HANDOVER_REQ,
-            KNIGHTS_DONATION_LIST, KNIGHTS_TOP10,
-            KNIGHTS_HANDOVER, KNIGHTS_UPDATENOTICE, KNIGHTS_UPDATEMEMO,
-            KNIGHTS_VS_LIST, KNIGHTS_UNK1, KNIGHTS_LADDER_POINTS,
+            KNIGHTS_CREATE,
+            KNIGHTS_JOIN,
+            KNIGHTS_WITHDRAW,
+            KNIGHTS_REMOVE,
+            KNIGHTS_DESTROY,
+            KNIGHTS_ADMIT,
+            KNIGHTS_REJECT,
+            KNIGHTS_PUNISH,
+            KNIGHTS_CHIEF,
+            KNIGHTS_VICECHIEF,
+            KNIGHTS_OFFICER,
+            KNIGHTS_ALLLIST_REQ,
+            KNIGHTS_MEMBER_REQ,
+            KNIGHTS_CURRENT_REQ,
+            KNIGHTS_JOIN_REQ,
+            KNIGHTS_USER_ONLINE,
+            KNIGHTS_USER_OFFLINE,
+            KNIGHTS_MARK_VERSION_REQ,
+            KNIGHTS_MARK_REGISTER,
+            KNIGHTS_ALLY_CREATE,
+            KNIGHTS_ALLY_REQ,
+            KNIGHTS_ALLY_INSERT,
+            KNIGHTS_ALLY_REMOVE,
+            KNIGHTS_ALLY_PUNISH,
+            KNIGHTS_ALLY_LIST,
+            KNIGHTS_MARK_REQ,
+            KNIGHTS_UPDATE,
+            KNIGHTS_MARK_REGION_REQ,
+            KNIGHTS_POINT_REQ,
+            KNIGHTS_POINT_METHOD,
+            KNIGHTS_DONATE_POINTS,
+            KNIGHTS_HANDOVER_VICECHIEF_LIST,
+            KNIGHTS_HANDOVER_REQ,
+            KNIGHTS_DONATION_LIST,
+            KNIGHTS_TOP10,
+            KNIGHTS_HANDOVER,
+            KNIGHTS_UPDATENOTICE,
+            KNIGHTS_UPDATEMEMO,
+            KNIGHTS_VS_LIST,
+            KNIGHTS_UNK1,
+            KNIGHTS_LADDER_POINTS,
         ];
         let mut set = std::collections::HashSet::new();
         for op in &ops {
@@ -5002,10 +5100,20 @@ mod tests {
     #[test]
     fn test_core_management_sequential() {
         let core = [
-            KNIGHTS_CREATE, KNIGHTS_JOIN, KNIGHTS_WITHDRAW, KNIGHTS_REMOVE,
-            KNIGHTS_DESTROY, KNIGHTS_ADMIT, KNIGHTS_REJECT, KNIGHTS_PUNISH,
-            KNIGHTS_CHIEF, KNIGHTS_VICECHIEF, KNIGHTS_OFFICER,
-            KNIGHTS_ALLLIST_REQ, KNIGHTS_MEMBER_REQ, KNIGHTS_CURRENT_REQ,
+            KNIGHTS_CREATE,
+            KNIGHTS_JOIN,
+            KNIGHTS_WITHDRAW,
+            KNIGHTS_REMOVE,
+            KNIGHTS_DESTROY,
+            KNIGHTS_ADMIT,
+            KNIGHTS_REJECT,
+            KNIGHTS_PUNISH,
+            KNIGHTS_CHIEF,
+            KNIGHTS_VICECHIEF,
+            KNIGHTS_OFFICER,
+            KNIGHTS_ALLLIST_REQ,
+            KNIGHTS_MEMBER_REQ,
+            KNIGHTS_CURRENT_REQ,
         ];
         for (i, &op) in core.iter().enumerate() {
             assert_eq!(op, (i + 1) as u8);
@@ -5031,7 +5139,13 @@ mod tests {
     /// knights_error packet structure: opcode + sub_opcode + error_code.
     #[test]
     fn test_knights_error_all_subopcodes() {
-        for sub in [KNIGHTS_CREATE, KNIGHTS_JOIN, KNIGHTS_WITHDRAW, KNIGHTS_REMOVE, KNIGHTS_DESTROY] {
+        for sub in [
+            KNIGHTS_CREATE,
+            KNIGHTS_JOIN,
+            KNIGHTS_WITHDRAW,
+            KNIGHTS_REMOVE,
+            KNIGHTS_DESTROY,
+        ] {
             let pkt = knights_error(sub, 7);
             assert_eq!(pkt.opcode, WIZKNIGHTS_PROCESS);
             assert_eq!(pkt.data[0], sub);
@@ -5136,7 +5250,12 @@ mod tests {
     /// KNIGHTS_MARK sub-opcodes (25, 26, 35, 37) are all distinct.
     #[test]
     fn test_mark_subopcodes_all_distinct() {
-        let marks = [KNIGHTS_MARK_VERSION_REQ, KNIGHTS_MARK_REGISTER, KNIGHTS_MARK_REQ, KNIGHTS_MARK_REGION_REQ];
+        let marks = [
+            KNIGHTS_MARK_VERSION_REQ,
+            KNIGHTS_MARK_REGISTER,
+            KNIGHTS_MARK_REQ,
+            KNIGHTS_MARK_REGION_REQ,
+        ];
         let mut set = std::collections::HashSet::new();
         for &m in &marks {
             assert!(set.insert(m), "duplicate mark sub-opcode: {}", m);
@@ -5159,16 +5278,40 @@ mod tests {
     #[test]
     fn test_knights_info_no_cape() {
         let info = KnightsInfo {
-            id: 1, flag: 2, nation: 1, grade: 5, ranking: 0,
-            name: "T".to_string(), chief: "C".to_string(),
-            vice_chief_1: String::new(), vice_chief_2: String::new(), vice_chief_3: String::new(),
-            members: 1, points: 0, clan_point_fund: 0, notice: String::new(),
-            cape: 0xFFFF, cape_r: 0, cape_g: 0, cape_b: 0,
-            mark_version: 0, mark_data: Vec::new(), alliance: 0,
-            castellan_cape: false, cast_cape_id: -1, cast_cape_r: 0, cast_cape_g: 0,
-            cast_cape_b: 0, cast_cape_time: 0, alliance_req: 0, clan_point_method: 0,
-            premium_time: 0, premium_in_use: 0, online_members: 0,
-            online_np_count: 0, online_exp_count: 0,
+            id: 1,
+            flag: 2,
+            nation: 1,
+            grade: 5,
+            ranking: 0,
+            name: "T".to_string(),
+            chief: "C".to_string(),
+            vice_chief_1: String::new(),
+            vice_chief_2: String::new(),
+            vice_chief_3: String::new(),
+            members: 1,
+            points: 0,
+            clan_point_fund: 0,
+            notice: String::new(),
+            cape: 0xFFFF,
+            cape_r: 0,
+            cape_g: 0,
+            cape_b: 0,
+            mark_version: 0,
+            mark_data: Vec::new(),
+            alliance: 0,
+            castellan_cape: false,
+            cast_cape_id: -1,
+            cast_cape_r: 0,
+            cast_cape_g: 0,
+            cast_cape_b: 0,
+            cast_cape_time: 0,
+            alliance_req: 0,
+            clan_point_method: 0,
+            premium_time: 0,
+            premium_in_use: 0,
+            online_members: 0,
+            online_np_count: 0,
+            online_exp_count: 0,
         };
         // 0xFFFF = no cape (C++ default -1 as u16)
         assert_eq!(info.cape, 0xFFFF);
@@ -5238,7 +5381,12 @@ mod tests {
             notice: String::new(),
         };
         // 4 distinct clan slots
-        let slots = [alliance.main_clan, alliance.sub_clan, alliance.mercenary_1, alliance.mercenary_2];
+        let slots = [
+            alliance.main_clan,
+            alliance.sub_clan,
+            alliance.mercenary_1,
+            alliance.mercenary_2,
+        ];
         assert_eq!(slots.len(), 4);
         // All non-zero
         assert!(slots.iter().all(|&s| s > 0));
@@ -5298,20 +5446,47 @@ mod tests {
         assert_eq!(KNIGHTS_LADDER_POINTS - KNIGHTS_CREATE, 99);
         // No sub-opcode exceeds 100
         let all_ops = [
-            KNIGHTS_CREATE, KNIGHTS_JOIN, KNIGHTS_WITHDRAW, KNIGHTS_REMOVE,
-            KNIGHTS_DESTROY, KNIGHTS_ADMIT, KNIGHTS_REJECT, KNIGHTS_PUNISH,
-            KNIGHTS_CHIEF, KNIGHTS_VICECHIEF, KNIGHTS_OFFICER,
-            KNIGHTS_ALLLIST_REQ, KNIGHTS_MEMBER_REQ, KNIGHTS_CURRENT_REQ,
-            KNIGHTS_JOIN_REQ, KNIGHTS_USER_ONLINE, KNIGHTS_USER_OFFLINE,
-            KNIGHTS_MARK_VERSION_REQ, KNIGHTS_MARK_REGISTER,
-            KNIGHTS_ALLY_CREATE, KNIGHTS_ALLY_REQ, KNIGHTS_ALLY_INSERT,
-            KNIGHTS_ALLY_REMOVE, KNIGHTS_ALLY_PUNISH, KNIGHTS_ALLY_LIST,
-            KNIGHTS_MARK_REQ, KNIGHTS_UPDATE, KNIGHTS_MARK_REGION_REQ,
-            KNIGHTS_POINT_REQ, KNIGHTS_POINT_METHOD, KNIGHTS_DONATE_POINTS,
-            KNIGHTS_HANDOVER_VICECHIEF_LIST, KNIGHTS_HANDOVER_REQ,
-            KNIGHTS_DONATION_LIST, KNIGHTS_TOP10, KNIGHTS_HANDOVER,
-            KNIGHTS_UPDATENOTICE, KNIGHTS_UPDATEMEMO, KNIGHTS_VS_LIST,
-            KNIGHTS_UNK1, KNIGHTS_LADDER_POINTS,
+            KNIGHTS_CREATE,
+            KNIGHTS_JOIN,
+            KNIGHTS_WITHDRAW,
+            KNIGHTS_REMOVE,
+            KNIGHTS_DESTROY,
+            KNIGHTS_ADMIT,
+            KNIGHTS_REJECT,
+            KNIGHTS_PUNISH,
+            KNIGHTS_CHIEF,
+            KNIGHTS_VICECHIEF,
+            KNIGHTS_OFFICER,
+            KNIGHTS_ALLLIST_REQ,
+            KNIGHTS_MEMBER_REQ,
+            KNIGHTS_CURRENT_REQ,
+            KNIGHTS_JOIN_REQ,
+            KNIGHTS_USER_ONLINE,
+            KNIGHTS_USER_OFFLINE,
+            KNIGHTS_MARK_VERSION_REQ,
+            KNIGHTS_MARK_REGISTER,
+            KNIGHTS_ALLY_CREATE,
+            KNIGHTS_ALLY_REQ,
+            KNIGHTS_ALLY_INSERT,
+            KNIGHTS_ALLY_REMOVE,
+            KNIGHTS_ALLY_PUNISH,
+            KNIGHTS_ALLY_LIST,
+            KNIGHTS_MARK_REQ,
+            KNIGHTS_UPDATE,
+            KNIGHTS_MARK_REGION_REQ,
+            KNIGHTS_POINT_REQ,
+            KNIGHTS_POINT_METHOD,
+            KNIGHTS_DONATE_POINTS,
+            KNIGHTS_HANDOVER_VICECHIEF_LIST,
+            KNIGHTS_HANDOVER_REQ,
+            KNIGHTS_DONATION_LIST,
+            KNIGHTS_TOP10,
+            KNIGHTS_HANDOVER,
+            KNIGHTS_UPDATENOTICE,
+            KNIGHTS_UPDATEMEMO,
+            KNIGHTS_VS_LIST,
+            KNIGHTS_UNK1,
+            KNIGHTS_LADDER_POINTS,
         ];
         assert!(all_ops.iter().all(|&op| op <= KNIGHTS_LADDER_POINTS));
     }
@@ -5332,20 +5507,44 @@ mod tests {
     #[test]
     fn test_knights_total_handled_subopcodes() {
         let handled = [
-            KNIGHTS_CREATE, KNIGHTS_JOIN, KNIGHTS_WITHDRAW, KNIGHTS_REMOVE,
-            KNIGHTS_DESTROY, KNIGHTS_ADMIT, KNIGHTS_REJECT, KNIGHTS_PUNISH,
-            KNIGHTS_CHIEF, KNIGHTS_VICECHIEF, KNIGHTS_OFFICER,
-            KNIGHTS_ALLLIST_REQ, KNIGHTS_MEMBER_REQ, KNIGHTS_CURRENT_REQ,
+            KNIGHTS_CREATE,
+            KNIGHTS_JOIN,
+            KNIGHTS_WITHDRAW,
+            KNIGHTS_REMOVE,
+            KNIGHTS_DESTROY,
+            KNIGHTS_ADMIT,
+            KNIGHTS_REJECT,
+            KNIGHTS_PUNISH,
+            KNIGHTS_CHIEF,
+            KNIGHTS_VICECHIEF,
+            KNIGHTS_OFFICER,
+            KNIGHTS_ALLLIST_REQ,
+            KNIGHTS_MEMBER_REQ,
+            KNIGHTS_CURRENT_REQ,
             KNIGHTS_JOIN_REQ,
-            KNIGHTS_MARK_VERSION_REQ, KNIGHTS_MARK_REGISTER, KNIGHTS_MARK_REQ,
+            KNIGHTS_MARK_VERSION_REQ,
+            KNIGHTS_MARK_REGISTER,
+            KNIGHTS_MARK_REQ,
             KNIGHTS_MARK_REGION_REQ,
-            KNIGHTS_ALLY_CREATE, KNIGHTS_ALLY_REQ, KNIGHTS_ALLY_INSERT,
-            KNIGHTS_ALLY_REMOVE, KNIGHTS_ALLY_PUNISH, KNIGHTS_ALLY_LIST,
-            KNIGHTS_POINT_REQ, KNIGHTS_POINT_METHOD, KNIGHTS_DONATE_POINTS,
-            KNIGHTS_HANDOVER_VICECHIEF_LIST, KNIGHTS_HANDOVER_REQ,
-            KNIGHTS_HANDOVER, KNIGHTS_DONATION_LIST, KNIGHTS_UPDATENOTICE,
-            KNIGHTS_UPDATEMEMO, KNIGHTS_TOP10, KNIGHTS_UNK1,
-            KNIGHTS_LADDER_POINTS, KNIGHTS_VS_LIST,
+            KNIGHTS_ALLY_CREATE,
+            KNIGHTS_ALLY_REQ,
+            KNIGHTS_ALLY_INSERT,
+            KNIGHTS_ALLY_REMOVE,
+            KNIGHTS_ALLY_PUNISH,
+            KNIGHTS_ALLY_LIST,
+            KNIGHTS_POINT_REQ,
+            KNIGHTS_POINT_METHOD,
+            KNIGHTS_DONATE_POINTS,
+            KNIGHTS_HANDOVER_VICECHIEF_LIST,
+            KNIGHTS_HANDOVER_REQ,
+            KNIGHTS_HANDOVER,
+            KNIGHTS_DONATION_LIST,
+            KNIGHTS_UPDATENOTICE,
+            KNIGHTS_UPDATEMEMO,
+            KNIGHTS_TOP10,
+            KNIGHTS_UNK1,
+            KNIGHTS_LADDER_POINTS,
+            KNIGHTS_VS_LIST,
         ];
         assert!(handled.len() >= 38);
     }
@@ -5380,7 +5579,12 @@ mod tests {
     /// knights_error packet always uses WIZKNIGHTS_PROCESS opcode.
     #[test]
     fn test_knights_error_uses_process_opcode() {
-        for sub in [KNIGHTS_JOIN, KNIGHTS_WITHDRAW, KNIGHTS_ADMIT, KNIGHTS_REJECT] {
+        for sub in [
+            KNIGHTS_JOIN,
+            KNIGHTS_WITHDRAW,
+            KNIGHTS_ADMIT,
+            KNIGHTS_REJECT,
+        ] {
             let pkt = knights_error(sub, 0xFF);
             assert_eq!(pkt.opcode, WIZKNIGHTS_PROCESS);
             assert_eq!(pkt.data.len(), 2);

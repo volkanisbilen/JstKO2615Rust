@@ -18,7 +18,6 @@ use ko_db::repositories::coefficient::CoefficientRepository;
 use ko_db::repositories::daily_quest::DailyQuestRepository;
 use ko_db::repositories::draki_tower::DrakiTowerRepository;
 use ko_db::repositories::dungeon_defence::DungeonDefenceRepository;
-use ko_db::repositories::manes_survival::ManesSurvivalRepository;
 use ko_db::repositories::event_schedule::EventScheduleRepository;
 use ko_db::repositories::forgotten_temple::ForgottenTempleRepository;
 use ko_db::repositories::item::ItemRepository;
@@ -30,6 +29,7 @@ use ko_db::repositories::knights::KnightsRepository;
 use ko_db::repositories::knights_cape::KnightsCapeRepository;
 use ko_db::repositories::level_up::LevelUpRepository;
 use ko_db::repositories::magic::MagicRepository;
+use ko_db::repositories::manes_survival::ManesSurvivalRepository;
 use ko_db::repositories::mining::MiningRepository;
 use ko_db::repositories::monster_event::MonsterEventRepository;
 use ko_db::repositories::npc::NpcRepository;
@@ -46,7 +46,9 @@ use ko_db::repositories::zone_rewards::ZoneRewardsRepository;
 use ko_db::DbPool;
 use ko_protocol::smd::SmdFile;
 
+use crate::clan_constants::CLAN_TYPE_ACCREDITED5;
 use crate::npc::{NpcInstance, NpcTemplate};
+use crate::systems::daily_reset::get_knights_grade;
 use crate::zone::{calc_region, ObjectEventInfo, ZoneState};
 
 use super::{
@@ -1386,7 +1388,11 @@ impl WorldState {
                 self.npc_instances.insert(nid, instance);
                 // Non-monster NPCs (merchants, event NPCs, etc.) never die in combat.
                 // If their template HP is 0, use 1 so is_npc_dead() doesn't filter them out.
-                let init_hp = if !tmpl.is_monster && tmpl.max_hp == 0 { 1 } else { tmpl.max_hp as i32 };
+                let init_hp = if !tmpl.is_monster && tmpl.max_hp == 0 {
+                    1
+                } else {
+                    tmpl.max_hp as i32
+                };
                 self.npc_hp.insert(nid, init_hp);
 
                 if tmpl.is_monster && tmpl.search_range > 0 {
@@ -1666,7 +1672,11 @@ impl WorldState {
 
                 zone.add_npc(region_x, region_z, nid);
                 self.npc_instances.insert(nid, instance);
-                let init_hp = if tmpl.max_hp == 0 { 1 } else { tmpl.max_hp as i32 };
+                let init_hp = if tmpl.max_hp == 0 {
+                    1
+                } else {
+                    tmpl.max_hp as i32
+                };
                 self.npc_hp.insert(nid, init_hp);
                 obj_npc_count += 1;
             }
@@ -1727,7 +1737,14 @@ impl WorldState {
                 id: row.id_num as u16,
                 flag: row.flag as u8,
                 nation: row.nation as u8,
-                grade: 5,
+                // Accredited and Royal clan grades are rank-driven and the
+                // client expects grade 1 even before KNIGHTS_RATING reloads.
+                // Training/Promoted clans retain the point-based grade.
+                grade: if row.flag as u8 >= CLAN_TYPE_ACCREDITED5 {
+                    1
+                } else {
+                    get_knights_grade(row.points.max(0) as u32)
+                },
                 ranking: row.ranking as u8,
                 name: row.id_name.clone(),
                 chief: row.chief.clone(),

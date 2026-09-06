@@ -108,7 +108,9 @@ fn attendance_seconds_remaining(now: DateTime<Utc>) -> i32 {
 }
 
 pub async fn handle_roulette(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
-    if session.state() != SessionState::InGame { return Ok(()); }
+    if session.state() != SessionState::InGame {
+        return Ok(());
+    }
     let mut reader = PacketReader::new(&pkt.data);
     let sub = reader.read_u8().unwrap_or(0);
     let pool = session.pool().clone();
@@ -153,13 +155,18 @@ pub async fn handle_roulette(session: &mut ClientSession, pkt: Packet) -> anyhow
         session.send_packet(&response).await?;
         return Ok(());
     }
-    let Some(name) = character_name(session) else { return Ok(()); };
+    let Some(name) = character_name(session) else {
+        return Ok(());
+    };
     match sub {
         6 => roulette_open(session, &repo).await,
         7 => roulette_spin(session, &repo, &name, reader.read_i32().unwrap_or(1)).await,
         8 => roulette_reveal(session, &repo, &name, reader.read_i32().unwrap_or(1)).await,
         9 => roulette_history(session, &repo, &name, reader.read_i32().unwrap_or(1)).await,
-        _ => { debug!("[{}] native roulette unknown sub={sub}", session.addr()); Ok(()) }
+        _ => {
+            debug!("[{}] native roulette unknown sub={sub}", session.addr());
+            Ok(())
+        }
     }
 }
 
@@ -213,7 +220,10 @@ async fn native_event_hub_select(
         .with_session(session.session_id(), |h| h.native_event_hub_armed)
         .unwrap_or(false);
     if !armed {
-        debug!("[{}] ignored stale native hub selector id={event_id}", session.addr());
+        debug!(
+            "[{}] ignored stale native hub selector id={event_id}",
+            session.addr()
+        );
         return Ok(());
     }
     session.world().update_session(session.session_id(), |h| {
@@ -235,20 +245,24 @@ async fn native_event_hub_select(
     }
 
     let result = match event_id {
-        EVENT_HUB_ATTENDANCE | EVENT_HUB_ATTENDANCE_SELECT => {
-            attendance_open(session).await
-        }
+        EVENT_HUB_ATTENDANCE | EVENT_HUB_ATTENDANCE_SELECT => attendance_open(session).await,
         EVENT_HUB_ROULETTE => roulette_open(session, repo).await,
         EVENT_HUB_JIGSAW => {
-            let Some(name) = character_name(session) else { return Ok(()); };
+            let Some(name) = character_name(session) else {
+                return Ok(());
+            };
             jigsaw_open(session, repo, &name).await
         }
         EVENT_HUB_COIN => {
-            let Some(name) = character_name(session) else { return Ok(()); };
+            let Some(name) = character_name(session) else {
+                return Ok(());
+            };
             coin_open(session, repo, &name).await
         }
         EVENT_HUB_MARBLE => {
-            let Some(name) = character_name(session) else { return Ok(()); };
+            let Some(name) = character_name(session) else {
+                return Ok(());
+            };
             marble_open(session, repo, &name).await
         }
         _ => Ok(()),
@@ -256,17 +270,16 @@ async fn native_event_hub_select(
 
     info!(
         "[{}] native event hub selected: id={} key={}",
-        session.addr(), event_id, event_key
+        session.addr(),
+        event_id,
+        event_key
     );
     result
 }
 
 /// Open the v2615 Event Post-Up board after the Akara menu selection has
 /// validated NPC existence, zone, distance and stored event_sid=31774.
-pub async fn open_board_from_npc(
-    session: &mut ClientSession,
-    board_id: i32,
-) -> anyhow::Result<()> {
+pub async fn open_board_from_npc(session: &mut ClientSession, board_id: i32) -> anyhow::Result<()> {
     let Some(name) = character_name(session) else {
         return Ok(());
     };
@@ -355,7 +368,9 @@ pub async fn try_open_akara_menu_from_target(
     );
     info!(
         "[{}] Akara menu opened: nid={} proto={}",
-        session.addr(), target_nid, BOARD_NPC_PROTO_ID
+        session.addr(),
+        target_nid,
+        BOARD_NPC_PROTO_ID
     );
     Ok(true)
 }
@@ -365,7 +380,10 @@ pub async fn handle_akara_menu_event(
     event: i32,
 ) -> anyhow::Result<bool> {
     if !validate_akara_context(session) {
-        warn!("[{}] ignored stale Akara menu event={event}", session.addr());
+        warn!(
+            "[{}] ignored stale Akara menu event={event}",
+            session.addr()
+        );
         return Ok(true);
     }
 
@@ -387,9 +405,11 @@ pub async fn handle_akara_menu_event(
                 &empty,
                 "31774_Akara.lua",
             );
-            session.world().update_session(session.session_id(), |state| {
-                state.akara_altar_armed = true;
-            });
+            session
+                .world()
+                .update_session(session.session_id(), |state| {
+                    state.akara_altar_armed = true;
+                });
             info!(
                 "[{}] native Akara Altar UIF dispatched: select_flag=0x{:02X}",
                 session.addr(),
@@ -413,9 +433,11 @@ pub async fn handle_akara_menu_event(
                 &empty,
                 "31774_Akara.lua",
             );
-            session.world().update_session(session.session_id(), |state| {
-                state.akara_altar_armed = false;
-            });
+            session
+                .world()
+                .update_session(session.session_id(), |state| {
+                    state.akara_altar_armed = false;
+                });
             info!(
                 "[{}] native I Love Knight Online UIF dispatched: select_flag=0x{:02X}",
                 session.addr(),
@@ -466,7 +488,9 @@ pub async fn try_handle_akara_altar(
             session.send_packet(&out).await?;
             info!(
                 "[{}] Akara auction list: sub={} rows={}",
-                session.addr(), response_sub, rows.len()
+                session.addr(),
+                response_sub,
+                rows.len()
             );
         }
         AKARA_AUCTION_BID_SUB => {
@@ -484,7 +508,9 @@ pub async fn try_handle_akara_altar(
         _ => {
             debug!(
                 "[{}] Akara auction unknown sub={} bytes={}",
-                session.addr(), sub, pkt.data.len()
+                session.addr(),
+                sub,
+                pkt.data.len()
             );
         }
     }
@@ -550,15 +576,18 @@ async fn handle_akara_bid(
     session.send_packet(&out).await?;
     info!(
         "[{}] Akara auction bid: character={} slot={} item={} displayed={} offered={} result={}",
-        session.addr(), name, slot, item_id, displayed_bid, offered_bid, result
+        session.addr(),
+        name,
+        slot,
+        item_id,
+        displayed_bid,
+        offered_bid,
+        result
     );
     Ok(())
 }
 
-fn akara_auction_list_packet(
-    sub: u8,
-    rows: &[(i16, i32, i16, i64, i64, i32, i32)],
-) -> Packet {
+fn akara_auction_list_packet(sub: u8, rows: &[(i16, i32, i16, i64, i64, i32, i32)]) -> Packet {
     let mut out = Packet::new(Opcode::WizCostume as u8);
     out.write_u8(sub);
     out.write_u16(1); // load result
@@ -640,13 +669,18 @@ async fn board_reply(
         (dx * dx + dz * dz).sqrt() <= MAX_NPC_RANGE
     });
     let correct = normalized.eq_ignore_ascii_case("I Love Knight Online");
-    let Some(name) = character_name(session) else { return Ok(()); };
+    let Some(name) = character_name(session) else {
+        return Ok(());
+    };
 
     let mut result = 0i32;
     if npc_ok && correct {
         match repo.reserve_board_claim(&name).await? {
             Some(claim_id) => {
-                if session.world().give_item(session.session_id(), BOARD_REWARD_ITEM_ID, 1) {
+                if session
+                    .world()
+                    .give_item(session.session_id(), BOARD_REWARD_ITEM_ID, 1)
+                {
                     result = 1;
                 } else {
                     repo.cancel_board_claim(claim_id, &name).await?;
@@ -669,7 +703,12 @@ async fn board_reply(
     session.send_packet(&out).await?;
     info!(
         "[{}] native board reply: character={} board_id={} npc_ok={} correct={} result={}",
-        session.addr(), name, board_id, npc_ok, correct, result
+        session.addr(),
+        name,
+        board_id,
+        npc_ok,
+        correct,
+        result
     );
     Ok(())
 }
@@ -704,11 +743,7 @@ fn write_board_body(out: &mut Packet, history: &[(String, i32, i32)]) {
     }
 }
 
-fn board_reply_packet(
-    board_id: i32,
-    result: i32,
-    history: &[(String, i32, i32)],
-) -> Packet {
+fn board_reply_packet(board_id: i32, result: i32, history: &[(String, i32, i32)]) -> Packet {
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
     out.write_u8(BOARD_REPLY_SUB);
     out.write_i32(board_id);
@@ -742,7 +777,10 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
     let pool = session.pool().clone();
     let repo = ko_db::repositories::daily_reward::DailyRewardRepository::new(&pool);
     let rewards = repo.load_all().await.unwrap_or_else(|e| {
-        warn!("[{}] native attendance load_all DB error: {e}", session.addr());
+        warn!(
+            "[{}] native attendance load_all DB error: {e}",
+            session.addr()
+        );
         Vec::new()
     });
 
@@ -807,7 +845,13 @@ async fn attendance_open(session: &mut ClientSession) -> anyhow::Result<()> {
     }
 
     let cumulative_items = cumulative
-        .map(|row| [row.item1.unwrap_or(0), row.item2.unwrap_or(0), row.item3.unwrap_or(0)])
+        .map(|row| {
+            [
+                row.item1.unwrap_or(0),
+                row.item2.unwrap_or(0),
+                row.item3.unwrap_or(0),
+            ]
+        })
         .unwrap_or([0; 3]);
     out.write_i16(cumulative_items.len() as i16);
     for (index, item_id) in cumulative_items.into_iter().enumerate() {
@@ -884,18 +928,34 @@ async fn roulette_spin(
     let kind = native_type(client_type);
     let rewards = repo.roulette_rewards(kind).await?;
     let total_weight: i32 = rewards.iter().map(|r| r.weight.max(1)).sum();
-    if rewards.is_empty() || total_weight <= 0 { return Ok(()); }
-    if repo.roulette_pending(name).await?.and_then(|p| p.pending_item_id).is_some() {
+    if rewards.is_empty() || total_weight <= 0 {
+        return Ok(());
+    }
+    if repo
+        .roulette_pending(name)
+        .await?
+        .and_then(|p| p.pending_item_id)
+        .is_some()
+    {
         let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-        out.write_u8(7); out.write_i32(client_type); out.write_i32(2);
+        out.write_u8(7);
+        out.write_i32(client_type);
+        out.write_i32(2);
         session.send_packet(&out).await?;
         return Ok(());
     }
     if client_type == ROULETTE_KC_TYPE
-        && !knight_cash::cash_lose(session.world(), &session.pool().clone(), session.session_id(), ROULETTE_KC_COST)
+        && !knight_cash::cash_lose(
+            session.world(),
+            &session.pool().clone(),
+            session.session_id(),
+            ROULETTE_KC_COST,
+        )
     {
         let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-        out.write_u8(7); out.write_i32(client_type); out.write_i32(20);
+        out.write_u8(7);
+        out.write_i32(client_type);
+        out.write_i32(20);
         session.send_packet(&out).await?;
         return Ok(());
     }
@@ -903,13 +963,23 @@ async fn roulette_spin(
     let mut selected = &rewards[0];
     for reward in &rewards {
         roll -= reward.weight.max(1);
-        if roll < 0 { selected = reward; break; }
+        if roll < 0 {
+            selected = reward;
+            break;
+        }
     }
-    if !repo.reserve_roulette_result(name, selected).await? { return Ok(()); }
+    if !repo.reserve_roulette_result(name, selected).await? {
+        return Ok(());
+    }
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-    out.write_u8(7); out.write_i32(client_type); out.write_i32(1);
+    out.write_u8(7);
+    out.write_i32(client_type);
+    out.write_i32(1);
     session.send_packet(&out).await?;
-    info!("native roulette reserved: character={name} type={kind} slot={}", selected.slot);
+    info!(
+        "native roulette reserved: character={name} type={kind} slot={}",
+        selected.slot
+    );
     Ok(())
 }
 
@@ -922,20 +992,35 @@ async fn roulette_reveal(
     let pending = repo.roulette_pending(name).await?;
     let Some(p) = pending.filter(|p| p.pending_item_id.is_some()) else {
         let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-        out.write_u8(8); out.write_i32(client_type); out.write_i32(3);
-        session.send_packet(&out).await?; return Ok(());
+        out.write_u8(8);
+        out.write_i32(client_type);
+        out.write_i32(3);
+        session.send_packet(&out).await?;
+        return Ok(());
     };
     let item_id = p.pending_item_id.unwrap_or(0);
     let count = p.pending_item_count.unwrap_or(1).max(1) as u16;
-    if !session.world().check_weight(session.session_id(), item_id as u32, count) {
+    if !session
+        .world()
+        .check_weight(session.session_id(), item_id as u32, count)
+    {
         let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-        out.write_u8(8); out.write_i32(client_type); out.write_i32(21);
-        session.send_packet(&out).await?; return Ok(());
+        out.write_u8(8);
+        out.write_i32(client_type);
+        out.write_i32(21);
+        session.send_packet(&out).await?;
+        return Ok(());
     }
     let completed = repo.complete_roulette(name).await?;
-    if completed.as_ref().and_then(|v| v.pending_item_id).is_none() { return Ok(()); }
-    if !session.world().give_item(session.session_id(), item_id as u32, count) {
-        warn!("native roulette give_item failed: {name} item={item_id}"); return Ok(());
+    if completed.as_ref().and_then(|v| v.pending_item_id).is_none() {
+        return Ok(());
+    }
+    if !session
+        .world()
+        .give_item(session.session_id(), item_id as u32, count)
+    {
+        warn!("native roulette give_item failed: {name} item={item_id}");
+        return Ok(());
     }
     send_roulette_result(session, client_type, &p).await
 }
@@ -948,11 +1033,18 @@ async fn send_roulette_result(
     let item = p.pending_item_id.unwrap_or(0);
     let count = p.pending_item_count.unwrap_or(1) as i32;
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-    out.write_u8(8); out.write_i32(client_type); out.write_i32(1);
+    out.write_u8(8);
+    out.write_i32(client_type);
+    out.write_i32(1);
     out.write_i32(p.pending_slot.unwrap_or(0) as i32 + 1);
-    out.write_i32(item); out.write_i32(count);
-    out.write_i32(item); out.write_i32(count); out.write_i32(0);
-    out.write_i32(0); out.write_i32(0); out.write_i32(0);
+    out.write_i32(item);
+    out.write_i32(count);
+    out.write_i32(item);
+    out.write_i32(count);
+    out.write_i32(0);
+    out.write_i32(0);
+    out.write_i32(0);
+    out.write_i32(0);
     session.send_packet(&out).await?;
     Ok(())
 }
@@ -965,22 +1057,30 @@ async fn roulette_history(
 ) -> anyhow::Result<()> {
     let rows = repo.roulette_history(name).await?;
     let mut out = Packet::new(Opcode::WizContinousPacketData as u8);
-    out.write_u8(9); out.write_i32(client_type); out.write_i32(1);
+    out.write_u8(9);
+    out.write_i32(client_type);
+    out.write_i32(1);
     out.write_i32(rows.len().min(20) as i32);
     for row in rows.iter().take(20) {
-        out.write_i32(row.item_id); out.write_i32(row.item_count as i32); out.write_i32(row.roulette_type as i32);
+        out.write_i32(row.item_id);
+        out.write_i32(row.item_count as i32);
+        out.write_i32(row.roulette_type as i32);
     }
     session.send_packet(&out).await?;
     Ok(())
 }
 
 pub async fn handle_jigsaw_coin(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
-    if session.state() != SessionState::InGame { return Ok(()); }
+    if session.state() != SessionState::InGame {
+        return Ok(());
+    }
     let mut reader = PacketReader::new(&pkt.data);
     let sub = reader.read_u8().unwrap_or(0);
     let pool = session.pool().clone();
     let repo = NativeEventsRepository::new(&pool);
-    let Some(name) = character_name(session) else { return Ok(()); };
+    let Some(name) = character_name(session) else {
+        return Ok(());
+    };
     match sub {
         1 if repo.is_active("jigsaw").await.unwrap_or(false) => {
             jigsaw_open(session, &repo, &name).await
@@ -990,7 +1090,9 @@ pub async fn handle_jigsaw_coin(session: &mut ClientSession, pkt: Packet) -> any
                 jigsaw_open(session, &repo, &name).await
             } else if repo.is_active("coin").await.unwrap_or(false) {
                 coin_open(session, &repo, &name).await
-            } else { Ok(()) }
+            } else {
+                Ok(())
+            }
         }
         5 if repo.is_active("jigsaw").await.unwrap_or(false) => {
             jigsaw_piece(session, &repo, &name, reader.read_u8().unwrap_or(255)).await
@@ -1001,55 +1103,131 @@ pub async fn handle_jigsaw_coin(session: &mut ClientSession, pkt: Packet) -> any
         2 if repo.is_active("coin").await.unwrap_or(false) => {
             coin_action(session, &repo, &name, reader.read_u8().unwrap_or(0)).await
         }
-        _ => { debug!("[{}] native 0xCC ignored sub={sub}", session.addr()); Ok(()) }
+        _ => {
+            debug!("[{}] native 0xCC ignored sub={sub}", session.addr());
+            Ok(())
+        }
     }
 }
 
-async fn jigsaw_open(session: &mut ClientSession, repo: &NativeEventsRepository<'_>, name: &str) -> anyhow::Result<()> {
+async fn jigsaw_open(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+    name: &str,
+) -> anyhow::Result<()> {
     let state = repo.jigsaw_state(name).await?;
     let mut out = Packet::new(Opcode::WizEnchant as u8);
-    out.write_u8(1); out.write_u8(1);
-    out.write_u8(state.piece_counts.iter().map(|v| *v as i32).sum::<i32>().min(255) as u8);
+    out.write_u8(1);
+    out.write_u8(1);
+    out.write_u8(
+        state
+            .piece_counts
+            .iter()
+            .map(|v| *v as i32)
+            .sum::<i32>()
+            .min(255) as u8,
+    );
     out.write_u8(8);
-    for i in 0..8 { out.write_u8(state.piece_counts.get(i).copied().unwrap_or(0).clamp(0,255) as u8); }
-    for i in 0..9 { out.write_u8(state.reward_claimed.get(i).copied().unwrap_or(false) as u8); }
+    for i in 0..8 {
+        out.write_u8(
+            state
+                .piece_counts
+                .get(i)
+                .copied()
+                .unwrap_or(0)
+                .clamp(0, 255) as u8,
+        );
+    }
+    for i in 0..9 {
+        out.write_u8(state.reward_claimed.get(i).copied().unwrap_or(false) as u8);
+    }
     out.write_u8(0);
-    session.send_packet(&out).await?; Ok(())
+    session.send_packet(&out).await?;
+    Ok(())
 }
 
-async fn jigsaw_piece(session: &mut ClientSession, repo: &NativeEventsRepository<'_>, name: &str, piece: u8) -> anyhow::Result<()> {
+async fn jigsaw_piece(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+    name: &str,
+    piece: u8,
+) -> anyhow::Result<()> {
     let Some(_state) = repo.add_jigsaw_piece(name, piece as i16).await? else {
         let mut out = Packet::new(Opcode::WizEnchant as u8);
-        out.write_u8(1); out.write_u8(4); out.write_u8(2);
-        session.send_packet(&out).await?; return Ok(());
+        out.write_u8(1);
+        out.write_u8(4);
+        out.write_u8(2);
+        session.send_packet(&out).await?;
+        return Ok(());
     };
     let mut out = Packet::new(Opcode::WizEnchant as u8);
-    out.write_u8(1); out.write_u8(3); out.write_u8(piece); out.write_u8(0);
-    session.send_packet(&out).await?; Ok(())
+    out.write_u8(1);
+    out.write_u8(3);
+    out.write_u8(piece);
+    out.write_u8(0);
+    session.send_packet(&out).await?;
+    Ok(())
 }
 
-async fn jigsaw_claim(session: &mut ClientSession, repo: &NativeEventsRepository<'_>, name: &str, index: u8) -> anyhow::Result<()> {
+async fn jigsaw_claim(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+    name: &str,
+    index: u8,
+) -> anyhow::Result<()> {
     let grant = repo.claim_jigsaw(name, index as i16).await?;
     let success = if let Some(g) = grant {
-        session.world().give_item(session.session_id(), g.item_id as u32, g.item_count.max(1) as u16)
-    } else { false };
-    let state = repo.jigsaw_state(name).await.unwrap_or(NativeJigsawState { piece_counts: vec![0;8], reward_claimed: vec![false;9] });
+        session.world().give_item(
+            session.session_id(),
+            g.item_id as u32,
+            g.item_count.max(1) as u16,
+        )
+    } else {
+        false
+    };
+    let state = repo.jigsaw_state(name).await.unwrap_or(NativeJigsawState {
+        piece_counts: vec![0; 8],
+        reward_claimed: vec![false; 9],
+    });
     let mut out = Packet::new(Opcode::WizEnchant as u8);
-    out.write_u8(1); out.write_u8(2); out.write_u8(if success {1} else {4});
-    if success { for i in 0..9 { out.write_u8(state.reward_claimed.get(i).copied().unwrap_or(false) as u8); } }
-    session.send_packet(&out).await?; Ok(())
+    out.write_u8(1);
+    out.write_u8(2);
+    out.write_u8(if success { 1 } else { 4 });
+    if success {
+        for i in 0..9 {
+            out.write_u8(state.reward_claimed.get(i).copied().unwrap_or(false) as u8);
+        }
+    }
+    session.send_packet(&out).await?;
+    Ok(())
 }
 
-async fn coin_open(session: &mut ClientSession, repo: &NativeEventsRepository<'_>, name: &str) -> anyhow::Result<()> {
+async fn coin_open(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+    name: &str,
+) -> anyhow::Result<()> {
     let _state = repo.coin_state(name).await?;
     let mut out = Packet::new(Opcode::WizEnchant as u8);
-    out.write_u8(2); out.write_u8(1); out.write_u8(1); out.write_u8(1);
-    session.send_packet(&out).await?; Ok(())
+    out.write_u8(2);
+    out.write_u8(1);
+    out.write_u8(1);
+    out.write_u8(1);
+    session.send_packet(&out).await?;
+    Ok(())
 }
 
-async fn coin_action(session: &mut ClientSession, repo: &NativeEventsRepository<'_>, name: &str, action: u8) -> anyhow::Result<()> {
+async fn coin_action(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+    name: &str,
+    action: u8,
+) -> anyhow::Result<()> {
     let event_type = action.clamp(1, 5);
-    let state = repo.add_coin_point(name).await?.unwrap_or(repo.coin_state(name).await?);
+    let state = repo
+        .add_coin_point(name)
+        .await?
+        .unwrap_or(repo.coin_state(name).await?);
     if state.points >= 8 {
         if let Some(grant) = repo.claim_coin(name, (event_type - 1) as i16).await? {
             let _ = session.world().give_item(
@@ -1060,19 +1238,29 @@ async fn coin_action(session: &mut ClientSession, repo: &NativeEventsRepository<
         }
     }
     let mut out = Packet::new(Opcode::WizEnchant as u8);
-    out.write_u8(2); out.write_u8(3); out.write_u8(1);
-    out.write_u8(event_type); out.write_u8(state.points.clamp(0,8) as u8);
-    session.send_packet(&out).await?; Ok(())
+    out.write_u8(2);
+    out.write_u8(3);
+    out.write_u8(1);
+    out.write_u8(event_type);
+    out.write_u8(state.points.clamp(0, 8) as u8);
+    session.send_packet(&out).await?;
+    Ok(())
 }
 
 pub async fn handle_marble(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
-    if session.state() != SessionState::InGame { return Ok(()); }
+    if session.state() != SessionState::InGame {
+        return Ok(());
+    }
     let mut reader = PacketReader::new(&pkt.data);
     let sub = reader.read_u8().unwrap_or(0);
     let pool = session.pool().clone();
     let repo = NativeEventsRepository::new(&pool);
-    if !repo.is_active("marble").await.unwrap_or(false) { return Ok(()); }
-    let Some(name) = character_name(session) else { return Ok(()); };
+    if !repo.is_active("marble").await.unwrap_or(false) {
+        return Ok(());
+    }
+    let Some(name) = character_name(session) else {
+        return Ok(());
+    };
     match sub {
         1 => marble_open(session, &repo, &name).await,
         2 => marble_roll(session, &repo, &name).await,
@@ -1081,33 +1269,66 @@ pub async fn handle_marble(session: &mut ClientSession, pkt: Packet) -> anyhow::
     }
 }
 
-async fn marble_open(session: &mut ClientSession, repo: &NativeEventsRepository<'_>, name: &str) -> anyhow::Result<()> {
+async fn marble_open(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+    name: &str,
+) -> anyhow::Result<()> {
     let state = repo.marble_state(name).await?;
     let mut out = Packet::new(Opcode::WizAbility as u8);
-    out.write_u8(1); out.write_u8(1);
-    out.write_u8(1); out.write_u8(state.position as u8); out.write_u8(0);
-    out.write_u8(state.rolls_today.clamp(0,255) as u8); out.write_u8(state.laps.clamp(0,255) as u8);
+    out.write_u8(1);
+    out.write_u8(1);
+    out.write_u8(1);
+    out.write_u8(state.position as u8);
+    out.write_u8(0);
+    out.write_u8(state.rolls_today.clamp(0, 255) as u8);
+    out.write_u8(state.laps.clamp(0, 255) as u8);
     out.write_u64(0);
-    session.send_packet(&out).await?; Ok(())
+    session.send_packet(&out).await?;
+    Ok(())
 }
 
-async fn marble_roll(session: &mut ClientSession, repo: &NativeEventsRepository<'_>, name: &str) -> anyhow::Result<()> {
+async fn marble_roll(
+    session: &mut ClientSession,
+    repo: &NativeEventsRepository<'_>,
+    name: &str,
+) -> anyhow::Result<()> {
     let die = rand::thread_rng().gen_range(1..=6) as i16;
-    let Some((state,tile)) = repo.roll_marble(name, die).await? else {
+    let Some((state, tile)) = repo.roll_marble(name, die).await? else {
         let mut out = Packet::new(Opcode::WizAbility as u8);
-        out.write_u8(2); out.write_u8(3); session.send_packet(&out).await?; return Ok(());
+        out.write_u8(2);
+        out.write_u8(3);
+        session.send_packet(&out).await?;
+        return Ok(());
     };
     if tile.item_id > 0 && tile.item_count > 0 {
-        let _ = session.world().give_item(session.session_id(), tile.item_id as u32, tile.item_count as u16);
+        let _ = session.world().give_item(
+            session.session_id(),
+            tile.item_id as u32,
+            tile.item_count as u16,
+        );
     }
     let mut ack = Packet::new(Opcode::WizAbility as u8);
-    ack.write_u8(2); ack.write_u8(1); session.send_packet(&ack).await?;
+    ack.write_u8(2);
+    ack.write_u8(1);
+    session.send_packet(&ack).await?;
     let mut out = Packet::new(Opcode::WizAbility as u8);
-    out.write_u8(6); out.write_u8(1); out.write_u8(die as u8);
-    out.write_u8(1); out.write_u8(state.position as u8); out.write_u8(tile.tile_type as u8);
-    out.write_u8(state.rolls_today.clamp(0,255) as u8); out.write_u8(0); out.write_u8(0); out.write_u8(0); out.write_u8(0);
+    out.write_u8(6);
+    out.write_u8(1);
+    out.write_u8(die as u8);
+    out.write_u8(1);
+    out.write_u8(state.position as u8);
+    out.write_u8(tile.tile_type as u8);
+    out.write_u8(state.rolls_today.clamp(0, 255) as u8);
+    out.write_u8(0);
+    out.write_u8(0);
+    out.write_u8(0);
+    out.write_u8(0);
     session.send_packet(&out).await?;
-    info!("native marble roll: character={name} die={die} position={}", state.position);
+    info!(
+        "native marble roll: character={name} die={die} position={}",
+        state.position
+    );
     Ok(())
 }
 
@@ -1124,7 +1345,7 @@ mod tests {
     #[test]
     fn unavailable_packet_uses_requested_sub() {
         let packet = event_unavailable(0x9C, 6);
-        assert_eq!(packet.data, vec![6,0,0,0,0]);
+        assert_eq!(packet.data, vec![6, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -1163,19 +1384,14 @@ mod tests {
 
     #[test]
     fn board_history_rows_match_three_strings_and_timestamp() {
-        let open = board_open_packet(
-            0,
-            &[("a".to_string(), 811_084_000, 1_700_000_000)],
-        );
+        let open = board_open_packet(0, &[("a".to_string(), 811_084_000, 1_700_000_000)]);
         assert_eq!(&open.data[25..27], &[1, 0]);
         assert_eq!(
             &open.data[27..],
             &[
-                1, b'a',
-                20, b'I', b' ', b'L', b'o', b'v', b'e', b' ', b'K', b'n', b'i', b'g',
-                b'h', b't', b' ', b'O', b'n', b'l', b'i', b'n', b'e',
-                9, b'8', b'1', b'1', b'0', b'8', b'4', b'0', b'0', b'0',
-                0, 241, 83, 101,
+                1, b'a', 20, b'I', b' ', b'L', b'o', b'v', b'e', b' ', b'K', b'n', b'i', b'g',
+                b'h', b't', b' ', b'O', b'n', b'l', b'i', b'n', b'e', 9, b'8', b'1', b'1', b'0',
+                b'8', b'4', b'0', b'0', b'0', 0, 241, 83, 101,
             ]
         );
     }

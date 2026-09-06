@@ -731,6 +731,40 @@ impl WorldState {
         summon_type: u8,
         direction: u8,
     ) -> Vec<NpcId> {
+        self.spawn_event_npc_ex_with_metadata(
+            s_sid,
+            is_monster,
+            zone_id,
+            x,
+            0.0,
+            z,
+            count,
+            event_room,
+            summon_type,
+            direction,
+            0,
+        )
+    }
+
+    /// Event spawn variant preserving placement data that is significant for
+    /// scripted map objects. UTC doors use both their DB Y/facing values and
+    /// `trap_number`; the C++ SpawnEventNpc call passes all three separately
+    /// from its summon/event type.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_event_npc_ex_with_metadata(
+        &self,
+        s_sid: u16,
+        is_monster: bool,
+        zone_id: u16,
+        x: f32,
+        y: f32,
+        z: f32,
+        count: u16,
+        event_room: u16,
+        summon_type: u8,
+        direction: u8,
+        trap_number: u8,
+    ) -> Vec<NpcId> {
         let tmpl = match self.get_npc_template(s_sid, is_monster) {
             Some(t) => t,
             None => return Vec::new(),
@@ -777,7 +811,7 @@ impl WorldState {
                 is_monster,
                 zone_id,
                 x: spawn_x,
-                y: 0.0,
+                y,
                 z: spawn_z,
                 direction,
                 region_x,
@@ -786,7 +820,7 @@ impl WorldState {
                 object_type: 0,
                 nation: runtime_nation,
                 special_type: 0,
-                trap_number: 0,
+                trap_number: trap_number as i16,
                 event_room,
                 is_event_npc: true,
                 summon_type,
@@ -1206,6 +1240,16 @@ impl WorldState {
     pub fn bot_merchant_data_count(&self) -> usize {
         self.bot_merchant_data.len()
     }
+    /// Get every configured merchant stall in deterministic DB-index order.
+    pub fn get_all_bot_merchant_data(&self) -> Vec<BotMerchantDataRow> {
+        let mut rows: Vec<_> = self
+            .bot_merchant_data
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        rows.sort_by_key(|row| row.n_index);
+        rows
+    }
     /// Look up a user bot by its ID.
     pub fn get_user_bot(&self, id: i32) -> Option<UserBotRow> {
         self.user_bots.get(&id).map(|r| r.clone())
@@ -1226,10 +1270,13 @@ impl WorldState {
     /// Get all loaded farm-bot templates. GM-created PK bots use this only as
     /// an equipment fallback when their target zone has no class template.
     pub fn get_all_bot_templates(&self) -> Vec<BotHandlerFarmRow> {
-        self.bot_farm_data
+        let mut rows: Vec<_> = self
+            .bot_farm_data
             .iter()
             .map(|entry| entry.value().clone())
-            .collect()
+            .collect();
+        rows.sort_by_key(|row| row.id);
+        rows
     }
     /// Get a snapshot of the bot knights ranking.
     pub fn get_bot_knights_rank(&self) -> Vec<BotKnightsRankRow> {

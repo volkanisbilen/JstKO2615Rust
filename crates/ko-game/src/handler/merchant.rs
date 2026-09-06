@@ -95,14 +95,10 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         }
         MERCHANT_BUY_BUY => buying_merchant_buy(session, &mut reader).await,
         MERCHANT_BUY_CLOSE => buying_merchant_close_handler(session).await,
-        MERCHANT_OFFICIAL_LIST => {
-            merchant_official_list(session, &mut reader).await
-        }
+        MERCHANT_OFFICIAL_LIST => merchant_official_list(session, &mut reader).await,
         // v2600: merchant preview via WIZ_MERCHANT sub=0x31
         // (replaces separate WIZ_MERCHANTLIST 0xBD opcode)
-        MERCHANT_LIST_PREVIEW => {
-            merchant_list_preview(session, &mut reader, sub_opcode).await
-        }
+        MERCHANT_LIST_PREVIEW => merchant_list_preview(session, &mut reader, sub_opcode).await,
         _ => {
             debug!(
                 "[{}] Merchant unhandled sub-opcode 0x{:02X}",
@@ -135,12 +131,24 @@ pub async fn handle_merchant_list(session: &mut ClientSession, pkt: Packet) -> a
 
     // Must be same zone and event room
     let my_pos = world.get_position(sid).unwrap_or_default();
-    let merch_pos = world.get_position(merchant_sid).unwrap_or_default();
-    if my_pos.zone_id != merch_pos.zone_id {
+    let merch_location = world
+        .get_bot(merchant_sid as u32)
+        .map(|b| (b.zone_id, b.x, b.z))
+        .or_else(|| {
+            world
+                .get_position(merchant_sid)
+                .map(|p| (p.zone_id, p.x, p.z))
+        })
+        .unwrap_or_default();
+    if my_pos.zone_id != merch_location.0 {
         return Ok(());
     }
     let my_room = world.get_event_room(sid);
-    let merch_room = world.get_event_room(merchant_sid);
+    let merch_room = if world.get_bot(merchant_sid as u32).is_some() {
+        0
+    } else {
+        world.get_event_room(merchant_sid)
+    };
     if my_room != merch_room {
         return Ok(());
     }
@@ -242,11 +250,24 @@ async fn merchant_list_preview(
     }
 
     let my_pos = world.get_position(sid).unwrap_or_default();
-    let merch_pos = world.get_position(merchant_sid).unwrap_or_default();
-    if my_pos.zone_id != merch_pos.zone_id {
+    let merch_location = world
+        .get_bot(merchant_sid as u32)
+        .map(|b| (b.zone_id, b.x, b.z))
+        .or_else(|| {
+            world
+                .get_position(merchant_sid)
+                .map(|p| (p.zone_id, p.x, p.z))
+        })
+        .unwrap_or_default();
+    if my_pos.zone_id != merch_location.0 {
         return Ok(());
     }
-    if world.get_event_room(sid) != world.get_event_room(merchant_sid) {
+    let merchant_room = if world.get_bot(merchant_sid as u32).is_some() {
+        0
+    } else {
+        world.get_event_room(merchant_sid)
+    };
+    if world.get_event_room(sid) != merchant_room {
         return Ok(());
     }
 
@@ -378,7 +399,9 @@ pub(crate) async fn merchant_close(session: &mut ClientSession) -> anyhow::Resul
 
     if is_selling {
         // Broadcast to region
-        let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+        let (pos, event_room) = world
+            .with_session(sid, |h| (h.position, h.event_room))
+            .unwrap_or_default();
         world.broadcast_to_3x3(
             pos.zone_id,
             pos.region_x,
@@ -640,7 +663,9 @@ fn merchant_insert(
     }
 
     // Broadcast to region
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -735,6 +760,7 @@ async fn merchant_item_buy(
         Some(m) => m,
         None => return send_merch_buy_fail(session).await,
     };
+    let merchant_is_bot = world.get_bot(merchant_sid as u32).is_some();
 
     // Self-buy prevention — cannot buy from your own shop
     if merchant_sid == sid {
@@ -759,12 +785,20 @@ async fn merchant_item_buy(
 
     // Range check — buyer must be within 35m of merchant, same zone
     let buyer_pos = world.get_position(sid).unwrap_or_default();
-    let seller_pos = world.get_position(merchant_sid).unwrap_or_default();
-    if buyer_pos.zone_id != seller_pos.zone_id {
+    let seller_location = world
+        .get_bot(merchant_sid as u32)
+        .map(|b| (b.zone_id, b.x, b.z))
+        .or_else(|| {
+            world
+                .get_position(merchant_sid)
+                .map(|p| (p.zone_id, p.x, p.z))
+        })
+        .unwrap_or_default();
+    if buyer_pos.zone_id != seller_location.0 {
         return send_merch_buy_fail(session).await;
     }
-    let dx = buyer_pos.x - seller_pos.x;
-    let dz = buyer_pos.z - seller_pos.z;
+    let dx = buyer_pos.x - seller_location.1;
+    let dz = buyer_pos.z - seller_location.2;
     if dx * dx + dz * dz > 35.0 * 35.0 {
         return send_merch_buy_fail(session).await;
     }
@@ -832,6 +866,7 @@ async fn merchant_item_buy(
             {
                 // Seller's inventory matches — proceed
             }
+            _ if merchant_is_bot => {}
             _ => return send_merch_buy_fail(session).await,
         }
     }
@@ -853,7 +888,7 @@ async fn merchant_item_buy(
             return send_merch_buy_fail(session).await;
         }
         // Seller gains KC (skip for offline/bot — C++ only calls CashGain on real users)
-        if !world.is_offline_status(merchant_sid) {
+        if !merchant_is_bot && !world.is_offline_status(merchant_sid) {
             crate::handler::knight_cash::cash_gain(&world, session.pool(), merchant_sid, req_price);
         }
     } else {
@@ -874,6 +909,7 @@ async fn merchant_item_buy(
         let merch_gold = world
             .get_character_info(merchant_sid)
             .map(|c| c.gold)
+            .or_else(|| world.get_bot(merchant_sid as u32).map(|b| b.gold))
             .unwrap_or(0);
         if (merch_gold as u64) + (req_price as u64) > COIN_MAX as u64 {
             world.restore_merchant_buy(merchant_sid, item_slot as usize, item_id, item_count);
@@ -882,7 +918,13 @@ async fn merchant_item_buy(
 
         // Execute gold transfer
         world.gold_lose(sid, req_price);
-        world.gold_gain(merchant_sid, req_price);
+        if merchant_is_bot {
+            world.update_bot(merchant_sid as u32, |bot| {
+                bot.gold = bot.gold.saturating_add(req_price).min(COIN_MAX);
+            });
+        } else {
+            world.gold_gain(merchant_sid, req_price);
+        }
     }
 
     // Daily rank stat: GMTotalSold += req_price (merchant seller earns gold)
@@ -909,7 +951,7 @@ async fn merchant_item_buy(
     // Update seller's inventory to match
     let kind = item_def.kind.unwrap_or(0);
     let fully_sold = leftover_count == 0 || (countable == 0 && kind == ITEM_KIND_UNIQUE);
-    if fully_sold {
+    if fully_sold && !merchant_is_bot {
         // Force merchant slot fully sold out (covers kind==255 edge case)
         world.set_merchant_item(
             merchant_sid,
@@ -927,7 +969,7 @@ async fn merchant_item_buy(
             }
             true
         });
-    } else {
+    } else if !merchant_is_bot {
         // Deduct from seller's inventory
         world.update_inventory(merchant_sid, |inv| {
             let pos = merch.original_slot as usize;
@@ -1648,7 +1690,9 @@ fn buying_merchant_close_broadcast(world: &crate::world::WorldState, sid: crate:
     close_pkt.write_u8(MERCHANT_BUY_CLOSE);
     close_pkt.write_u32(sid as u32);
 
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -1674,7 +1718,9 @@ fn buying_merchant_region_insert(session: &mut ClientSession) -> anyhow::Result<
         result.write_u32(item.item_id);
     }
 
-    let (pos, event_room) = world.with_session(sid, |h| (h.position, h.event_room)).unwrap_or_default();
+    let (pos, event_room) = world
+        .with_session(sid, |h| (h.position, h.event_room))
+        .unwrap_or_default();
     world.broadcast_to_3x3(
         pos.zone_id,
         pos.region_x,
@@ -2829,14 +2875,26 @@ mod tests {
     #[test]
     fn test_sell_buy_no_overlap() {
         let sell = [
-            MERCHANT_OPEN, MERCHANT_CLOSE, MERCHANT_ITEM_ADD,
-            MERCHANT_ITEM_CANCEL, MERCHANT_ITEM_LIST, MERCHANT_ITEM_BUY,
-            MERCHANT_INSERT, MERCHANT_TRADE_CANCEL, MERCHANT_ITEM_PURCHASED,
+            MERCHANT_OPEN,
+            MERCHANT_CLOSE,
+            MERCHANT_ITEM_ADD,
+            MERCHANT_ITEM_CANCEL,
+            MERCHANT_ITEM_LIST,
+            MERCHANT_ITEM_BUY,
+            MERCHANT_INSERT,
+            MERCHANT_TRADE_CANCEL,
+            MERCHANT_ITEM_PURCHASED,
         ];
         let buy = [
-            MERCHANT_BUY_OPEN, MERCHANT_BUY_INSERT, MERCHANT_BUY_LIST,
-            MERCHANT_BUY_BUY, MERCHANT_BUY_SOLD, MERCHANT_BUY_BOUGHT,
-            MERCHANT_BUY_CLOSE, MERCHANT_BUY_REGION_INSERT, MERCHANT_BUY_LIST_NEW,
+            MERCHANT_BUY_OPEN,
+            MERCHANT_BUY_INSERT,
+            MERCHANT_BUY_LIST,
+            MERCHANT_BUY_BUY,
+            MERCHANT_BUY_SOLD,
+            MERCHANT_BUY_BOUGHT,
+            MERCHANT_BUY_CLOSE,
+            MERCHANT_BUY_REGION_INSERT,
+            MERCHANT_BUY_LIST_NEW,
         ];
         for &s in &sell {
             for &b in &buy {

@@ -11,11 +11,11 @@ use std::time::{Duration, Instant};
 use dashmap::{DashMap, DashSet};
 use ko_db::models::{ManesSurvivalMagicRow, ManesSurvivalSpawnRow};
 use ko_protocol::{Opcode, Packet};
-use rand::seq::SliceRandom;
 use parking_lot::RwLock;
+use rand::seq::SliceRandom;
 
-use crate::world::WorldState;
 use crate::world::UserItemSlot;
+use crate::world::WorldState;
 use crate::zone::SessionId;
 
 pub const ZONES_MANES_SURVIVAL: [u16; 4] = [57, 58, 59, 60];
@@ -45,9 +45,8 @@ pub const MANES_MAX_LEVEL: u8 = 30;
 /// Medium-paced 20-minute progression. The 29 entries are the EXP required
 /// to advance from levels 1..=29. Total EXP to level 30 is 11,020.
 const MANES_LEVEL_EXP: [u16; 29] = [
-    100, 120, 140, 160, 180, 200, 220, 240, 260, 280,
-    300, 320, 340, 360, 380, 400, 420, 440, 460, 480,
-    500, 520, 540, 560, 580, 600, 620, 640, 660,
+    100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340, 360, 380, 400, 420, 440, 460,
+    480, 500, 520, 540, 560, 580, 600, 620, 640, 660,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,12 +162,23 @@ impl Default for ManesSurvivalManager {
 impl ManesSurvivalManager {
     pub fn set_spawns(&self, rows: Vec<ManesSurvivalSpawnRow>) -> anyhow::Result<()> {
         if rows.len() != 33 {
-            anyhow::bail!("Manes Survival requires exactly 33 configured monster types; loaded {}", rows.len());
+            anyhow::bail!(
+                "Manes Survival requires exactly 33 configured monster types; loaded {}",
+                rows.len()
+            );
         }
-        if rows.iter().filter(|r| r.npc_id == DARK_DRAGON_SID && r.boss_tier == 3).count() != 1 {
+        if rows
+            .iter()
+            .filter(|r| r.npc_id == DARK_DRAGON_SID && r.boss_tier == 3)
+            .count()
+            != 1
+        {
             anyhow::bail!("Manes Survival requires exactly one Dark Dragon configuration");
         }
-        if rows.iter().any(|r| r.spawn_count <= 0 || r.spawn_x < 0 || r.spawn_z < 0 || r.spawn_range < 0) {
+        if rows
+            .iter()
+            .any(|r| r.spawn_count <= 0 || r.spawn_x < 0 || r.spawn_z < 0 || r.spawn_range < 0)
+        {
             anyhow::bail!("Manes Survival contains invalid spawn count or coordinates");
         }
         *self.spawns.write() = rows;
@@ -194,7 +204,9 @@ impl ManesSurvivalManager {
         Ok(())
     }
 
-    pub fn is_active(&self) -> bool { self.active.load(Ordering::Acquire) }
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
 
     pub fn is_registration_open(&self) -> bool {
         self.registration_open.load(Ordering::Acquire)
@@ -216,7 +228,9 @@ impl ManesSurvivalManager {
         self.is_registration_open() && self.participants.remove(&session_id).is_some()
     }
 
-    pub fn participant_count(&self) -> usize { self.participants.len() }
+    pub fn participant_count(&self) -> usize {
+        self.participants.len()
+    }
 
     pub fn participant_ids(&self) -> Vec<SessionId> {
         self.participants.iter().map(|entry| *entry.key()).collect()
@@ -232,7 +246,9 @@ impl ManesSurvivalManager {
         ids
     }
 
-    pub fn configured_count(&self) -> usize { self.spawns.read().len() }
+    pub fn configured_count(&self) -> usize {
+        self.spawns.read().len()
+    }
 
     pub fn progress(&self, session_id: SessionId) -> Option<ManesProgress> {
         self.progress.get(&session_id).map(|entry| *entry.value())
@@ -297,9 +313,7 @@ impl ManesSurvivalManager {
             .final_boss_killed_at
             .read()
             .as_ref()
-            .map(|killed_at| {
-                killed_at.elapsed() >= Duration::from_millis(MANES_FINALIZE_DELAY_MS)
-            })
+            .map(|killed_at| killed_at.elapsed() >= Duration::from_millis(MANES_FINALIZE_DELAY_MS))
             .unwrap_or(false);
         if !should_finalize {
             return;
@@ -416,11 +430,7 @@ impl ManesSurvivalManager {
 
     pub fn potion_purchase(&self, selection_id: u16) -> Option<(u32, u16, u32)> {
         let row = self.row(selection_id)?;
-        (row.kind == 100).then_some((
-            row.item_id as u32,
-            row.item_count as u16,
-            row.price as u32,
-        ))
+        (row.kind == 100).then_some((row.item_id as u32, row.item_count as u16, row.price as u32))
     }
 
     /// Remove only the event HP/MP potions from an inventory copy before it is
@@ -456,11 +466,9 @@ impl ManesSurvivalManager {
         // path so every cleared slot gets its own WIZ_ITEM_COUNT_CHANGE packet;
         // send_item_move_refresh() only refreshes derived equipment stats and
         // leaves deleted bag items visible as client-side ghosts.
-        let mut removed = usize::from(
-            world.rob_all_of_item(session_id, MANES_TEMP_HP_POTION_ITEM_ID),
-        ) + usize::from(
-            world.rob_all_of_item(session_id, MANES_TEMP_MP_POTION_ITEM_ID),
-        );
+        let mut removed =
+            usize::from(world.rob_all_of_item(session_id, MANES_TEMP_HP_POTION_ITEM_ID))
+                + usize::from(world.rob_all_of_item(session_id, MANES_TEMP_MP_POTION_ITEM_ID));
 
         // Defensive sanitisation for a malformed/legacy slot outside the bag.
         // Persistence and login use the same exact two-ID filter.
@@ -517,11 +525,7 @@ impl ManesSurvivalManager {
         progress
     }
 
-    pub fn award_monster_exp(
-        &self,
-        session_id: SessionId,
-        npc_sid: u16,
-    ) -> Option<ManesProgress> {
+    pub fn award_monster_exp(&self, session_id: SessionId, npc_sid: u16) -> Option<ManesProgress> {
         if !self.is_active() {
             return None;
         }
@@ -591,9 +595,9 @@ impl ManesSurvivalManager {
         let mut elmorad_index = 0usize;
 
         for (zone_index, sid) in participants.iter().copied().enumerate() {
-            let character = world
-                .get_character_info(sid)
-                .ok_or_else(|| anyhow::anyhow!("registered participant {sid} is no longer online"))?;
+            let character = world.get_character_info(sid).ok_or_else(|| {
+                anyhow::anyhow!("registered participant {sid} is no longer online")
+            })?;
             let nation = character.nation;
             let (start, end, nation_index) = match nation {
                 crate::world::NATION_KARUS => {
@@ -650,9 +654,7 @@ impl ManesSurvivalManager {
             );
             crate::handler::attack::sync_manes_vitals_and_level(world, sid, progress, true);
 
-            crate::handler::zone_change::server_teleport_to_zone_force(
-                world, sid, zone_id, x, z,
-            );
+            crate::handler::zone_change::server_teleport_to_zone_force(world, sid, zone_id, x, z);
         }
 
         Ok(())
@@ -792,7 +794,12 @@ impl ManesSurvivalManager {
             .filter_map(|sid| {
                 let progress = self.progress(sid)?;
                 let character = world.get_character_info(sid)?;
-                Some((sid, progress.level, score_for_level(progress.level), character.name))
+                Some((
+                    sid,
+                    progress.level,
+                    score_for_level(progress.level),
+                    character.name,
+                ))
             })
             .collect();
         ranking.sort_by(|left, right| {
@@ -841,10 +848,7 @@ impl ManesSurvivalManager {
     /// completed when this is scheduled. After a short result-viewing window,
     /// restore the persistent character stats/HUD and move every participant
     /// still inside a physical Manes zone to their nation homeland.
-    pub fn schedule_participant_exit(
-        world: Arc<WorldState>,
-        participants: Vec<SessionId>,
-    ) {
+    pub fn schedule_participant_exit(world: Arc<WorldState>, participants: Vec<SessionId>) {
         let notice = crate::systems::timed_notice::build_notice_packet(
             8,
             &format!(

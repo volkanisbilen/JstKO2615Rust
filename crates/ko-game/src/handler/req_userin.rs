@@ -105,6 +105,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         let other_alliance_cape = other_clan
             .as_ref()
             .and_then(|ki| region::resolve_alliance_cape(ki, &world));
+        let other_is_king = world.is_king(other_char.nation, &other_char.name);
         result.write_u8(0); // type marker (user/bot)
         result.write_u32(other_sid as u32);
         write_user_info(
@@ -113,6 +114,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             &other_pos,
             other_clan.as_ref(),
             other_alliance_cape,
+            other_is_king,
             other_invis,
             other_abnormal,
             &other_bs,
@@ -222,7 +224,9 @@ mod tests {
     fn test_req_userin_c2s_data_length() {
         let mut pkt = Packet::new(Opcode::WizReqUserIn as u8);
         pkt.write_u16(4);
-        for i in 0..4u32 { pkt.write_u32(i + 1); }
+        for i in 0..4u32 {
+            pkt.write_u32(i + 1);
+        }
         assert_eq!(pkt.data.len(), 18); // 2 + 4*4
     }
 

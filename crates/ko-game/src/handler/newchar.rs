@@ -24,8 +24,8 @@
 //! then send ALLCHAR refresh (0x0C sub=0x01) to update character list.
 
 use ko_db::repositories::account::AccountRepository;
-use ko_db::repositories::character::{CharacterRepository, CreateCharParams};
 use ko_db::repositories::char_creation::CharCreationRepository;
+use ko_db::repositories::character::{CharacterRepository, CreateCharParams};
 use ko_db::repositories::daily_rank::DailyRankRepository;
 use ko_db::repositories::perk::PerkRepository;
 use ko_db::repositories::user_data::UserDataRepository;
@@ -58,10 +58,7 @@ const DEFAULT_PY: i32 = 0;
 /// v2600 top-level handler (sub_B47BA0, a4=1): reads first byte.
 /// If byte != 1 → exits silently (no error display).
 /// Error codes are sent as u8: 0=success, 1-11=error.
-async fn send_newchar_error(
-    session: &mut ClientSession,
-    error_code: u8,
-) -> anyhow::Result<()> {
+async fn send_newchar_error(session: &mut ClientSession, error_code: u8) -> anyhow::Result<()> {
     let mut response = Packet::new(Opcode::WizNewChar as u8);
     response.write_u8(error_code);
     session.send_packet(&response).await
@@ -160,10 +157,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             }
 
             let char_creation_repo = CharCreationRepository::new(session.pool());
-            let beginner_type = char_creation_repo
-                .load_beginner_type(1)
-                .await
-                .unwrap_or(1);
+            let beginner_type = char_creation_repo.load_beginner_type(1).await.unwrap_or(1);
 
             // Apply level-specific equipment when configured; otherwise use legacy class set.
             // The create_new_char_set table uses base class values (1-4, 13),

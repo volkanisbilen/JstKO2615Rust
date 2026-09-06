@@ -588,7 +588,14 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     if instance.target_id != -1 {
         if (instance.target_id as u32) >= NPC_BAND {
             let npc_id = instance.target_id as u32;
-            if world.is_npc_dead(npc_id) {
+            // Runtime bots are visible as user models but deliberately take
+            // the NPC combat path. They have no entry in `npc_hp`, where a
+            // missing entry means dead; resolve their own live state first.
+            let target_is_dead = world
+                .get_bot(npc_id)
+                .map(|bot| bot.hp <= 0 || bot.presence == crate::world::BotPresence::Dead)
+                .unwrap_or_else(|| world.is_npc_dead(npc_id));
+            if target_is_dead {
                 return Ok(());
             }
         } else {
@@ -1977,14 +1984,14 @@ async fn execute_type1_aoe(
 
         // Send HP bar update
         if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-            let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-            hp_pkt.write_u32(npc_id);
-            hp_pkt.write_u8(0);
-            hp_pkt.write_u32(tmpl.max_hp);
-            hp_pkt.write_u32(new_hp.max(0) as u32);
-            hp_pkt.write_u32(-(damage as i32) as u32); // negative = damage dealt
-            hp_pkt.write_u32(0);
-            hp_pkt.write_u8(0);
+            let hp_pkt = super::target_hp::build_target_hp_packet(
+                npc_id,
+                0,
+                tmpl.max_hp,
+                new_hp.max(0) as u32,
+                caster_sid as u32,
+                -(damage as i32),
+            );
             world.send_to_session_owned(caster_sid, hp_pkt);
             if tmpl.s_sid == crate::systems::manes_survival::DARK_DRAGON_SID as u16 {
                 world.manes_survival_manager.broadcast_dark_dragon_status(
@@ -3412,14 +3419,14 @@ async fn execute_type3(
 
                 // Send HP bar update
                 if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-                    let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-                    hp_pkt.write_u32(npc_id);
-                    hp_pkt.write_u8(0);
-                    hp_pkt.write_u32(tmpl.max_hp);
-                    hp_pkt.write_u32(new_hp.max(0) as u32);
-                    hp_pkt.write_u32(-(npc_damage as i32) as u32); // negative = damage dealt
-                    hp_pkt.write_u32(0);
-                    hp_pkt.write_u8(0);
+                    let hp_pkt = super::target_hp::build_target_hp_packet(
+                        npc_id,
+                        0,
+                        tmpl.max_hp,
+                        new_hp.max(0) as u32,
+                        caster_sid as u32,
+                        -(npc_damage as i32),
+                    );
                     world.send_to_session_owned(caster_sid, hp_pkt);
                     if tmpl.s_sid == crate::systems::manes_survival::DARK_DRAGON_SID as u16 {
                         world.manes_survival_manager.broadcast_dark_dragon_status(
@@ -6155,16 +6162,14 @@ fn send_target_hp_update(
         None => return,
     };
 
-    let mut response = Packet::new(Opcode::WizTargetHp as u8);
-    response.write_u32(target_sid as u32);
-    response.write_u8(0);
-    response.write_u32(ch.max_hp as u32);
-    response.write_u32(ch.hp.max(0) as u32);
-    // C++ sends negative amount for damage, positive for heal. Client uses sign for display:
-    // negative = "X damage dealt", positive = "X HP received", 0 = no display
-    response.write_u32((-damage) as u32);
-    response.write_u32(0);
-    response.write_u8(0);
+    let response = super::target_hp::build_target_hp_packet(
+        target_sid as u32,
+        0,
+        ch.max_hp as u32,
+        ch.hp.max(0) as u32,
+        caster_sid as u32,
+        -damage,
+    );
 
     world.send_to_session_owned(caster_sid, response);
 }
@@ -6199,15 +6204,17 @@ async fn apply_skill_damage_to_npc(
             b.last_attacker_id = caster_sid as i32;
         });
 
-        // Send WIZ_TARGET_HP to caster
-        let mut target_hp_pkt = ko_protocol::Packet::new(ko_protocol::Opcode::WizTargetHp as u8);
-        target_hp_pkt.write_u32(npc_id);
-        target_hp_pkt.write_u8(0); // echo
-        target_hp_pkt.write_u32(bot.max_hp as u32);
-        target_hp_pkt.write_u32(new_hp as u32);
-        target_hp_pkt.write_u32((-damage) as u32); // negative = damage dealt
-        target_hp_pkt.write_u32(0);
-        target_hp_pkt.write_u8(0);
+        // v2615 reads the Ronark Land score delta from the *second* trailing
+        // dword of WIZ_TARGET_HP. Keep every damage path on the centralized
+        // builder so magic attacks against bots cannot silently bypass it.
+        let target_hp_pkt = super::target_hp::build_target_hp_packet(
+            npc_id,
+            0,
+            bot.max_hp as u32,
+            new_hp as u32,
+            caster_sid as u32,
+            -(damage as i32),
+        );
         world.send_to_session_owned(caster_sid, target_hp_pkt);
 
         // Handle death
@@ -6399,14 +6406,14 @@ async fn apply_skill_damage_to_npc(
     // Send HP bar update with actual damage for console display
     // C++ sends negative amount (damage dealt), client uses sign for display:
     // negative = "X damage dealt", positive = "X HP received"
-    let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-    hp_pkt.write_u32(npc_id);
-    hp_pkt.write_u8(0);
-    hp_pkt.write_u32(tmpl.max_hp);
-    hp_pkt.write_u32(new_hp.max(0) as u32);
-    hp_pkt.write_u32((-(damage as i32)) as u32);
-    hp_pkt.write_u32(0);
-    hp_pkt.write_u8(0);
+    let hp_pkt = super::target_hp::build_target_hp_packet(
+        npc_id,
+        0,
+        tmpl.max_hp,
+        new_hp.max(0) as u32,
+        caster_sid as u32,
+        -(damage as i32),
+    );
     world.send_to_session_owned(caster_sid, hp_pkt);
     if tmpl.s_sid == crate::systems::manes_survival::DARK_DRAGON_SID as u16 {
         world.manes_survival_manager.broadcast_dark_dragon_status(
@@ -6811,6 +6818,9 @@ fn post_resurrection_sequence(world: &WorldState, sid: SessionId, zone_id: u16) 
         let ac = my_clan
             .as_ref()
             .and_then(|ki| crate::handler::region::resolve_alliance_cape(ki, world));
+        let is_king = my_char
+            .as_ref()
+            .is_some_and(|ch| world.is_king(ch.nation, &ch.name));
         let inout_pkt = crate::handler::region::build_user_inout_with_clan(
             crate::handler::region::INOUT_RESPAWN,
             sid,
@@ -6818,6 +6828,7 @@ fn post_resurrection_sequence(world: &WorldState, sid: SessionId, zone_id: u16) 
             &pos,
             my_clan.as_ref(),
             ac,
+            is_king,
             my_invis,
             my_abnormal,
             &my_bs,

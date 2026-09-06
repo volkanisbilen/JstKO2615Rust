@@ -8,7 +8,9 @@ pub struct ManesSurvivalRepository<'a> {
 }
 
 impl<'a> ManesSurvivalRepository<'a> {
-    pub fn new(pool: &'a DbPool) -> Self { Self { pool } }
+    pub fn new(pool: &'a DbPool) -> Self {
+        Self { pool }
+    }
 
     pub async fn load_spawns(&self) -> Result<Vec<ManesSurvivalSpawnRow>, sqlx::Error> {
         sqlx::query_as::<_, ManesSurvivalSpawnRow>(

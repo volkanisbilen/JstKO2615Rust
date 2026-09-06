@@ -1099,9 +1099,7 @@ pub fn track_juraid_monster_kill(
             // Match CNpc::HandleJuraidKill exactly: main and released child
             // monsters are counted separately for each nation. A nation opens
             // only its own bridge at 4/20, 8/40 and 12/60.
-            let mut bridge_state = world
-                .get_juraid_bridge_state(room_id)
-                .unwrap_or_default();
+            let mut bridge_state = world.get_juraid_bridge_state(room_id).unwrap_or_default();
             match (killer_nation, killed_summon_type) {
                 (1, juraid::SUMMON_JURAID_MAIN) => {
                     bridge_state.karus_main_kills = bridge_state.karus_main_kills.saturating_add(1)
@@ -1110,17 +1108,22 @@ pub fn track_juraid_monster_kill(
                     bridge_state.karus_sub_kills = bridge_state.karus_sub_kills.saturating_add(1)
                 }
                 (2, juraid::SUMMON_JURAID_MAIN) => {
-                    bridge_state.elmorad_main_kills = bridge_state.elmorad_main_kills.saturating_add(1)
+                    bridge_state.elmorad_main_kills =
+                        bridge_state.elmorad_main_kills.saturating_add(1)
                 }
                 (2, juraid::SUMMON_JURAID_CHILD) => {
-                    bridge_state.elmorad_sub_kills = bridge_state.elmorad_sub_kills.saturating_add(1)
+                    bridge_state.elmorad_sub_kills =
+                        bridge_state.elmorad_sub_kills.saturating_add(1)
                 }
                 _ => {}
             }
             let (main_kills, sub_kills) = if killer_nation == 1 {
                 (bridge_state.karus_main_kills, bridge_state.karus_sub_kills)
             } else {
-                (bridge_state.elmorad_main_kills, bridge_state.elmorad_sub_kills)
+                (
+                    bridge_state.elmorad_main_kills,
+                    bridge_state.elmorad_sub_kills,
+                )
             };
             for bridge_idx in 0..juraid::NUM_BRIDGES {
                 if main_kills >= juraid::ROOM_MAIN_KILL_THRESHOLDS[bridge_idx]
@@ -1206,10 +1209,9 @@ fn spawn_juraid_child_monsters(
 
     // C++ CNpc::HandleJuraidKill releases five creatures chosen from this
     // fixed set; it does not choose another entry from MONSTER_JURAID_RESPAWN.
-    let selector = (usize::from(killed_npc_sid)
-        + killed_x.to_bits() as usize
-        + killed_z.to_bits() as usize)
-        % juraid::JURAID_CHILD_SIDS.len();
+    let selector =
+        (usize::from(killed_npc_sid) + killed_x.to_bits() as usize + killed_z.to_bits() as usize)
+            % juraid::JURAID_CHILD_SIDS.len();
     let child_sid = juraid::JURAID_CHILD_SIDS[selector];
 
     let spawned = world.spawn_event_npc_ex(

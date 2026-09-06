@@ -547,17 +547,25 @@ pub fn exchange_item_for_achievement(
     }
 
     world.update_session(sid, |h| {
-        let info = h.achieve_map.entry(achievement_id).or_insert(UserAchieveInfo {
-            status: AchieveStatus::Incomplete as u8,
-            count: [0, 0],
-        });
+        let info = h
+            .achieve_map
+            .entry(achievement_id)
+            .or_insert(UserAchieveInfo {
+                status: AchieveStatus::Incomplete as u8,
+                count: [0, 0],
+            });
         info.count[0] = item_count as u32;
     });
     if !finish_achievement(world, sid, achievement_id) {
         // Consumption succeeded, so a failure here means the definition/session
         // disappeared concurrently. Log it explicitly instead of reporting success.
-        tracing::error!(sid, achievement_id, item_id, item_count,
-            "Achievement exchange consumed items but could not finish achievement");
+        tracing::error!(
+            sid,
+            achievement_id,
+            item_id,
+            item_count,
+            "Achievement exchange consumed items but could not finish achievement"
+        );
         return 0;
     }
 

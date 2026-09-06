@@ -72,8 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let login_config = LoginServerConfig {
         bind_ip: bind_ip.clone(),
         base_port: login_base_port,
-        game_server_ip: std::env::var("GAME_SERVER_IP")
-            .unwrap_or_else(|_| "127.0.0.1".to_string()),
+        game_server_ip: std::env::var("GAME_SERVER_IP").unwrap_or_else(|_| "127.0.0.1".to_string()),
         game_server_port: std::env::var("GAME_SERVER_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -100,7 +99,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("[6/6] All systems ready — accepting connections");
     info!("====================================");
-    info!("  Login:  {}:{}-{}", bind_ip, login_base_port, login_base_port + 9);
+    info!(
+        "  Login:  {}:{}-{}",
+        bind_ip,
+        login_base_port,
+        login_base_port + 9
+    );
     info!("  Game:   {}", game_server.bind_addr());
     info!("====================================");
 

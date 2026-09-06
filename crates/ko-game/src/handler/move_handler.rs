@@ -507,6 +507,33 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         }
     }
 
+    // Under The Castle has an internal, walk-up transition gate after the
+    // final physical door. It is handled by CUser::EventTrapProcess() in the
+    // reference server rather than by an NPC or a .aievt entry.
+    if zone_id == super::under_castle::ZONE_UNDER_CASTLE
+        && world
+            .under_the_castle_state()
+            .is_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+        && super::under_castle::is_at_final_boss_transition_gate(x, z)
+    {
+        tracing::info!(
+            sid,
+            x,
+            z,
+            destination_x = super::under_castle::UTC_FINAL_BOSS_WARP_X,
+            destination_z = super::under_castle::UTC_FINAL_BOSS_WARP_Z,
+            "Under The Castle: final boss transition gate triggered"
+        );
+        zone_change::same_zone_warp(
+            session,
+            super::under_castle::UTC_FINAL_BOSS_WARP_X,
+            super::under_castle::UTC_FINAL_BOSS_WARP_Z,
+        )
+        .await?;
+        return Ok(());
+    }
+
     // ── BDW altar delivery check ────────────────────────────────────────
     // Called at end of every move handler when in zone 84.
     if zone_id == crate::systems::bdw::ZONE_BDW {
@@ -520,9 +547,8 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     if zone_id == crate::world::ZONE_BATTLE6 {
         let is_nation_battle = world.get_battle_state().is_nation_battle();
         let is_gm = snap.authority == 0; // GM_AUTHORITY
-        let terrain = super::terrain_effects::evaluate_terrain(
-            zone_id, is_nation_battle, is_gm, x, z,
-        );
+        let terrain =
+            super::terrain_effects::evaluate_terrain(zone_id, is_nation_battle, is_gm, x, z);
         let pkt = super::terrain_effects::build_terrain_effects_packet(terrain);
         world.send_to_session(sid, &pkt);
     }

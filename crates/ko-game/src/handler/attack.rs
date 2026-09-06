@@ -923,7 +923,10 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     }
 
     // ── Target validation ──────────────────────────────────────────────
-    let target_is_player = tid < crate::npc::NPC_BAND;
+    // Runtime bots use the user-visibility protocol, but are stored in the
+    // NPC combat map. Resolve them explicitly instead of relying only on an
+    // ID band, so normal R-attacks follow the bot damage path.
+    let target_is_player = tid < crate::npc::NPC_BAND && world.get_bot(tid).is_none();
 
     if target_is_player {
         let target_sid = tid as SessionId;
@@ -1776,14 +1779,14 @@ async fn handle_npc_attack(
 
         // Send WIZ_TARGET_HP to attacker
         // C++ sends ORIGINAL damage (before passives) to attacker for display.
-        let mut target_hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-        target_hp_pkt.write_u32(npc_id);
-        target_hp_pkt.write_u8(0); // echo
-        target_hp_pkt.write_u32(bot.max_hp as u32);
-        target_hp_pkt.write_u32(new_hp as u32);
-        target_hp_pkt.write_u32(-(damage as i32) as u32); // negative = damage dealt
-        target_hp_pkt.write_u32(0);
-        target_hp_pkt.write_u8(0);
+        let target_hp_pkt = super::target_hp::build_target_hp_packet(
+            npc_id,
+            0,
+            bot.max_hp as u32,
+            new_hp as u32,
+            attacker_sid as u32,
+            -(damage as i32),
+        );
         world.send_to_session_owned(attacker_sid, target_hp_pkt);
 
         let b_result = if new_hp <= 0 {
@@ -2907,6 +2910,15 @@ pub(crate) async fn handle_npc_death(
         let utc_state = world.under_the_castle_state();
         let result = super::under_castle::on_monster_death(npc.proto_id, tmpl.npc_type as u16);
 
+        tracing::info!(
+            npc_id,
+            proto_id = npc.proto_id,
+            movie_id = result.movie_id,
+            gate_index = ?result.gate_index,
+            reward_room = result.reward_room,
+            "Under The Castle: monster death processed"
+        );
+
         // Remove from tracked monster list
         super::under_castle::remove_from_monster_list(utc_state, npc_id);
 
@@ -2920,13 +2932,19 @@ pub(crate) async fn handle_npc_death(
             );
         }
 
-        // Open gate if applicable — send_gate_flag updates NPC state + broadcasts
+        // C++ CNpc::UnderTheCastleProcess calls pNpc->Dead(pUser) for each
+        // stage gate. A gate flag leaves the collision object in the region;
+        // remove every physical door piece instead.
         if let Some(gate_idx) = result.gate_index {
-            let gate_npc_id = super::under_castle::get_gate_id(utc_state, gate_idx);
-            if gate_npc_id > 0 {
-                world.send_gate_flag(gate_npc_id, 1);
-                tracing::info!(gate_idx, gate_npc_id, "Under The Castle: gate opened");
+            let gate_npc_ids = super::under_castle::get_gate_ids(utc_state, gate_idx);
+            for gate_npc_id in &gate_npc_ids {
+                world.kill_npc(*gate_npc_id);
             }
+            tracing::info!(
+                gate_idx,
+                gate_npc_ids = ?gate_npc_ids,
+                "Under The Castle: gate door pieces removed"
+            );
         }
 
         if result.reward_room > 0 {
@@ -3978,7 +3996,7 @@ fn award_npc_loyalty_solo(world: &WorldState, sid: SessionId, base_loyalty: i32,
 }
 
 /// Send WIZ_TARGET_HP for an NPC target (HP bar update).
-/// Packet format: `[u32 npc_id][u8 0][u32 max_hp][u32 current_hp][u32 0][u32 0][u8 0]`
+/// Packet format: `[u32 npc_id][u8 0][u32 max_hp][u32 current_hp][u32 source][i32 change][u8 reserved=0]`
 fn send_npc_target_hp_update(
     world: &WorldState,
     attacker_sid: SessionId,
@@ -3987,14 +4005,14 @@ fn send_npc_target_hp_update(
     current_hp: i32,
     damage: i32,
 ) {
-    let mut response = Packet::new(Opcode::WizTargetHp as u8);
-    response.write_u32(npc_id);
-    response.write_u8(0);
-    response.write_u32(max_hp.max(0) as u32);
-    response.write_u32(current_hp.max(0) as u32);
-    response.write_u32((-damage) as u32); // C++ sends negative amount (damage dealt = negative)
-    response.write_u32(0);
-    response.write_u8(0);
+    let response = super::target_hp::build_target_hp_packet(
+        npc_id,
+        0,
+        max_hp.max(0) as u32,
+        current_hp.max(0) as u32,
+        attacker_sid as u32,
+        -damage,
+    );
 
     world.send_to_session_owned(attacker_sid, response);
 }
@@ -4047,16 +4065,14 @@ fn send_target_hp_update(
         None => return,
     };
 
-    let mut response = Packet::new(Opcode::WizTargetHp as u8);
-    response.write_u32(target_sid as u32);
-    response.write_u8(0); // echo flag
-    response.write_u32(ch.max_hp as u32);
-    response.write_u32(ch.hp.max(0) as u32);
-    // C++ sends negative amount for damage dealt, positive for heal.
-    // Client uses sign: negative = "X damage dealt", positive = "X HP received"
-    response.write_u32((-damage) as u32);
-    response.write_u32(0); // reserved
-    response.write_u8(0); // reserved
+    let response = super::target_hp::build_target_hp_packet(
+        target_sid as u32,
+        0,
+        ch.max_hp as u32,
+        ch.hp.max(0) as u32,
+        attacker_sid as u32,
+        -damage,
+    );
 
     // Send to the attacker
     world.send_to_session_owned(attacker_sid, response);
@@ -7324,6 +7340,7 @@ mod tests {
             gold: 0,
             loyalty: 0,
             loyalty_monthly: 0,
+            loyalty_daily: 0,
             in_game: true,
             presence: BotPresence::Standing,
             ai_state: BotAiState::Pk,
@@ -7347,6 +7364,8 @@ mod tests {
             merchant_state: -1,
             premium_merchant: false,
             merchant_chat: String::new(),
+            merchant_items: Default::default(),
+            merchant_looker: None,
             reb_level: 0,
             cover_title: 0,
             rival_id: -1,

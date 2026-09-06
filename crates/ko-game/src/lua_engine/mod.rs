@@ -339,7 +339,10 @@ mod tests {
             }
 
             let source = std::fs::read_to_string(&path).unwrap();
-            if let Err(error) = lua.load(&source).set_name(path.display().to_string()).into_function()
+            if let Err(error) = lua
+                .load(&source)
+                .set_name(path.display().to_string())
+                .into_function()
             {
                 failures.push(format!("{}: {error}", path.display()));
             }
@@ -431,10 +434,18 @@ mod tests {
             }
             let source = std::fs::read_to_string(&path).unwrap();
             let lua = Lua::new();
-            if let Err(error) = lua.load(&source).set_name(path.to_string_lossy()).into_function() {
+            if let Err(error) = lua
+                .load(&source)
+                .set_name(path.to_string_lossy())
+                .into_function()
+            {
                 failures.push(format!("{}: {}", path.display(), error));
             }
         }
-        assert!(failures.is_empty(), "Lua compile failures:\n{}", failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "Lua compile failures:\n{}",
+            failures.join("\n")
+        );
     }
 }

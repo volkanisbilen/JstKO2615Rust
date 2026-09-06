@@ -213,12 +213,7 @@ pub fn start_event_system_task(
                 for (room_id, nation) in world.take_due_juraid_monument_respawns(now) {
                     let spawned = juraid::spawn_monument(&world, room_id, nation);
                     if spawned > 0 {
-                        tracing::info!(
-                            room_id,
-                            nation,
-                            spawned,
-                            "Juraid Monument respawned"
-                        );
+                        tracing::info!(room_id, nation, spawned, "Juraid Monument respawned");
                     }
                 }
             }
@@ -916,17 +911,20 @@ pub fn start_event_system_task(
                                 }
                             };
 
-                            for &(s_sid, count, is_monster, x, _y, z, _dir, trap_number) in
+                            for &(s_sid, count, is_monster, x, y, z, direction, trap_number) in
                                 &spawn_list
                             {
-                                let ids = world.spawn_event_npc_ex(
+                                let ids = world.spawn_event_npc_ex_with_metadata(
                                     s_sid as u16,
                                     is_monster,
                                     under_castle::ZONE_UNDER_CASTLE,
                                     x as f32,
+                                    y as f32,
                                     z as f32,
                                     count as u16,
                                     0, // event_room (UTC uses single zone)
+                                    0, // UTC summon/event type (not trap_number)
+                                    direction as u8,
                                     trap_number as u8,
                                 );
 
@@ -935,12 +933,14 @@ pub fn start_event_system_task(
                                 }
 
                                 // Register gate NPCs: trap_number 1-3 maps to gate index 0-2
-                                if (1..=3).contains(&trap_number) && !ids.is_empty() {
-                                    under_castle::set_gate_id(
-                                        utc_state,
-                                        (trap_number - 1) as u8,
-                                        ids[0],
-                                    );
+                                if (1..=3).contains(&trap_number) {
+                                    for id in ids {
+                                        under_castle::set_gate_id(
+                                            utc_state,
+                                            (trap_number - 1) as u8,
+                                            id,
+                                        );
+                                    }
                                 }
                             }
 
@@ -2468,7 +2468,11 @@ pub async fn distribute_juraid_rewards(world: &WorldState, winner_results: &[(u8
             }
             let is_premium = world.with_session(sid, |h| h.premium_in_use).unwrap_or(0) != 0;
             let exp = if is_winner {
-                if is_premium { 50_000_000 } else { 20_000_000 }
+                if is_premium {
+                    50_000_000
+                } else {
+                    20_000_000
+                }
             } else {
                 0
             };
@@ -6852,10 +6856,22 @@ mod tests {
     /// TempleEventType from_i16 round-trip for all variants.
     #[test]
     fn test_temple_event_type_from_i16_roundtrip() {
-        assert_eq!(TempleEventType::from_i16(4), Some(TempleEventType::BorderDefenceWar));
-        assert_eq!(TempleEventType::from_i16(14), Some(TempleEventType::ForgottenTemple));
-        assert_eq!(TempleEventType::from_i16(24), Some(TempleEventType::ChaosDungeon));
-        assert_eq!(TempleEventType::from_i16(100), Some(TempleEventType::JuraidMountain));
+        assert_eq!(
+            TempleEventType::from_i16(4),
+            Some(TempleEventType::BorderDefenceWar)
+        );
+        assert_eq!(
+            TempleEventType::from_i16(14),
+            Some(TempleEventType::ForgottenTemple)
+        );
+        assert_eq!(
+            TempleEventType::from_i16(24),
+            Some(TempleEventType::ChaosDungeon)
+        );
+        assert_eq!(
+            TempleEventType::from_i16(100),
+            Some(TempleEventType::JuraidMountain)
+        );
         assert_eq!(TempleEventType::from_i16(0), None);
         assert_eq!(TempleEventType::from_i16(-1), None);
         assert_eq!(TempleEventType::from_i16(50), None);
@@ -6950,9 +6966,9 @@ mod tests {
     /// BDW level exp bonus boundary: level 57 uses low formula, 58 uses high formula.
     #[test]
     fn test_bdw_level_exp_bonus_formula_boundary() {
-        let low = bdw_level_exp_bonus(57);   // (57-20)*203000 = 7_511_000
-        let high = bdw_level_exp_bonus(58);  // (58+55)*120000 = 13_560_000
-        // High formula gives significantly more EXP at the boundary
+        let low = bdw_level_exp_bonus(57); // (57-20)*203000 = 7_511_000
+        let high = bdw_level_exp_bonus(58); // (58+55)*120000 = 13_560_000
+                                            // High formula gives significantly more EXP at the boundary
         assert!(high > low);
         // The jump ratio at boundary
         assert!((high as f64 / low as f64) > 1.5);

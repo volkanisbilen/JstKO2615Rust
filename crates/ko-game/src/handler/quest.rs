@@ -692,6 +692,51 @@ pub fn quest_monster_count_add(
             world.send_to_session_owned(sid, pkt);
         }
 
+        let char_id = world
+            .get_character_info(sid)
+            .map(|ch| ch.name.clone())
+            .unwrap_or_default();
+        let persisted_state = if all_fulfilled { 3 } else { 1 };
+
+        tracing::info!(
+            sid,
+            character = %char_id,
+            quest_num,
+            npc_proto_id,
+            counts = ?tracked_counts,
+            required = ?required_counts,
+            completed = all_fulfilled,
+            "Quest monster progress updated"
+        );
+
+        // Persist partial progress too. Previously Ancient Hunt progress was
+        // only saved on the final kill and was lost on reconnect/restart.
+        if !char_id.is_empty() {
+            if let Some(pool) = world.db_pool() {
+                let pool = pool.clone();
+                let kc = [
+                    tracked_counts[0] as i16,
+                    tracked_counts[1] as i16,
+                    tracked_counts[2] as i16,
+                    tracked_counts[3] as i16,
+                ];
+                tokio::spawn(async move {
+                    let repo = QuestRepository::new(&pool);
+                    if let Err(e) = repo
+                        .save_user_quest_progress(&char_id, quest_num as i16, persisted_state, kc)
+                        .await
+                    {
+                        tracing::error!(
+                            "Failed to save quest {} state {}: {}",
+                            quest_num,
+                            persisted_state,
+                            e
+                        );
+                    }
+                });
+            }
+        }
+
         if all_fulfilled {
             // Send state update
             let mut pkt = Packet::new(Opcode::WizQuest as u8);
@@ -699,32 +744,6 @@ pub fn quest_monster_count_add(
             pkt.write_u16(quest_num);
             pkt.write_u8(3);
             world.send_to_session_owned(sid, pkt);
-
-            let char_id = world
-                .get_character_info(sid)
-                .map(|ch| ch.name.clone())
-                .unwrap_or_default();
-
-            if !char_id.is_empty() {
-                if let Some(pool) = world.db_pool() {
-                    let pool = pool.clone();
-                    let kc = [
-                        tracked_counts[0] as i16,
-                        tracked_counts[1] as i16,
-                        tracked_counts[2] as i16,
-                        tracked_counts[3] as i16,
-                    ];
-                    tokio::spawn(async move {
-                        let repo = QuestRepository::new(&pool);
-                        if let Err(e) = repo
-                            .save_user_quest(&char_id, quest_num as i16, 3, kc)
-                            .await
-                        {
-                            tracing::error!("Failed to save quest {} state 3: {}", quest_num, e);
-                        }
-                    });
-                }
-            }
         }
     }
 }

@@ -321,14 +321,7 @@ impl WorldState {
             }
             if broadcast {
                 let packet = build_npc_inout(NPC_IN, &instance, &template);
-                self.broadcast_to_3x3(
-                    MORANKER_ZONE,
-                    region_x,
-                    region_z,
-                    Arc::new(packet),
-                    None,
-                    0,
-                );
+                self.broadcast_to_3x3(MORANKER_ZONE, region_x, region_z, Arc::new(packet), None, 0);
             }
 
             tracing::info!(

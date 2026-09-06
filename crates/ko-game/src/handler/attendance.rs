@@ -334,9 +334,7 @@ async fn handle_claim(session: &mut ClientSession) -> anyhow::Result<()> {
 /// legacy `0xB7/sub=8` claim request when its reward tile is clicked.  The
 /// server therefore performs the same once-per-calendar-day claim while the
 /// native window is opened, without sending legacy `0xB7` UI packets.
-pub(super) async fn claim_for_native_open(
-    session: &mut ClientSession,
-) -> anyhow::Result<bool> {
+pub(super) async fn claim_for_native_open(session: &mut ClientSession) -> anyhow::Result<bool> {
     handle_claim_impl(session, false).await
 }
 

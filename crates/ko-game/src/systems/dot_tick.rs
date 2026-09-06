@@ -53,9 +53,12 @@ fn process_dot_tick(world: &WorldState) {
         let hp_change = *hp_change;
         let expired = *expired;
 
-        let (ch, pos) = match world.with_session(sid, |h| {
-            h.character.as_ref().map(|c| (c.clone(), h.position))
-        }).flatten() {
+        let (ch, pos) = match world
+            .with_session(sid, |h| {
+                h.character.as_ref().map(|c| (c.clone(), h.position))
+            })
+            .flatten()
+        {
             Some(v) => v,
             None => continue,
         };
@@ -72,7 +75,8 @@ fn process_dot_tick(world: &WorldState) {
         // Skip DOT damage in temple event zones when combat is not allowed.
         // The DOT still ticks (tick_count advances, DOT expires normally) but
         // no HP change is applied during non-combat event phases.
-        if !is_event_attackable && hp_change < 0 && event_room::is_in_temple_event_zone(pos.zone_id) {
+        if !is_event_attackable && hp_change < 0 && event_room::is_in_temple_event_zone(pos.zone_id)
+        {
             // Even if skipping HP application, still send expiry packets
             if expired {
                 send_dot_expired_packet(world, sid, hp_change);
@@ -211,8 +215,7 @@ fn process_dot_tick(world: &WorldState) {
                 continue;
             }
 
-            let new_hp = (bot.hp as i32 + total_damage)
-                .clamp(0, bot.max_hp as i32) as i16;
+            let new_hp = (bot.hp as i32 + total_damage).clamp(0, bot.max_hp as i32) as i16;
             world.update_bot(npc_id, |target| {
                 target.hp = new_hp;
                 if total_damage < 0 {
@@ -221,14 +224,14 @@ fn process_dot_tick(world: &WorldState) {
             });
             crate::systems::bot_ai::broadcast_bot_party_hp(world, npc_id);
 
-            let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-            hp_pkt.write_u32(npc_id);
-            hp_pkt.write_u8(0);
-            hp_pkt.write_u32(bot.max_hp as u32);
-            hp_pkt.write_u32(new_hp as u32);
-            hp_pkt.write_u32(total_damage as u32);
-            hp_pkt.write_u32(0);
-            hp_pkt.write_u8(0);
+            let hp_pkt = crate::handler::target_hp::build_target_hp_packet(
+                npc_id,
+                0,
+                bot.max_hp as u32,
+                new_hp as u32,
+                caster_sid as u32,
+                total_damage,
+            );
             world.send_to_session_owned(caster_sid, hp_pkt);
 
             if new_hp <= 0 {
@@ -305,14 +308,14 @@ fn process_dot_tick(world: &WorldState) {
             // Send HP bar update to caster
             if let Some(npc) = world.get_npc_instance(npc_id) {
                 if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-                    let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-                    hp_pkt.write_u32(npc_id);
-                    hp_pkt.write_u8(0);
-                    hp_pkt.write_u32(tmpl.max_hp);
-                    hp_pkt.write_u32(new_hp as u32);
-                    hp_pkt.write_u32(0);
-                    hp_pkt.write_u32(0);
-                    hp_pkt.write_u8(0);
+                    let hp_pkt = crate::handler::target_hp::build_target_hp_packet(
+                        npc_id,
+                        0,
+                        tmpl.max_hp,
+                        new_hp as u32,
+                        caster_sid as u32,
+                        total_damage,
+                    );
                     world.send_to_session_owned(caster_sid, hp_pkt);
                 }
             }

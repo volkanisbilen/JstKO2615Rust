@@ -102,12 +102,18 @@ impl SmdFile {
             && candidate_unit_dist <= 100.0);
         if headered {
             if first <= 0 || first > 255 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid SMD header"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid SMD header",
+                ));
             }
             reader.seek(SeekFrom::Start(start + 4 + first as u64))?;
             let author_len = read_i32(reader)?;
             if author_len < 0 || author_len > 255 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid SMD author header"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid SMD author header",
+                ));
             }
             reader.seek(SeekFrom::Current(author_len as i64 + 10))?;
         } else {
@@ -200,7 +206,10 @@ impl SmdFile {
             Err(e) => return Err(e),
         };
         if regene_count < 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "negative regene event count"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "negative regene event count",
+            ));
         }
         let mut regene_events = Vec::with_capacity(regene_count.max(0) as usize);
         for i in 0..regene_count {

@@ -762,13 +762,21 @@ async fn handle_use_vault(
 
     debug!(
         "[{}] VIP_UseVault request: npc_id={} item_id={} src_pos={} current_expiry={}",
-        session.addr(), _npc_id, item_id, src_pos, current_expiry
+        session.addr(),
+        _npc_id,
+        item_id,
+        src_pos,
+        current_expiry
     );
 
     let days = match vip_key_days(item_id) {
         Some(days) => days,
         None => {
-            warn!("[{}] VIP_UseVault rejected unsupported key item_id={}", session.addr(), item_id);
+            warn!(
+                "[{}] VIP_UseVault rejected unsupported key item_id={}",
+                session.addr(),
+                item_id
+            );
             let err = build_error(VIP_USE_VAULT, 2);
             session.send_packet(&err).await?;
             return Ok(());
@@ -801,7 +809,9 @@ async fn handle_use_vault(
     if slot.flag == ITEM_FLAG_RENTED || slot.flag == ITEM_FLAG_DUPLICATE {
         warn!(
             "[{}] VIP_UseVault rejected item flag: item_id={} flag={}",
-            session.addr(), item_id, slot.flag
+            session.addr(),
+            item_id,
+            slot.flag
         );
         let err = build_error(VIP_USE_VAULT, 2);
         session.send_packet(&err).await?;
@@ -816,8 +826,12 @@ async fn handle_use_vault(
 
     // Consume exactly one key; v2615 keys are countable.
     let consumed = world.update_inventory(sid, |inv| {
-        let Some(src) = inv.get_mut(src_slot_idx) else { return false; };
-        if src.item_id != item_id || src.count == 0 { return false; }
+        let Some(src) = inv.get_mut(src_slot_idx) else {
+            return false;
+        };
+        if src.item_id != item_id || src.count == 0 {
+            return false;
+        }
         if src.count > 1 {
             src.count -= 1;
         } else {
@@ -837,7 +851,10 @@ async fn handle_use_vault(
 
     debug!(
         "[{}] VIP_UseVault activated: item_id={} days={} expiry={}",
-        session.addr(), item_id, days, new_expiry
+        session.addr(),
+        item_id,
+        days,
+        new_expiry
     );
 
     // Save to DB
@@ -1405,7 +1422,12 @@ mod tests {
     /// build_error produces correct opcode and 2-byte payload.
     #[test]
     fn test_build_error_all_subcodes() {
-        for sub in [VIP_OPEN, VIP_USE_VAULT, VIP_SET_PASSWORD, VIP_ENTER_PASSWORD] {
+        for sub in [
+            VIP_OPEN,
+            VIP_USE_VAULT,
+            VIP_SET_PASSWORD,
+            VIP_ENTER_PASSWORD,
+        ] {
             let pkt = build_error(sub, 1);
             assert_eq!(pkt.opcode, Opcode::WizVipwarehouse as u8);
             assert_eq!(pkt.data[0], sub);

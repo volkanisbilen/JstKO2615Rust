@@ -203,14 +203,14 @@ async fn process_single_pet_attack(world: &WorldState, pd: &crate::world::PetAtt
         .map(|t| t.max_hp)
         .unwrap_or(0);
 
-    let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-    hp_pkt.write_u32(pd.target_npc_id);
-    hp_pkt.write_u8(0);
-    hp_pkt.write_u32(max_hp as u32);
-    hp_pkt.write_u32(new_hp.max(0) as u32);
-    hp_pkt.write_u32((-damage as i32) as u32); // C++ sends negative
-    hp_pkt.write_u32(0);
-    hp_pkt.write_u8(0);
+    let hp_pkt = crate::handler::target_hp::build_target_hp_packet(
+        pd.target_npc_id,
+        0,
+        max_hp as u32,
+        new_hp.max(0) as u32,
+        pd.session_id as u32,
+        -(damage as i32),
+    );
     world.send_to_session_owned(pd.session_id, hp_pkt);
 
     debug!(

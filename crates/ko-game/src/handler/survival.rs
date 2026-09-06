@@ -68,7 +68,6 @@ pub fn build_registration_result(result: i16, participant_count: u16) -> Packet 
     pkt
 }
 
-
 /// Initialise the v2615 Manes Survival client state.
 ///
 /// Verified against `sub_716A10 -> sub_7113D0`, operation 1:
@@ -238,10 +237,7 @@ pub fn build_event_score(my_score: u32, my_rank: u16, entries: &[ManesRankEntry]
     pkt
 }
 
-pub fn build_skill_selection_open(
-    skill_choices: &[u16],
-    potion_choices: &[u16],
-) -> Packet {
+pub fn build_skill_selection_open(skill_choices: &[u16], potion_choices: &[u16]) -> Packet {
     let mut pkt = Packet::new(WIZ_SURVIVAL);
     pkt.write_u8(CATEGORY_SKILL);
     pkt.write_u8(SKILL_OPEN);
@@ -284,8 +280,8 @@ pub fn build_selection_submit_result(list_type: u8, result: i16) -> Packet {
 }
 
 pub fn broadcast_registration_status(world: &crate::world::WorldState, elapsed_seconds: u32) {
-    let remaining = REGISTRATION_DURATION_SECONDS
-        .saturating_sub(elapsed_seconds.min(u16::MAX as u32) as u16);
+    let remaining =
+        REGISTRATION_DURATION_SECONDS.saturating_sub(elapsed_seconds.min(u16::MAX as u32) as u16);
     let participants = world
         .manes_survival_manager
         .participant_count()
@@ -354,11 +350,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             .find(|entry| entry.0 == session.session_id())
             .map(|entry| entry.2)
             .unwrap_or(0);
-        let entries: Vec<_> = ranked
-            .into_iter()
-            .take(20)
-            .map(|entry| entry.3)
-            .collect();
+        let entries: Vec<_> = ranked.into_iter().take(20).map(|entry| entry.3).collect();
         session
             .send_packet(&build_event_score(score, rank, &entries))
             .await?;
@@ -433,9 +425,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
         let sid = session.session_id();
         let world = session.world().clone();
-        let purchase = world
-            .manes_survival_manager
-            .potion_purchase(manes_magic_id);
+        let purchase = world.manes_survival_manager.potion_purchase(manes_magic_id);
         let valid_request = list_type == SELECTION_LIST_POTION
             && no_trailing_data
             && world
@@ -558,7 +548,10 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                 .await?;
             debug!(
                 "[{}] Manes registration apply sid={} result={} participants={}",
-                session.addr(), sid, result, manager.participant_count()
+                session.addr(),
+                sid,
+                result,
+                manager.participant_count()
             );
         }
         ACTION_CANCEL => {
@@ -572,12 +565,15 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                 .await?;
             debug!(
                 "[{}] Manes registration cancel sid={} participants={}",
-                session.addr(), sid, manager.participant_count()
+                session.addr(),
+                sid,
+                manager.participant_count()
             );
         }
         _ => warn!(
             "[{}] WIZ_SURVIVAL invalid registration action={}",
-            session.addr(), action
+            session.addr(),
+            action
         ),
     }
 
@@ -612,9 +608,8 @@ mod tests {
         assert_eq!(
             packet.data,
             vec![
-                0x02, 0x02, 0x0A, 0x00, b'r', b'e', b'd', b' ', b'd', b'r', b'a', b'g',
-                b'o', b'n', 0x20, 0xA1, 0x07, 0x00, 0xD0, 0xDD, 0x06, 0x00, 0x04, 0x02,
-                0x00, 0x00,
+                0x02, 0x02, 0x0A, 0x00, b'r', b'e', b'd', b' ', b'd', b'r', b'a', b'g', b'o', b'n',
+                0x20, 0xA1, 0x07, 0x00, 0xD0, 0xDD, 0x06, 0x00, 0x04, 0x02, 0x00, 0x00,
             ]
         );
     }
@@ -644,9 +639,9 @@ mod tests {
         assert_eq!(
             packet.data,
             vec![
-                0x02, 0x03, 0x01, 0x01, 0x00, 0xB4, 0x00, 0x00, 0x00, 0x01, 0x02, 0xCD,
-                0x00, 0x05, 0x00, b'J', b's', b't', b'K', b'O', 0x05, 0x00, b'J', b's',
-                b't', b'V', b'K', 0x0A, 0x00, 0xB4, 0x00, 0x00, 0x00,
+                0x02, 0x03, 0x01, 0x01, 0x00, 0xB4, 0x00, 0x00, 0x00, 0x01, 0x02, 0xCD, 0x00, 0x05,
+                0x00, b'J', b's', b't', b'K', b'O', 0x05, 0x00, b'J', b's', b't', b'V', b'K', 0x0A,
+                0x00, 0xB4, 0x00, 0x00, 0x00,
             ]
         );
     }
@@ -679,8 +674,7 @@ mod tests {
         assert_eq!(
             packet.data,
             vec![
-                0x06, 0x01, 0x03, 0x2D, 0x01, 0x91, 0x01, 0x0D, 0x17, 0x02, 0x39, 0x18, 0x65,
-                0x19
+                0x06, 0x01, 0x03, 0x2D, 0x01, 0x91, 0x01, 0x0D, 0x17, 0x02, 0x39, 0x18, 0x65, 0x19
             ]
         );
     }

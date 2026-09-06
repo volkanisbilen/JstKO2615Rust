@@ -333,7 +333,12 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     pkt.write_u8(ch.face as u8); // face (+3016) — AFTER hair, not before
     pkt.write_u8(ch.title as u8); // title2 (+1964)
     pkt.write_u8(0); // title1 (+1960)
-    pkt.write_u8(ch.rank as u8); // rank (+3020) — AFTER titles
+                     // C++ SendMyInfo recalculates m_bRank from the KING_SYSTEM record immediately
+                     // before serialising MyInfo.  The persisted character `rank` is the ladder
+                     // rank and must not be used here (rank=1 made ordinary users look like kings,
+                     // hid the regular cloak catalogue and replaced their clan cape with 97/98).
+    let is_king = session.world().is_king(ch.nation as u8, &ch.str_user_id);
+    pkt.write_u8(u8::from(is_king)); // king rank (+3020) — AFTER titles
     pkt.write_u8(ch.level as u8); // level (+1744)
     pkt.write_i16(ch.points as i16); // points (+3044, sub_61EE80 = i16)
 
@@ -364,7 +369,7 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
                 pkt.write_u8(ki.ranking);
                 pkt.write_u16(ki.mark_version);
                 // Cape: sniffer shows u16 cape_id + u32(R,G,B,flag)
-                let cape_id = if ch.rank == 1 {
+                let cape_id = if is_king {
                     if ch.nation == 1 {
                         97u16
                     } else {
@@ -373,11 +378,28 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
                 } else {
                     ki.cape
                 };
+                tracing::info!(
+                    character = %ch.str_user_id,
+                    clan_id,
+                    clan_flag = ki.flag,
+                    clan_grade = ki.grade,
+                    cape_id,
+                    cape_r = ki.cape_r,
+                    cape_g = ki.cape_g,
+                    cape_b = ki.cape_b,
+                    cape_symbol = u8::from(ki.flag > 1 && ki.grade < 3),
+                    "MyInfo cape state"
+                );
                 pkt.write_u16(cape_id);
                 pkt.write_u8(ki.cape_r);
                 pkt.write_u8(ki.cape_g);
                 pkt.write_u8(ki.cape_b);
-                pkt.write_u8(0); // flag
+                // This is a cape-symbol visibility bit, not the clan type.
+                // The v2615 client accepts only 0/1 here.  A promoted clan
+                // (flag=2) is therefore sent as 1 when its grade may show a
+                // cape; writing the raw flag (2) makes its cloak model and
+                // the mantle catalogue disappear.
+                pkt.write_u8(u8::from(ki.flag > 1 && ki.grade < 3));
             }
             None => {
                 // Clan exists but not loaded — send empty clan data
@@ -665,17 +687,20 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
 
     // DEBUG: dump full uncompressed MyInfo to file for analysis
     {
-        let dump_path = "captures/myinfo_ours.bin";
+        let dump_dir = std::path::Path::new("captures");
+        let dump_path = dump_dir.join("myinfo_ours.bin");
         let mut full = Vec::with_capacity(1 + pkt.data.len());
         full.push(pkt.opcode);
         full.extend_from_slice(&pkt.data);
-        if let Err(e) = std::fs::write(dump_path, &full) {
+        if let Err(e) =
+            std::fs::create_dir_all(dump_dir).and_then(|_| std::fs::write(&dump_path, &full))
+        {
             tracing::warn!("Failed to write MyInfo dump: {}", e);
         } else {
             tracing::info!(
                 "[{}] MyInfo dumped to {} ({} bytes)",
                 session.addr(),
-                dump_path,
+                dump_path.display(),
                 full.len()
             );
         }
@@ -813,6 +838,13 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
             None => npc_pkt,
         };
         session.send_packet(&to_send_npc).await?;
+
+        // The client normally follows the region list with asynchronous
+        // REQ_NPCIN requests.  In dense Moradon regions that queue can delay
+        // newly-created static NPCs noticeably.  Send their full INOUT data in
+        // the same entry sequence as well, so merchant/quest NPCs are visible
+        // immediately instead of waiting for the client request batches.
+        super::region::send_nearby_npc_inouts(session).await?;
     }
 
     // seq 32: WIZ_NOTICE (0x2E, 3 bytes) — sniffer: 2e0100
@@ -1282,6 +1314,12 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
     tracing::info!("[{}] Phase2 step6: broadcast_user_in", session.addr());
     region::broadcast_user_in(session).await?;
 
+    // Do not send KNIGHTS_UPDATE to the player during login.  The reference
+    // server establishes the local clan/cape state solely through WIZ_MYINFO;
+    // KNIGHTS_UPDATE is emitted only when a clan state actually changes.
+    // Sending the update immediately after USER_INOUT re-parses the local clan
+    // record in the v2615 client and can replace the MyInfo cloak catalogue.
+
     // 7b. If the player is dead on login, broadcast death animation so the
     //     client shows the revive UI
     if hp <= 0 {
@@ -1341,7 +1379,6 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
     // 8. Load quest data from DB and send to client
     tracing::info!("[{}] Phase2 step8: quest data load+send", session.addr());
     quest::load_quest_data(session).await?;
-    quest::send_quest_data(session).await?;
 
     // 8b. Load daily quest progress from DB and send to client
     {
@@ -1366,27 +1403,19 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
             }
         }
 
-        // Fill missing quests with default Ongoing state
-        let all_defs = world.get_all_daily_quests();
-        for def in &all_defs {
-            dq_map
-                .entry(def.id)
-                .or_insert_with(|| ko_db::models::daily_quest::UserDailyQuestRow {
-                    character_id: char_id.clone(),
-                    quest_id: def.id,
-                    kill_count: 0,
-                    status: ko_db::models::daily_quest::DailyQuestStatus::Ongoing as i16,
-                    replay_time: 0,
-                });
-        }
-
         world.update_session(sid, |h| {
             h.daily_quests = dq_map;
         });
-
-        // Send quest definitions + user progress to client
-        super::daily_quest::daily_quest_send_list(&world, sid);
     }
+
+    // Quest Tips reads the normal per-user quest map. Mirror selected daily
+    // quests into it before sending the combined quest list.
+    super::daily_quest::sync_daily_quests_into_normal_map(&world, session.session_id());
+
+    // Send one combined Quest Tips list only after both normal and selected
+    // daily quests are loaded. The daily protocol itself follows immediately.
+    quest::send_quest_data(session).await?;
+    super::daily_quest::daily_quest_send_list(&world, session.session_id());
 
     // 9. Load saved magic (buff persistence) and recast
     tracing::info!("[{}] Phase2 step9: saved magic + blink", session.addr());
@@ -2380,7 +2409,10 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
     pkt.write_u8(ch.face); // face (+3016) — AFTER hair, not before
     pkt.write_u8(ch.title); // title2 (+1964)
     pkt.write_u8(0); // title1 (+1960)
-    pkt.write_u8(ch.rank); // rank (+3020) — AFTER titles
+                     // SendMyInfo.cpp resets m_bRank from KING_SYSTEM on every MyInfo build.
+                     // `CharacterInfo::rank` is a ladder value and is not a king flag.
+    let is_king = world.is_king(ch.nation, &ch.name);
+    pkt.write_u8(u8::from(is_king)); // king rank (+3020) — AFTER titles
     pkt.write_u8(ch.level); // level (+1744)
     pkt.write_i16(ch.free_points as i16); // points (+3044, sub_61EE80 = i16)
 
@@ -2399,12 +2431,15 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
         match world.get_knights(clan_id as u16) {
             Some(ki) => {
                 pkt.write_u16(ki.alliance);
+                // This is the clan type/flag. Writing zero here makes the
+                // v2615 cloak palette treat a promoted clan as Training and
+                // filter every purchasable cape out of Cloak.tbl.
                 pkt.write_u8(ki.flag);
                 pkt.write_sbyte_string(&ki.name);
                 pkt.write_u8(ki.grade);
                 pkt.write_u8(ki.ranking);
                 pkt.write_u16(ki.mark_version);
-                let cape_id = if ch.rank == 1 {
+                let cape_id = if is_king {
                     if ch.nation == 1 {
                         97u16
                     } else {
@@ -2417,7 +2452,10 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
                 pkt.write_u8(ki.cape_r);
                 pkt.write_u8(ki.cape_g);
                 pkt.write_u8(ki.cape_b);
-                pkt.write_u8(0);
+                // MyInfo's trailing byte is the 0/1 cape-symbol visibility
+                // bit. It is deliberately different from USER_INOUT's clan
+                // type field: the v2615 cloak UI rejects raw clan flag 2.
+                pkt.write_u8(u8::from(ki.flag > 1 && ki.grade < 3));
             }
             None => {
                 pkt.write_u64(0);

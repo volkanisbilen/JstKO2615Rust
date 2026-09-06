@@ -57,16 +57,18 @@ impl<'a> KnightsRepository<'a> {
         name: &str,
         chief: &str,
         flag: i16,
+        points: i32,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "INSERT INTO knights (id_num, flag, nation, id_name, chief, members)
-             VALUES ($1, $2, $3, $4, $5, 1)",
+            "INSERT INTO knights (id_num, flag, nation, id_name, chief, members, points, s_cape)
+             VALUES ($1, $2, $3, $4, $5, 1, $6, CASE WHEN $2 >= 2 THEN 0 ELSE -1 END)",
         )
         .bind(id_num)
         .bind(flag)
         .bind(nation)
         .bind(name)
         .bind(chief)
+        .bind(points)
         .execute(self.pool)
         .await?;
         Ok(())
@@ -482,7 +484,7 @@ impl<'a> KnightsRepository<'a> {
         Ok(())
     }
 
-    /// Update a clan's flag and cape after demotion.
+    /// Update a clan's type flag and normal cape after promotion/demotion.
     ///
     pub async fn update_flag_cape(
         &self,
@@ -490,7 +492,7 @@ impl<'a> KnightsRepository<'a> {
         flag: i16,
         cape: i16,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE knights SET flag = $1, cape = $2 WHERE id_num = $3")
+        sqlx::query("UPDATE knights SET flag = $1, s_cape = $2 WHERE id_num = $3")
             .bind(flag)
             .bind(cape)
             .bind(id_num)

@@ -199,7 +199,11 @@ pub fn juraid_winner_gem(level: u8, rebirth_level: u8) -> Option<u32> {
 }
 
 pub fn juraid_reward_gem_count(is_winner: bool) -> u16 {
-    if is_winner { 10 } else { 3 }
+    if is_winner {
+        10
+    } else {
+        3
+    }
 }
 
 // ── Juraid Bridge State ─────────────────────────────────────────────────────

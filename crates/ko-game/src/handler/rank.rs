@@ -268,7 +268,7 @@ fn build_pk_ranking_packet(
                     bot.name,
                     bot.nation,
                     bot.knights_id,
-                    bot.loyalty,
+                    bot.loyalty_daily,
                     0,
                     symbol_rank,
                 ));
