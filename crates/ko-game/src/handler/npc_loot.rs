@@ -7,6 +7,7 @@
 //! 5. Creates a GroundBundle at the NPC's position
 //! 6. Sends WIZ_ITEM_DROP to the killer (or party)
 
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
@@ -143,6 +144,162 @@ fn npc_item_to_monster_item(npc_row: &ko_db::models::NpcItemRow) -> ko_db::model
     }
 }
 
+/// Aggregated result produced by the C++ compatible GM `+drop` tester.
+pub struct DropTestSummary {
+    pub npc_name: String,
+    pub coins: u64,
+    pub items: Vec<(u32, u32, String)>,
+}
+
+/// Simulate a selected NPC's loot table without killing it.
+///
+/// This follows `CNpc::DropTesterHaveItem()` and the live Rust loot modifiers,
+/// aggregating all rolls so the GM can inspect and receive the result.
+pub fn simulate_npc_drops(
+    world: &WorldState,
+    tester_sid: SessionId,
+    npc_id: NpcId,
+    roll_count: u16,
+) -> Result<DropTestSummary, String> {
+    let npc = world
+        .get_npc_instance(npc_id)
+        .ok_or_else(|| "Target NPC not found.".to_string())?;
+    let tmpl = world
+        .get_npc_template(npc.proto_id, npc.is_monster)
+        .ok_or_else(|| "Target NPC template not found.".to_string())?;
+    let tester_room = world
+        .with_session(tester_sid, |h| (h.position.zone_id, h.event_room))
+        .ok_or_else(|| "GM session not found.".to_string())?;
+    if npc.zone_id != tester_room.0 || npc.event_room != tester_room.1 {
+        return Err("Target NPC is not in your zone/event room.".to_string());
+    }
+
+    let drop_table = if tmpl.item_table == 0 {
+        None
+    } else if tmpl.is_monster {
+        world.get_monster_item(tmpl.item_table)
+    } else {
+        world
+            .get_npc_item(tmpl.item_table)
+            .map(|row| npc_item_to_monster_item(&row))
+    };
+    let drop_slots = drop_table.as_ref().map(extract_drop_slots);
+    let nation = world
+        .get_character_info(tester_sid)
+        .map(|ch| ch.nation)
+        .unwrap_or(0);
+    let premium = world.get_premium_property(tester_sid, PremiumProperty::DropPercent);
+    let scroll = world
+        .with_session(tester_sid, |h| h.drop_scroll_amount)
+        .unwrap_or(0) as i32;
+    let clan = world.get_clan_premium_property(tester_sid, PremiumProperty::DropPercent);
+    let flame_level = crate::systems::flash::get_flame_level(world, tester_sid);
+    let flame_drop = if flame_level > 0 {
+        world
+            .get_burning_feature(flame_level)
+            .map(|feature| feature.drop_rate.max(0) as i32)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let drop_event = world
+        .game_time_weather()
+        .drop_event_amount
+        .load(Ordering::Relaxed) as i32;
+    let coin_event = world
+        .game_time_weather()
+        .coin_event_amount
+        .load(Ordering::Relaxed) as u64;
+    let perk = world
+        .with_session(tester_sid, |h| {
+            world.compute_perk_bonus(&h.perk_levels, 4, false)
+        })
+        .unwrap_or(0);
+
+    let mut rng = rand::thread_rng();
+    let mut coins = 0u64;
+    let mut aggregate: BTreeMap<u32, u32> = BTreeMap::new();
+    for _ in 0..roll_count {
+        if tmpl.money > 0 {
+            let pct = rng.gen_range(70..=100) as u64;
+            let base = ((tmpl.money as u64 * pct) / 100).min(32_000);
+            coins = coins.saturating_add((base * (100 + coin_event) / 100).min(u16::MAX as u64));
+        }
+
+        let Some(slots) = drop_slots else { continue };
+        for (item_code, percent) in slots {
+            if item_code == 0 || percent <= 0 {
+                continue;
+            }
+            let mut chance = percent as i32;
+            if premium > 0 {
+                chance += chance * premium / 100;
+            }
+            if scroll > 0 {
+                chance = chance * (100 + scroll) / 100;
+            }
+            if clan > 0 {
+                chance += chance * clan / 100;
+            }
+            if flame_drop > 0 {
+                chance += chance * flame_drop / 100;
+            }
+            if drop_event > 0 {
+                chance = chance * (100 + drop_event) / 100;
+            }
+            if perk > 0 {
+                chance += chance * perk / 100;
+            }
+            chance = chance.clamp(0, 10_000);
+            if rng.gen_range(0..10_000) >= chance {
+                continue;
+            }
+
+            let resolved = if item_code >= 100_000_000 {
+                item_code as u32
+            } else if item_code < 100 {
+                super::item_production::item_production(world, item_code, tmpl.level as i32, nation)
+            } else if let Some(group) = world.get_make_item_group(item_code) {
+                if group.items.is_empty() {
+                    0
+                } else {
+                    group.items[rng.gen_range(0..group.items.len())] as u32
+                }
+            } else {
+                0
+            };
+            if resolved == 0 {
+                continue;
+            }
+            let amount = if (391_010_000..=392_010_000).contains(&resolved) {
+                20
+            } else {
+                1
+            };
+            aggregate
+                .entry(resolved)
+                .and_modify(|count| *count = count.saturating_add(amount))
+                .or_insert(amount);
+        }
+    }
+
+    let items = aggregate
+        .into_iter()
+        .map(|(item_id, count)| {
+            let name = world
+                .get_item(item_id)
+                .and_then(|item| item.str_name)
+                .unwrap_or_else(|| format!("Item {}", item_id));
+            (item_id, count, name)
+        })
+        .collect();
+    Ok(DropTestSummary {
+        npc_name: tmpl.name.clone(),
+        coins,
+        items,
+    })
+}
+
 /// Generate loot for a killed NPC and create a ground bundle.
 /// Returns the bundle_id if loot was generated, None if no loot.
 pub fn generate_npc_loot(
@@ -152,6 +309,10 @@ pub fn generate_npc_loot(
     npc: &NpcInstance,
     tmpl: &NpcTemplate,
 ) -> Option<u32> {
+    if matches!(npc.zone_id, 57..=60) && (10701..=10733).contains(&npc.proto_id) {
+        return generate_manes_survival_loot(world, killer_sid, npc_id, npc);
+    }
+
     let mut rng = rand::thread_rng();
 
     // Get drop table for this NPC
@@ -196,6 +357,28 @@ pub fn generate_npc_loot(
                 slot_id: 0,
             };
             item_count += 1;
+        }
+    }
+
+    // Captain Fargo's quest uses the isolated Zone 82 / Family 71 room.
+    // Keep these drops scoped to that room; the same monster prototypes can
+    // be used elsewhere and must not inherit quest-certificate drops.
+    if let Some((item_id, chance_per_10k)) = monster_stone_family_71_drop(world, npc) {
+        if chance_per_10k == 10_000 || rng.gen_range(0..10_000) < chance_per_10k {
+            items[item_count as usize] = LootItem {
+                item_id,
+                count: 1,
+                slot_id: item_count as u16,
+            };
+            item_count += 1;
+            tracing::debug!(
+                npc_id,
+                npc_proto = npc.proto_id,
+                event_room = npc.event_room,
+                item_id,
+                chance_per_10k,
+                "Captain Fargo Monster Stone quest item dropped"
+            );
         }
     }
 
@@ -388,6 +571,98 @@ pub fn generate_npc_loot(
     Some(bundle_id)
 }
 
+/// Return the fixed quest drop contract for Captain Fargo's Monster Stone.
+fn monster_stone_family_71_drop(world: &WorldState, npc: &NpcInstance) -> Option<(u32, i32)> {
+    if npc.zone_id != 82 || npc.event_room == 0 {
+        return None;
+    }
+    let room_id = npc.event_room - 1;
+    let is_family_71 = world
+        .monster_stone_read()
+        .get_room(room_id)
+        .is_some_and(|room| room.active && room.zone_id == 82 && room.monster_family == 71);
+    if !is_family_71 {
+        return None;
+    }
+
+    monster_stone_family_71_drop_contract(npc.proto_id)
+}
+
+fn monster_stone_family_71_drop_contract(proto_id: u16) -> Option<(u32, i32)> {
+    const CERTIFICATE_OF_HUNTING: u32 = 910_138_000;
+    const GRIEF_REAPER_CERTIFICATE: u32 = 910_135_000;
+
+    match proto_id {
+        7005..=7007 => Some((CERTIFICATE_OF_HUNTING, 4_000)), // 40%
+        7008 => Some((GRIEF_REAPER_CERTIFICATE, 10_000)),     // 100%
+        _ => None, // Gates and support NPCs never receive quest loot.
+    }
+}
+
+/// Manes Survival has an isolated, fixed loot contract: no gold, ordinary
+/// monster table, premium, scroll, clan or global-event modifiers apply.
+fn generate_manes_survival_loot(
+    world: &WorldState,
+    killer_sid: SessionId,
+    npc_id: NpcId,
+    npc: &NpcInstance,
+) -> Option<u32> {
+    const MANES_ORB_ITEM: u32 = 978_026_000;
+
+    let chance_per_10k = match npc.proto_id {
+        10701..=10709 => 100,   // lower grade and lower bosses: 1%
+        10710..=10719 => 500,   // middle grade and middle bosses: 5%
+        10720..=10728 => 2_000, // high-grade normal monsters: 20%
+        10729..=10732 => 4_500, // high-grade bosses: 45%
+        10733 => 0,             // Dark Dragon resolves the victory reward instead
+        _ => return None,
+    };
+
+    if chance_per_10k == 0 || rand::thread_rng().gen_range(0..10_000) >= chance_per_10k {
+        return None;
+    }
+
+    let mut items: [LootItem; NPC_HAVE_ITEM_LIST] = Default::default();
+    items[0] = LootItem {
+        item_id: MANES_ORB_ITEM,
+        count: 1,
+        slot_id: 0,
+    };
+
+    let bundle_id = world.allocate_bundle_id();
+    world.add_ground_bundle(GroundBundle {
+        bundle_id,
+        items_count: 1,
+        npc_id: npc.proto_id,
+        looter: killer_sid,
+        x: npc.x,
+        z: npc.z,
+        y: npc.y,
+        zone_id: npc.zone_id,
+        drop_time: Instant::now(),
+        items,
+    });
+
+    let mut drop_pkt = Packet::new(Opcode::WizItemDrop as u8);
+    drop_pkt.write_u32(npc_id);
+    drop_pkt.write_u32(bundle_id);
+    drop_pkt.write_u8(1);
+
+    if let Some(party) = world
+        .get_party_id(killer_sid)
+        .and_then(|id| world.get_party(id))
+    {
+        for member_sid in party.active_members() {
+            world.send_to_session(member_sid, &drop_pkt);
+        }
+    } else {
+        world.send_to_session_owned(killer_sid, drop_pkt);
+    }
+
+    try_auto_loot(world, killer_sid, bundle_id, npc);
+    Some(bundle_id)
+}
+
 /// Get the next item routing user for party round-robin distribution.
 /// Uses the party's `item_routing` cursor to find the next eligible member
 /// who is alive, in range, and has weight/slot capacity.
@@ -422,15 +697,18 @@ fn get_item_routing_user(
         };
 
         // Single DashMap read: check alive + in-range (2 reads → 1)
-        let alive_in_range = world.with_session(member_sid, |h| {
-            let ch = h.character.as_ref()?;
-            if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
-                return None;
-            }
-            let dx = h.position.x - sender_pos.x;
-            let dz = h.position.z - sender_pos.z;
-            Some(dx * dx + dz * dz <= RANGE_50M)
-        }).flatten().unwrap_or(false);
+        let alive_in_range = world
+            .with_session(member_sid, |h| {
+                let ch = h.character.as_ref()?;
+                if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
+                    return None;
+                }
+                let dx = h.position.x - sender_pos.x;
+                let dz = h.position.z - sender_pos.z;
+                Some(dx * dx + dz * dz <= RANGE_50M)
+            })
+            .flatten()
+            .unwrap_or(false);
         if !alive_in_range {
             continue;
         }
@@ -463,6 +741,9 @@ fn get_item_routing_user(
 /// Try to auto-loot a ground bundle for the killer or their party.
 /// Checks killer and party members for `auto_loot` flag, then picks up all
 /// items in the bundle automatically. `fairy_check` blocks auto-loot.
+const PET_AUTO_LOOT_ITEM_ID: u32 = 850_680_000;
+const PET_LOOT_MODE: u8 = 8;
+
 fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc: &NpcInstance) {
     use super::{INVENTORY_TOTAL, SLOT_MAX};
     use crate::world::{COIN_MAX, ITEMCOUNT_MAX, ITEM_GOLD, RANGE_50M};
@@ -473,27 +754,59 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
 
     // C++ Npc.cpp:7934-7982 — party scan checks ONLY m_bAutoLoot (NOT fairy_check).
     // fairy_check is checked later inside auto-loot bundle pickup (BundleSystem.cpp:43).
-    let auto_loot_user = if let Some(ref party) = party {
-        let mut found = None;
-        for &member_sid in &party.active_members() {
-            // Single DashMap read: auto_loot flag + range check (2 reads → 1)
-            let auto_in_range = world.with_session(member_sid, |h| {
-                if !h.auto_loot { return false; }
+    let is_pet_loot_eligible = |member_sid: SessionId| -> bool {
+        world
+            .with_session(member_sid, |h| {
+                let pet_ok = h
+                    .pet_data
+                    .as_ref()
+                    .map(|pet| {
+                        pet.nid != 0
+                            && pet.state_change == PET_LOOT_MODE
+                            && pet
+                                .items
+                                .iter()
+                                .any(|slot| slot.item_id == PET_AUTO_LOOT_ITEM_ID)
+                    })
+                    .unwrap_or(false);
+
                 let dx = h.position.x - npc.x;
                 let dz = h.position.z - npc.z;
-                dx * dx + dz * dz <= RANGE_50M * 4.0
-            }).unwrap_or(false);
-            if auto_in_range {
+
+                pet_ok && dx * dx + dz * dz <= RANGE_50M * 4.0
+            })
+            .unwrap_or(false)
+    };
+
+    let auto_loot_user = if let Some(ref party) = party {
+        let mut found = None;
+
+        for &member_sid in &party.active_members() {
+            let normal_auto_loot = world
+                .with_session(member_sid, |h| {
+                    if !h.auto_loot {
+                        return false;
+                    }
+
+                    let dx = h.position.x - npc.x;
+                    let dz = h.position.z - npc.z;
+                    dx * dx + dz * dz <= RANGE_50M * 4.0
+                })
+                .unwrap_or(false);
+
+            if normal_auto_loot || is_pet_loot_eligible(member_sid) {
                 found = Some(member_sid);
                 break;
             }
         }
+
         found
     } else {
-        let has_auto = world
+        let normal_auto_loot = world
             .with_session(killer_sid, |h| h.auto_loot)
             .unwrap_or(false);
-        if has_auto {
+
+        if normal_auto_loot || is_pet_loot_eligible(killer_sid) {
             Some(killer_sid)
         } else {
             None
@@ -506,10 +819,26 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
     };
 
     // C++ BundleSystem.cpp:43 — fairy_check blocks auto-loot inside bundle pickup
-    let fairy_blocks = world
-        .with_session(looter_sid, |h| h.fairy_check)
-        .unwrap_or(false);
-    if fairy_blocks {
+    let (fairy_blocks, pet_loot_active) = world
+        .with_session(looter_sid, |h| {
+            let pet_loot_active = h
+                .pet_data
+                .as_ref()
+                .map(|pet| {
+                    pet.nid != 0
+                        && pet.state_change == PET_LOOT_MODE
+                        && pet
+                            .items
+                            .iter()
+                            .any(|slot| slot.item_id == PET_AUTO_LOOT_ITEM_ID)
+                })
+                .unwrap_or(false);
+
+            (h.fairy_check, pet_loot_active)
+        })
+        .unwrap_or((false, false));
+
+    if fairy_blocks && !pet_loot_active {
         return;
     }
 
@@ -536,15 +865,18 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
                 let mut eligible: Vec<SessionId> = Vec::with_capacity(8);
                 for &member_sid in &party.active_members() {
                     // Single DashMap read: check alive + in-range (2 reads → 1)
-                    let in_range = world.with_session(member_sid, |h| {
-                        let ch = h.character.as_ref()?;
-                        if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
-                            return None;
-                        }
-                        let dx = h.position.x - npc.x;
-                        let dz = h.position.z - npc.z;
-                        Some(dx * dx + dz * dz <= RANGE_50M)
-                    }).flatten().unwrap_or(false);
+                    let in_range = world
+                        .with_session(member_sid, |h| {
+                            let ch = h.character.as_ref()?;
+                            if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
+                                return None;
+                            }
+                            let dx = h.position.x - npc.x;
+                            let dz = h.position.z - npc.z;
+                            Some(dx * dx + dz * dz <= RANGE_50M)
+                        })
+                        .flatten()
+                        .unwrap_or(false);
                     if in_range {
                         eligible.push(member_sid);
                     }
@@ -711,12 +1043,33 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
         }
     }
 
-    tracing::debug!("Auto-loot: bundle_id={} looter={}", bundle_id, looter_sid);
+    tracing::debug!(
+        "Auto-loot: bundle_id={} looter={} pet_loot={}",
+        bundle_id,
+        looter_sid,
+        pet_loot_active
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_captain_fargo_family_71_drop_contract() {
+        for proto_id in 7005..=7007 {
+            assert_eq!(
+                monster_stone_family_71_drop_contract(proto_id),
+                Some((910_138_000, 4_000))
+            );
+        }
+        assert_eq!(
+            monster_stone_family_71_drop_contract(7008),
+            Some((910_135_000, 10_000))
+        );
+        assert_eq!(monster_stone_family_71_drop_contract(7033), None);
+        assert_eq!(monster_stone_family_71_drop_contract(16062), None);
+    }
 
     #[test]
     fn test_is_show_box_normal_monster() {

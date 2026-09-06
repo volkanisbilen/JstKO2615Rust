@@ -26,9 +26,15 @@ use ko_protocol::{Opcode, Packet, PacketReader};
 use std::sync::Arc;
 use tracing::debug;
 
+use crate::npc::{build_npc_inout, NpcInstance, NPC_IN};
 use crate::session::{ClientSession, SessionState};
 
 /// Pet mode constants — `GameDefine.h:1153-1158`.
+const MODE_SUMMON: u8 = 2;
+
+/// Base NPC template used for summoned Kaul pets.
+/// npc_template.s_sid=19000, by_type=15, s_pid=25500.
+const PET_RUNTIME_TEMPLATE_SID: u16 = 19_000;
 pub(crate) const MODE_ATTACK: u8 = 3;
 const MODE_DEFENCE: u8 = 4;
 const MODE_LOOTING: u8 = 8;
@@ -122,7 +128,12 @@ async fn handle_pet_use_skill(
         _ => return Ok(()),
     };
 
-    let _sub_code = match r.read_u8() {
+    // A pet must be spawned before it can cast or begin a family attack.
+    if pet_nid == 0 || world.get_npc_instance(pet_nid as u32).is_none() {
+        return Ok(());
+    }
+
+    let sub_code = match r.read_u8() {
         Some(v) => v,
         None => return Ok(()),
     };
@@ -135,8 +146,29 @@ async fn handle_pet_use_skill(
         return Ok(());
     }
 
-    let _caster_id = r.read_u32().unwrap_or(0);
+    let caster_id = r.read_u32().unwrap_or(0);
     let target_id = r.read_u32().unwrap_or(0);
+
+    debug!(
+        "[{}] WIZ_PET: PetUseSkill received sub_code={} skill_id={} caster={} target={} pet_nid={} mode={}",
+        session.addr(),
+        sub_code,
+        skill_id,
+        caster_id,
+        target_id,
+        pet_nid,
+        pet_mode
+    );
+
+    // v2615 uses the full 32-bit runtime NPC ID here.  Validate the target
+    // before arming the background attack tick; player IDs and dead/missing
+    // NPCs are not valid pet attack targets.
+    if target_id < crate::npc::NPC_BAND
+        || world.get_npc_instance(target_id).is_none()
+        || world.is_npc_dead(target_id)
+    {
+        return Ok(());
+    }
 
     // Build and broadcast WIZ_MAGIC_PROCESS effecting packet from the pet's
     // perspective so the skill visual plays on all nearby clients.
@@ -163,26 +195,50 @@ async fn handle_pet_use_skill(
         );
     }
 
-    // If pet was in defence mode, auto-switch to attack mode
+    // Start or retarget the pet's server-side auto-attack.
+    //
+    // pet_attack_tick only processes pets when attack_started=true and
+    // attack_target_id contains a valid runtime NPC ID.
+    world.update_session(sid, |h| {
+        if let Some(ref mut pet) = h.pet_data {
+            pet.state_change = MODE_ATTACK;
+            pet.attack_started = true;
+            pet.attack_target_id = target_id as i32;
+        }
+    });
+
+    // The v2615 client keeps its own copy of the pet mode.  The reference
+    // server acknowledges the automatic DEFENCE -> ATTACK transition after
+    // Designated Pet Attack.  Without this packet the server attacks, but the
+    // client still considers the pet defensive and suppresses the remaining
+    // active pet skills before they ever reach WIZ_PET.
     if pet_mode == MODE_DEFENCE {
-        world.update_session(sid, |h| {
-            if let Some(ref mut pet) = h.pet_data {
-                pet.state_change = MODE_ATTACK;
-            }
-        });
+        let mode_pkt = build_pet_mode_change_packet(MODE_ATTACK);
+        session.send_packet(&mode_pkt).await?;
     }
 
     // Decrease satisfaction by 10 per skill use
     pet_satisfaction_update(session, -10).await;
 
     debug!(
-        "[{}] WIZ_PET: PetUseSkill skill_id={} pet_nid={} target={}",
+        "[{}] WIZ_PET: PetUseSkill attack_started skill_id={} pet_nid={} target={}",
         session.addr(),
         skill_id,
         pet_nid,
         target_id
     );
     Ok(())
+}
+
+/// Build the v2615 acknowledgement that synchronizes the pet mode in the
+/// client UI with the authoritative server-side state.
+fn build_pet_mode_change_packet(mode: u8) -> Packet {
+    let mut resp = Packet::new(Opcode::WizPet as u8);
+    resp.write_u8(PET_MODE_FUNCTION);
+    resp.write_u8(NORMAL_MODE);
+    resp.write_u8(mode);
+    resp.write_u16(1); // success
+    resp
 }
 
 /// Handle ModeFunction (sub-opcode 1).
@@ -223,12 +279,247 @@ async fn handle_mode_function(
 }
 
 /// Handle NormalMode (sub-code 5) — switch attack/defence/looting/chat mode.
-async fn handle_normal_mode(
+pub(crate) async fn handle_normal_mode(
     session: &mut ClientSession,
     mode: u8,
     r: &mut PacketReader<'_>,
 ) -> anyhow::Result<()> {
     match mode {
+        MODE_SUMMON => {
+            let world = session.world().clone();
+            let sid = session.session_id();
+
+            // GAMESTART may rebuild the runtime session holder after phase 1,
+            // which can clear pet_data. Restore the equipped pet lazily here.
+            let pet_missing = world
+                .with_session(sid, |h| h.pet_data.is_none())
+                .unwrap_or(true);
+
+            if pet_missing {
+                let char_id = session.character_id().unwrap_or("").to_string();
+
+                if !char_id.is_empty() {
+                    let pool = session.pool().clone();
+                    let char_repo = ko_db::repositories::character::CharacterRepository::new(&pool);
+                    let pet_repo = ko_db::repositories::pet::PetRepository::new(&pool);
+
+                    match char_repo.load_items(&char_id).await {
+                        Ok(items) => {
+                            let pet_item = items.iter().find(|item| {
+                                item.serial_num > 0
+                                    && (item.item_id == 610_001_000
+                                        || item.slot_index == 5
+                                        || item.slot_index == crate::world::CFAIRY_SLOT as i16)
+                            });
+
+                            if let Some(item) = pet_item {
+                                match pet_repo.load_pet_data(item.serial_num).await {
+                                    Ok(Some(row)) => {
+                                        let restored = crate::world::PetState {
+                                            serial_id: row.n_serial_id.max(0) as u64,
+                                            level: row.b_level.clamp(1, 60) as u8,
+                                            satisfaction: row.s_satisfaction.clamp(0, 10_000),
+                                            exp: row.n_exp.max(0) as u32,
+                                            hp: row.s_hp.max(0) as u16,
+                                            nid: 0,
+                                            index: row.n_index.max(0) as u32,
+                                            mp: row.s_mp.max(0) as u16,
+                                            state_change: MODE_DEFENCE,
+                                            name: row.s_pet_name,
+                                            pid: row.s_pid.max(0) as u16,
+                                            size: row.s_size.max(0) as u16,
+                                            attack_started: false,
+                                            attack_target_id: -1,
+                                            ..Default::default()
+                                        };
+
+                                        world.update_session(sid, |h| {
+                                            h.pet_data = Some(restored);
+                                        });
+
+                                        tracing::info!(
+                                            "[sid={}] WIZ_PET: lazily restored pet serial={} index={} pid={}",
+                                            sid,
+                                            row.n_serial_id,
+                                            row.n_index,
+                                            row.s_pid
+                                        );
+                                    }
+                                    Ok(None) => {
+                                        tracing::warn!(
+                                            "[sid={}] WIZ_PET: no pet_user_data for serial={}",
+                                            sid,
+                                            item.serial_num
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "[sid={}] WIZ_PET: pet DB load failed serial={}: {}",
+                                            sid,
+                                            item.serial_num,
+                                            e
+                                        );
+                                    }
+                                }
+                            } else {
+                                tracing::warn!(
+                                    "[sid={}] WIZ_PET: equipped pet item not found for {}",
+                                    sid,
+                                    char_id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[sid={}] WIZ_PET: inventory DB load failed for {}: {}",
+                                sid,
+                                char_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            let snapshot = world.with_session(sid, |h| {
+                (
+                    h.position,
+                    h.event_room,
+                    h.character.clone(),
+                    h.pet_data.clone(),
+                )
+            });
+
+            let (pos, event_room, owner, pet) = match snapshot {
+                Some((pos, event_room, Some(owner), Some(pet))) => (pos, event_room, owner, pet),
+                _ => {
+                    debug!(
+                        "[{}] WIZ_PET: summon rejected, owner or pet state missing",
+                        session.addr()
+                    );
+                    return Ok(());
+                }
+            };
+
+            // Zaten dünyada kayıtlıysa ikinci kez NPC oluşturma.
+            if pet.nid != 0 && world.get_npc_instance(pet.nid as u32).is_some() {
+                debug!(
+                    "[{}] WIZ_PET: summon ignored, pet already spawned nid={}",
+                    session.addr(),
+                    pet.nid
+                );
+                return Ok(());
+            }
+
+            // pet.pid is the client model/SPID (25500), not npc_template.s_sid.
+            // Use the dedicated type-15 Kaul runtime template.
+            let template = match world.get_npc_template(PET_RUNTIME_TEMPLATE_SID, false) {
+                Some(t) => t,
+                None => {
+                    tracing::warn!(
+                        "[{}] WIZ_PET: summon failed, runtime template missing sid={}",
+                        session.addr(),
+                        PET_RUNTIME_TEMPLATE_SID
+                    );
+                    return Ok(());
+                }
+            };
+
+            let runtime_nid = world.allocate_npc_id();
+
+            // Sahibin hemen yanında doğur.
+            let spawn_x = pos.x + 1.5;
+            let spawn_z = pos.z + 1.5;
+
+            let instance = NpcInstance {
+                nid: runtime_nid,
+                proto_id: PET_RUNTIME_TEMPLATE_SID,
+                is_monster: false,
+                zone_id: pos.zone_id,
+                x: spawn_x,
+                y: pos.y,
+                z: spawn_z,
+                direction: 0,
+                region_x: pos.region_x,
+                region_z: pos.region_z,
+                gate_open: 0,
+                object_type: 0,
+                nation: owner.nation,
+                special_type: 0,
+                trap_number: 0,
+                event_room,
+                is_event_npc: false,
+                summon_type: 0,
+                user_name: owner.name.clone(),
+                pet_name: pet.name.clone(),
+                clan_name: String::new(),
+                clan_id: 0,
+                clan_mark_version: 0,
+            };
+
+            world.insert_npc_instance(instance.clone());
+            world.init_npc_hp(runtime_nid, pet.hp as i32);
+
+            world.update_session(sid, |h| {
+                if let Some(ref mut active_pet) = h.pet_data {
+                    active_pet.nid = runtime_nid as u16;
+                    active_pet.state_change = MODE_DEFENCE;
+                    active_pet.attack_started = false;
+                    active_pet.attack_target_id = -1;
+                }
+            });
+
+            let npc_in = build_npc_inout(NPC_IN, &instance, &template);
+            world.broadcast_to_3x3(
+                pos.zone_id,
+                pos.region_x,
+                pos.region_z,
+                Arc::new(npc_in),
+                None,
+                event_room,
+            );
+
+            let stats = world.get_pet_stats_info(pet.level);
+
+            let spawn_info = PetSpawnInfo {
+                index: pet.index,
+                name: pet.name.clone(),
+                level: pet.level,
+                exp_percent: 0,
+                max_hp: stats
+                    .as_ref()
+                    .map(|v| v.pet_max_hp as u16)
+                    .unwrap_or(pet.hp),
+                hp: pet.hp,
+                max_mp: stats
+                    .as_ref()
+                    .map(|v| v.pet_max_sp as u16)
+                    .unwrap_or(pet.mp),
+                mp: pet.mp,
+                satisfaction: pet.satisfaction.max(0) as u16,
+                attack: stats.as_ref().map(|v| v.pet_attack as u16).unwrap_or(0),
+                defence: stats.as_ref().map(|v| v.pet_defence as u16).unwrap_or(0),
+                resistance: stats.as_ref().map(|v| v.pet_res as u16).unwrap_or(0),
+            };
+
+            let pet_ui = build_pet_spawn_packet(&spawn_info);
+            session.send_packet(&pet_ui).await?;
+
+            tracing::info!(
+                "[sid={}] WIZ_PET: summoned nid={} template_sid={} model_spid={} name={} zone={} pos={:.1}/{:.1}/{:.1}",
+                sid,
+                runtime_nid,
+                PET_RUNTIME_TEMPLATE_SID,
+                pet.pid,
+                pet.name,
+                pos.zone_id,
+                spawn_x,
+                pos.y,
+                spawn_z
+            );
+
+            return Ok(());
+        }
         MODE_ATTACK | MODE_DEFENCE | MODE_LOOTING => {
             // Update pet mode
             session.world().update_session(session.session_id(), |h| {
@@ -243,11 +534,7 @@ async fn handle_normal_mode(
             });
 
             // Send mode change confirmation
-            let mut resp = Packet::new(Opcode::WizPet as u8);
-            resp.write_u8(PET_MODE_FUNCTION);
-            resp.write_u8(NORMAL_MODE);
-            resp.write_u8(mode);
-            resp.write_u16(1); // success
+            let resp = build_pet_mode_change_packet(mode);
             session.send_packet(&resp).await?;
 
             debug!("[{}] WIZ_PET: NormalMode set to {}", session.addr(), mode);
@@ -968,6 +1255,29 @@ mod tests {
     fn test_pet_use_skill_constants() {
         assert_eq!(MAGIC_EFFECTING_SUBCODE, 3);
         assert_eq!(PET_USE_SKILL, 2);
+    }
+
+    #[test]
+    fn test_pet_auto_attack_mode_ack_packet() {
+        let pkt = build_pet_mode_change_packet(MODE_ATTACK);
+        let mut r = PacketReader::new(&pkt.data);
+
+        assert_eq!(pkt.opcode, Opcode::WizPet as u8);
+        assert_eq!(r.read_u8(), Some(PET_MODE_FUNCTION));
+        assert_eq!(r.read_u8(), Some(NORMAL_MODE));
+        assert_eq!(r.read_u8(), Some(MODE_ATTACK));
+        assert_eq!(r.read_u16(), Some(1));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_v2615_pet_target_id_keeps_full_width() {
+        let target_id = 49_886u32;
+        let stored = target_id as i32;
+
+        assert!(stored >= crate::npc::NPC_BAND as i32);
+        assert_eq!(stored as u32, target_id);
+        assert!(target_id > i16::MAX as u32);
     }
 
     // ── Sprint 955: Additional coverage ──────────────────────────────

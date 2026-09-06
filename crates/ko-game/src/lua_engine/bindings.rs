@@ -122,6 +122,10 @@ pub fn register_all(lua: &Lua) -> LuaResult<()> {
     g.set("GiveItem", lua.create_function(lua_give_item)?)?;
     g.set("GiveItemLua", lua.create_function(lua_give_item)?)?;
     g.set("RobItem", lua.create_function(lua_rob_item)?)?;
+    g.set(
+        "ExchangeItemForAchievement",
+        lua.create_function(lua_exchange_item_for_achievement)?,
+    )?;
     g.set("GoldGain", lua.create_function(lua_gold_gain)?)?;
     g.set("GoldLose", lua.create_function(lua_gold_lose)?)?;
     g.set("ExpChange", lua.create_function(lua_exp_change)?)?;
@@ -300,6 +304,10 @@ pub fn register_all(lua: &Lua) -> LuaResult<()> {
     g.set(
         "GetEventTrigger",
         lua.create_function(lua_get_event_trigger)?,
+    )?;
+    g.set(
+        "GetQuestHelperID",
+        lua.create_function(lua_get_quest_helper_id)?,
     )?;
     g.set("RollDice", lua.create_function(lua_roll_dice)?)?;
 
@@ -770,6 +778,10 @@ fn lua_save_event(lua: &Lua, (uid, quest_helper_id): (i32, u16)) -> LuaResult<()
         });
     }
 
+    if status == 2 {
+        crate::handler::achieve::on_quest_completed(&w, sid);
+    }
+
     Ok(())
 }
 
@@ -872,6 +884,20 @@ fn lua_rob_item(lua: &Lua, (uid, item_id, count): (i32, u32, u16)) -> LuaResult<
     Ok(())
 }
 
+fn lua_exchange_item_for_achievement(
+    lua: &Lua,
+    (uid, item_id, item_count, achievement_id): (i32, u32, u16, u16),
+) -> LuaResult<i32> {
+    let world = get_world(lua)?;
+    Ok(crate::handler::achieve::exchange_item_for_achievement(
+        &world,
+        uid as SessionId,
+        item_id,
+        item_count,
+        achievement_id,
+    ))
+}
+
 fn lua_gold_gain(lua: &Lua, (uid, amount): (i32, u32)) -> LuaResult<()> {
     get_world(lua)?.gold_gain(uid as SessionId, amount);
     Ok(())
@@ -960,7 +986,7 @@ fn lua_npc_say(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
 ///   arg 2 = nQuestID (quest_helper n_index)
 ///   arg 3 = sNpcID   (optional, defaults to m_sEventSid)
 /// Calls `QuestV2SendNpcMsg(nQuestID, sNpcID)`:
-///   Packet: WIZ_QUEST [u8(7)] [u32(nQuestID)] [u32(sNpcID)]
+///   Packet: WIZ_QUEST [u8(7)] [u32(nQuestID)] [u16(sNpcID)]
 fn lua_npc_msg(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     let w = get_world(lua)?;
     let vals: Vec<LuaValue> = args.into_vec();
@@ -988,13 +1014,20 @@ fn lua_npc_msg(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     // The quest_helper_id is set by quest_v2_run_event before Lua execution,
     // so we must not overwrite it here with the quest_menu ID.
 
-    // Send WIZ_QUEST sub-opcode 7: [u32 nQuestID] [u32 sNpcID]
+    // QuestV2SendNpcMsg writes the NPC SID as uint16. Writing uint32 here
+    // leaves two trailing bytes and makes the v2615 client reject the dialog.
+    // Send WIZ_QUEST sub-opcode 7: [u32 nQuestID] [u16 sNpcID]
+    let pkt = build_npc_msg_packet(quest_id, npc_id as u16);
+    w.send_to_session_owned(sid, pkt);
+    Ok(())
+}
+
+fn build_npc_msg_packet(quest_id: u32, npc_id: u16) -> Packet {
     let mut pkt = Packet::new(Opcode::WizQuest as u8);
     pkt.write_u8(7);
     pkt.write_u32(quest_id);
-    pkt.write_u32(npc_id);
-    w.send_to_session_owned(sid, pkt);
-    Ok(())
+    pkt.write_u16(npc_id);
+    pkt
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1056,19 +1089,26 @@ fn lua_select_msg(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
 fn lua_zone_change(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -> LuaResult<()> {
     let w = get_world(lua)?;
     let sid = uid as SessionId;
-    let mut pkt = Packet::new(Opcode::WizZoneChange as u8);
-    pkt.write_u8(2);
-    pkt.write_u16(zone_id);
-    pkt.write_f32(x);
-    pkt.write_f32(0.0);
-    pkt.write_f32(z);
-    pkt.write_u8(0);
-    w.send_to_session_owned(sid, pkt);
-    w.update_session(sid, |h| {
-        h.position.zone_id = zone_id;
-        h.position.x = x;
-        h.position.z = z;
-    });
+    let old_position = w.get_position(sid);
+
+    // Lua ZoneChange is also used by the Draki floor NPCs while the player
+    // remains in zone 95.  The old implementation only changed three session
+    // fields and emitted a legacy float packet; it did not move the player
+    // between region grids.  v2615 consequently acknowledged the click while
+    // leaving the character on the previous floor.  Use the same authoritative
+    // server teleport path as the other instanced events, forcing same-zone
+    // relocation when necessary.
+    crate::handler::zone_change::server_teleport_to_zone_force(&w, sid, zone_id, x, z);
+    tracing::info!(
+        sid,
+        from_zone = old_position.map(|p| p.zone_id).unwrap_or_default(),
+        from_x = old_position.map(|p| p.x).unwrap_or_default(),
+        from_z = old_position.map(|p| p.z).unwrap_or_default(),
+        to_zone = zone_id,
+        to_x = x,
+        to_z = z,
+        "Lua ZoneChange completed through authoritative region teleport"
+    );
     Ok(())
 }
 
@@ -1350,9 +1390,18 @@ fn lua_check_weight(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
     }
     Ok(true)
 }
-fn lua_is_room_for_item(lua: &Lua, (uid, item_id, _count): (i32, u32, u16)) -> LuaResult<i32> {
+/// Return an inventory slot suitable for the requested item.
+///
+/// The original C++ Lua API declares the stack size as optional and defaults it
+/// to one (`LUA_ARG_OPTIONAL(uint16, 1, 3)`).  A large number of the production
+/// quest scripts, including Captain Fargo's starter-item events, therefore call
+/// this function with only `(UID, item_id)`.
+fn lua_is_room_for_item(
+    lua: &Lua,
+    (uid, item_id, count): (i32, u32, Option<u16>),
+) -> LuaResult<i32> {
     Ok(get_world(lua)?
-        .find_slot_for_item(uid as SessionId, item_id, 1)
+        .find_slot_for_item(uid as SessionId, item_id, count.unwrap_or(1))
         .map(|p| p as i32)
         .unwrap_or(-1))
 }
@@ -1428,36 +1477,12 @@ fn lua_quest_check_finished(lua: &Lua, (uid, qid): (i32, u16)) -> LuaResult<bool
 /// first one that has a matching entry in the `quest_monsters` table.
 /// Lua call: `result = ExistMonsterQuestSub(UID)` — returns u16 (quest_id or 0).
 fn lua_exist_monster_quest_sub(lua: &Lua, uid: i32) -> LuaResult<u16> {
-    let w = get_world(lua)?;
-    let sid = uid as SessionId;
-
-    // Collect in-progress quest IDs from session (avoids DashMap re-entrancy).
-    let in_progress_quests: Vec<u16> = w
-        .with_session(sid, |h| {
-            h.quests
-                .iter()
-                .filter(|(_, q)| q.quest_state == 1)
-                .map(|(&qid, _)| qid)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Check which one has a quest_monster entry (monster-kill quest).
-    let mut found: u16 = 0;
-    for qid in in_progress_quests {
-        if w.get_quest_monster(qid).is_some() {
-            if found == 0 {
-                found = qid;
-            } else {
-                tracing::debug!(
-                    "ExistMonsterQuestSub: sid={sid} has multiple active monster quests \
-                     (returning {found}, also found {qid})"
-                );
-            }
-        }
-    }
-
-    Ok(found)
+    // Evidence: reference_cpp/User.h::GetActiveQuestID() is an inline stub
+    // that always returns zero. Patrick event 175 relies on that zero to show
+    // its accept button; returning another active kill quest makes it emit a
+    // close-only menu.
+    let _ = (lua, uid);
+    Ok(0)
 }
 
 /// Search for an eligible quest for the given NPC.
@@ -1595,6 +1620,15 @@ fn lua_show_map(lua: &Lua, (uid, mid): (i32, Option<u32>)) -> LuaResult<()> {
     pkt.write_u32(helper_id);
     w.send_to_session_owned(sid, pkt);
     Ok(())
+}
+
+/// Return the quest_helper row that selected the currently executing Lua
+/// event. Some v2615 scripts share event numbers between compatibility quest
+/// IDs, so the Lua must be able to choose the matching SaveEvent/exchange row.
+fn lua_get_quest_helper_id(lua: &Lua, uid: i32) -> LuaResult<u32> {
+    let w = get_world(lua)?;
+    Ok(w.with_session(uid as SessionId, |h| h.quest_helper_id)
+        .unwrap_or(0))
 }
 
 /// 1. Guard: must be beginner class (class % 100 in {1,2,3,4,13})
@@ -2418,9 +2452,29 @@ fn lua_run_quest_exchange(lua: &Lua, (uid, exchange_id): (i32, i32)) -> LuaResul
         }
     }
 
-    // Uses bySelectedReward (member variable) to select a reward from the exp table.
+    // C++ CheckExchangeExp contract: an exchange with selectable rewards must
+    // never finish without a valid client selection. Previously Rust silently
+    // gave only the base rewards and Lua then marked the quest completed.
     let by_selected_reward = w.with_session(sid, |h| h.by_selected_reward).unwrap_or(-1);
-    if let Some(exp_exchange) = w.get_item_exchange_exp(exchange_id) {
+    let select_msg_flag = w.with_session(sid, |h| h.select_msg_flag).unwrap_or(0);
+    let exp_exchange = w.get_item_exchange_exp(exchange_id);
+    if by_selected_reward > 4
+        || (select_msg_flag == 5 && by_selected_reward < 0)
+        || (exp_exchange.is_some() && by_selected_reward < 0)
+        || (exp_exchange.is_none() && by_selected_reward > 0)
+    {
+        tracing::warn!(
+            sid,
+            exchange_id,
+            by_selected_reward,
+            select_msg_flag,
+            has_selected_rewards = exp_exchange.is_some(),
+            "RunQuestExchange: invalid or missing selected reward"
+        );
+        return Ok(false);
+    }
+
+    if let Some(exp_exchange) = exp_exchange {
         if by_selected_reward >= 0 && (by_selected_reward as usize) < 5 {
             let idx = by_selected_reward as usize;
             let exp_outputs: [(i32, i32); 5] = [
@@ -2481,15 +2535,15 @@ fn lua_run_quest_exchange(lua: &Lua, (uid, exchange_id): (i32, i32)) -> LuaResul
         {
             continue;
         }
-        // Match C++ behavior: skip this output item if not in DB, don't abort entire exchange.
+        // Never complete a quest while silently dropping its selected reward.
         if w.get_item(item_id).is_none() {
             tracing::warn!(
                 sid,
                 exchange_id,
                 item_id,
-                "RunQuestExchange: output item_id not in items table — skipping (C++ parity)"
+                "RunQuestExchange: FAIL — output item_id not in items table"
             );
-            continue;
+            return Ok(false);
         }
         // Check if item can stack into existing slot
         if w.find_slot_for_item(sid, item_id, 1).is_none() {
@@ -2573,8 +2627,9 @@ fn lua_run_quest_exchange(lua: &Lua, (uid, exchange_id): (i32, i32)) -> LuaResul
                 exchange_id,
                 item_id,
                 count,
-                "RunQuestExchange: give_exchange_item failed (item lost!)"
+                "RunQuestExchange: FAIL — give_exchange_item failed"
             );
+            return Ok(false);
         }
     }
 
@@ -3387,10 +3442,33 @@ fn lua_rob_clan_point(lua: &Lua, (uid, amount): (i32, i32)) -> LuaResult<()> {
         return Ok(());
     }
     let deduct = amount as i64;
+    let mut new_fund = 0u32;
     w.update_knights(knights_id, |k| {
         let result = (k.clan_point_fund as i64) - deduct;
         k.clan_point_fund = result.clamp(0, 2_100_000_000) as u32;
+        new_fund = k.clan_point_fund;
     });
+
+    // Clan rank-up Lua scripts spend from the persistent clan fund. Without
+    // this update the deduction returns after a restart even though the rank
+    // itself was saved.
+    if let Some(pool) = w.db_pool() {
+        let pool = pool.clone();
+        let kid = knights_id as i16;
+        tokio::spawn(async move {
+            let repo = ko_db::repositories::knights::KnightsRepository::new(&pool);
+            if let Err(e) = repo
+                .update_clan_point_fund(kid, new_fund.min(i32::MAX as u32) as i32)
+                .await
+            {
+                tracing::warn!(
+                    "RobClanPoint: failed to save clan point fund for clan {}: {}",
+                    kid,
+                    e
+                );
+            }
+        });
+    }
     Ok(())
 }
 
@@ -3453,26 +3531,22 @@ fn lua_zone_change_party(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) 
     };
 
     for member_sid in members {
-        let mut pkt = Packet::new(Opcode::WizZoneChange as u8);
-        pkt.write_u8(2);
-        pkt.write_u16(zone_id);
-        pkt.write_f32(x);
-        pkt.write_f32(0.0);
-        pkt.write_f32(z);
-        pkt.write_u8(0);
-        w.send_to_session_owned(member_sid, pkt);
-        w.update_session(member_sid, |h| {
-            h.position.zone_id = zone_id;
-            h.position.x = x;
-            h.position.z = z;
-        });
+        crate::handler::zone_change::server_teleport_to_zone(&w, member_sid, zone_id, x, z);
     }
     Ok(())
 }
 
-/// ZoneChangeClan(uid, zone_id, x, z) -> void
-/// Teleport all online clan members to a zone.
-fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -> LuaResult<()> {
+/// ZoneChangeClan(uid, zone_id, x, z [, legacy_range]) -> void
+/// Teleport all online clan members to a zone. The official cape quest Lua
+/// passes a fifth legacy argument (`50`). The C++ binding ignores it, so parse
+/// a MultiValue here to preserve that v2615-compatible behaviour.
+fn lua_zone_change_clan(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
+    let mut iter = args.into_iter();
+    let uid: i32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
+    let zone_id: u16 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
+    let x: f32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0.0);
+    let z: f32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0.0);
+
     let w = get_world(lua)?;
     let sid = uid as SessionId;
 
@@ -3483,20 +3557,18 @@ fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -
 
     let clan_sids: Vec<SessionId> = w.get_online_knights_session_ids(knights_id);
 
+    tracing::info!(
+        uid,
+        knights_id,
+        zone_id,
+        x,
+        z,
+        online_members = clan_sids.len(),
+        "ZoneChangeClan: teleporting online clan members"
+    );
+
     for member_sid in clan_sids {
-        let mut pkt = Packet::new(Opcode::WizZoneChange as u8);
-        pkt.write_u8(2);
-        pkt.write_u16(zone_id);
-        pkt.write_f32(x);
-        pkt.write_f32(0.0);
-        pkt.write_f32(z);
-        pkt.write_u8(0);
-        w.send_to_session_owned(member_sid, pkt);
-        w.update_session(member_sid, |h| {
-            h.position.zone_id = zone_id;
-            h.position.x = x;
-            h.position.z = z;
-        });
+        crate::handler::zone_change::server_teleport_to_zone(&w, member_sid, zone_id, x, z);
     }
     Ok(())
 }
@@ -3504,17 +3576,13 @@ fn lua_zone_change_clan(lua: &Lua, (uid, zone_id, x, z): (i32, u16, f32, f32)) -
 /// PromoteKnight(uid, flag) -> void
 /// C++ alias: `PromoteKnight` = `PromoteClan` (lua_bindings.cpp:427)
 /// Promote the player's clan to the given grade (flag).
-/// C++ cape logic: flag==1 → cape=-1 (training), otherwise cape=0.
+/// The reference `CKnightsManager::UpdateKnightsGrade()` sets Training to
+/// cape=-1 and the first Promoted state to cape=0.  Keep that value intact:
+/// the client resolves the base promoted cape from `Cloak.tbl`.
 fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     let mut iter = args.into_iter();
-    let uid: i32 = iter
-        .next()
-        .and_then(|v| lua.unpack(v).ok())
-        .unwrap_or(0);
-    let flag: i16 = iter
-        .next()
-        .and_then(|v| lua.unpack(v).ok())
-        .unwrap_or(2); // default ClanTypePromoted
+    let uid: i32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
+    let flag: i16 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(2); // default ClanTypePromoted
 
     let w = get_world(lua)?;
     let sid = uid as SessionId;
@@ -3523,15 +3591,34 @@ fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
         return Ok(());
     }
 
-    let cape: i16 = if flag == 1 { -1 } else { 0 };
+    let current_cape = w
+        .get_knights(knights_id)
+        .map(|k| k.cape as i16)
+        .unwrap_or(-1);
+    let cape: i16 = match flag {
+        1 => -1,
+        2 => 0,
+        _ => current_cape,
+    };
 
     w.update_knights(knights_id, |k| {
         k.flag = flag as u8; // i16 → u8 intentional (grade values fit in u8)
         k.cape = cape as u16;
     });
 
+    tracing::info!(
+        uid,
+        knights_id,
+        flag,
+        cape,
+        "PromoteKnight: runtime clan promotion applied"
+    );
+
     // Broadcast KNIGHTS_UPDATE to all online clan members
     broadcast_knights_update_from_world(&w, knights_id);
+    // KNIGHTS_UPDATE refreshes the clan window. Re-send the promoted player as
+    // a region WARP with the fresh cape data for nearby clients.
+    refresh_promoted_clan_visual(&w, sid);
 
     // Persist flag+cape to DB (fire-and-forget)
     if let Some(pool) = w.db_pool() {
@@ -3545,11 +3632,83 @@ fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
                     kid,
                     e
                 );
+            } else {
+                tracing::info!(kid, flag, cape, "PromoteKnight: database promotion saved");
             }
         });
     }
 
     Ok(())
+}
+
+/// Rebuild the promoted member's visual state for the local client and nearby
+/// users. This is the same OUT/WARP refresh used after a job change, but keeps
+/// the complete clan/cape block that v2615 needs to attach a cloak model.
+fn refresh_promoted_clan_visual(w: &WorldState, sid: SessionId) {
+    let Some((pos, character, event_room)) =
+        w.with_session(sid, |h| (h.position, h.character.clone(), h.event_room))
+    else {
+        return;
+    };
+    let Some(character) = character else {
+        return;
+    };
+
+    let clan = (character.knights_id > 0)
+        .then(|| w.get_knights(character.knights_id))
+        .flatten();
+    let alliance_cape = clan
+        .as_ref()
+        .and_then(|ki| crate::handler::region::resolve_alliance_cape(ki, w));
+    let is_king = w.is_king(character.nation, &character.name);
+    let invisibility = w.get_invisibility_type(sid);
+    let abnormal = w.get_abnormal_type(sid);
+    let broadcast_state = w.get_broadcast_state(sid);
+    let equipment = crate::handler::region::get_equipped_visual(w, sid);
+
+    let out_packet = crate::handler::region::build_user_inout_with_clan(
+        crate::handler::region::INOUT_OUT,
+        sid,
+        Some(&character),
+        &pos,
+        clan.as_ref(),
+        alliance_cape,
+        is_king,
+        invisibility,
+        abnormal,
+        &broadcast_state,
+        &equipment,
+    );
+    w.broadcast_to_3x3(
+        pos.zone_id,
+        pos.region_x,
+        pos.region_z,
+        Arc::new(out_packet),
+        Some(sid),
+        event_room,
+    );
+
+    let warp_packet = crate::handler::region::build_user_inout_with_clan(
+        crate::handler::region::INOUT_WARP,
+        sid,
+        Some(&character),
+        &pos,
+        clan.as_ref(),
+        alliance_cape,
+        is_king,
+        invisibility,
+        abnormal,
+        &broadcast_state,
+        &equipment,
+    );
+    w.broadcast_to_3x3(
+        pos.zone_id,
+        pos.region_x,
+        pos.region_z,
+        Arc::new(warp_packet),
+        None,
+        event_room,
+    );
 }
 
 /// Build and broadcast a KNIGHTS_UPDATE packet for the given clan
@@ -4490,6 +4649,37 @@ fn lua_draki_out_zone(lua: &Lua, uid: i32) -> LuaResult<()> {
     pkt.write_u8(0);
     w.send_to_session_owned(sid, pkt);
 
+    // Reference DrakiTowerKickOuts() starts the 20-second evacuation timer
+    // immediately after sending OUT1. Sending the packet alone leaves event
+    // 101 at the final NPC without any server-side transition.
+    let room_id = w
+        .with_session(sid, |h| {
+            if h.draki_room_id > 0 {
+                h.draki_room_id
+            } else {
+                h.event_room
+            }
+        })
+        .unwrap_or(0);
+    if room_id > 0 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut rooms = w.draki_tower_rooms_write();
+        if let Some(room) = rooms.get_mut(&room_id) {
+            crate::handler::draki_tower::apply_kickout(room, now);
+            tracing::info!(
+                sid,
+                room_id,
+                exit_at = room.draki_out_timer,
+                "Draki final NPC started authoritative kick-out timer"
+            );
+        } else {
+            tracing::warn!(sid, room_id, "DrakiOutZone could not find active room");
+        }
+    }
+
     Ok(())
 }
 
@@ -4505,9 +4695,32 @@ fn lua_draki_tower_npc_out(lua: &Lua, uid: i32) -> LuaResult<()> {
         return Ok(());
     }
 
-    // Kill all non-monster NPCs in ZONE_DRAKI_TOWER
-    // C++ checks: !isDead, zone==DRAKI_TOWER, !isMonster
-    w.kill_non_monster_npcs_in_zone(ZONE_DRAKI_TOWER);
+    // Never clear another player's concurrent Draki instance or the monster
+    // wave DrakiRiftChange just spawned. The client scripts call this after
+    // DrakiRiftChange, so only the old floor NPCs may be removed here.
+    // ZoneChange in the 25258/25260/25263/25265 scripts may clear the
+    // session's transient event_room before this Lua function runs. The
+    // Draki room itself keeps the owner name, so recover the room from that
+    // persistent instance state instead of silently skipping the spawn.
+    let event_room = {
+        let session_room = w.get_event_room(sid);
+        if session_room > 0 {
+            session_room
+        } else if let Some(name) = w.get_session_name(sid) {
+            w.draki_tower_rooms_read()
+                .iter()
+                .find(|(_, room)| room.user_name == name)
+                .map(|(room_id, _)| *room_id)
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    };
+    if event_room > 0 {
+        w.kill_non_monster_npcs_in_room(ZONE_DRAKI_TOWER, event_room);
+    } else {
+        w.kill_non_monster_npcs_in_zone(ZONE_DRAKI_TOWER);
+    }
 
     Ok(())
 }
@@ -4788,7 +5001,7 @@ fn lua_event_soccer_stard(lua: &Lua, uid: i32) -> LuaResult<()> {
 /// Returns 1 on success, 0 on failure.
 /// C++ checks: isEventUser, zone prison, active event match, level limits, loyalty, coins.
 fn lua_join_event(lua: &Lua, uid: i32) -> LuaResult<i32> {
-    const MIN_LEVEL_JURAID: u8 = 35;
+    const MIN_LEVEL_JURAID: u8 = 75;
     const TEMPLE_EVENT_JOIN: u8 = 8;
     const TEMPLE_EVENT_JURAD_MOUNTAIN: i16 = 100;
 
@@ -4845,16 +5058,33 @@ fn lua_join_event(lua: &Lua, uid: i32) -> LuaResult<i32> {
     // Add to signed-up users list
     let result = w
         .event_room_manager
-        .add_signed_up_user(char_name, sid, nation);
+        .add_signed_up_user(char_name.clone(), sid, nation);
 
     match result {
         Some(_order) => {
+            w.event_room_manager.update_temple_event(|s| {
+                if nation == 1 {
+                    s.karus_user_count = s.karus_user_count.saturating_add(1);
+                } else {
+                    s.elmorad_user_count = s.elmorad_user_count.saturating_add(1);
+                }
+                s.all_user_count = s.karus_user_count + s.elmorad_user_count;
+            });
+
             // Send join confirmation: WIZ_EVENT + TEMPLE_EVENT_JOIN(8) + success(1) + event_id(100)
             let mut pkt = Packet::new(Opcode::WizEvent as u8);
             pkt.write_u8(TEMPLE_EVENT_JOIN);
             pkt.write_u8(1); // success
             pkt.write_i16(TEMPLE_EVENT_JURAD_MOUNTAIN);
             w.send_to_session_owned(sid, pkt);
+            crate::systems::event_room::broadcast_event_counter(&w);
+            crate::systems::event_room::send_active_event_time(&w, sid);
+            tracing::info!(
+                "Lua JoinEvent: '{}' joined Juraid Mountain (nation={}, total signed up={})",
+                char_name,
+                nation,
+                w.event_room_manager.signed_up_count()
+            );
             Ok(1)
         }
         None => {
@@ -4890,6 +5120,89 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
         return Ok(());
     }
 
+    // The floor NPC sends the next-floor value (for example 1/4), while the
+    // database also contains a rest NPC row at the preceding sub-stage. Pick
+    // the first actual monster stage at or after the requested value.
+    let stages = w.draki_tower_stages();
+    let resolved = stages
+        .iter()
+        .find(|s| {
+            s.draki_stage == stage as i16
+                && s.draki_sub_stage == sub_stage as i16
+                && s.draki_tower_npc_state == 0
+        })
+        .or_else(|| {
+            stages.iter().find(|s| {
+                s.draki_stage == stage as i16
+                    && s.draki_sub_stage >= sub_stage as i16
+                    && s.draki_tower_npc_state == 0
+            })
+        })
+        .map(|s| (s.id, s.draki_stage as u16, s.draki_sub_stage as u16));
+    let Some((stage_id, resolved_stage, resolved_sub_stage)) = resolved else {
+        tracing::warn!(
+            sid,
+            stage,
+            sub_stage,
+            "DrakiRiftChange: no monster stage found"
+        );
+        return Ok(());
+    };
+
+    // Keep runtime state and NPCs aligned. Previously this function only
+    // changed the state and sent timers, so the run stopped at this NPC.
+    let event_room = w.get_event_room(sid);
+    let mut spawned_monster_count = 0u32;
+    if event_room > 0 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Keep the guard in its own scope. A named parking_lot guard is
+        // dropped at scope end; retaining it until the second write below
+        // self-deadlocks the Lua execution at event 101.
+        {
+            let mut rooms = w.draki_tower_rooms_write();
+            if let Some(room) = rooms.get_mut(&event_room) {
+                room.draki_stage = resolved_stage;
+                room.draki_sub_stage = resolved_sub_stage;
+                room.draki_sub_timer = now + 300;
+                room.is_draki_stage_change = true;
+                room.draki_monster_kill = 0;
+            }
+        }
+
+        w.despawn_room_npcs(crate::handler::draki_tower::ZONE_DRAKI_TOWER, event_room);
+        let monsters = w.draki_monster_list();
+        let mut monster_count = 0u32;
+        for monster in crate::handler::draki_tower::get_monsters_for_stage(&monsters, stage_id) {
+            // The imported Draki list's boolean is not a reliable entity
+            // type discriminator (monster rows are stored as FALSE). The
+            // resolved stage has npc_state=0, so mirror the normal stage
+            // progression path and spawn every row as a monster.
+            let spawned = w.spawn_event_npc_ex(
+                monster.monster_id as u16,
+                true,
+                crate::handler::draki_tower::ZONE_DRAKI_TOWER,
+                monster.pos_x as f32,
+                monster.pos_z as f32,
+                1,
+                event_room,
+                0,
+            );
+            if !spawned.is_empty() {
+                monster_count = monster_count.saturating_add(1);
+            }
+        }
+        {
+            let mut rooms = w.draki_tower_rooms_write();
+            if let Some(room) = rooms.get_mut(&event_room) {
+                room.draki_monster_kill = monster_count;
+            }
+        }
+        spawned_monster_count = monster_count;
+    }
+
     let time_limit: u16 = 300;
 
     // Send WIZ_SELECT_MSG timer display
@@ -4908,8 +5221,8 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
     event_pkt.write_u8(0x16); // TEMPLE_DRAKI_TOWER_TIMER
     event_pkt.write_u8(233);
     event_pkt.write_u8(3);
-    event_pkt.write_u16(stage);
-    event_pkt.write_u16(sub_stage);
+    event_pkt.write_u16(resolved_stage);
+    event_pkt.write_u16(resolved_sub_stage);
     event_pkt.write_u32(time_limit as u32);
     event_pkt.write_u32(0); // elapsed placeholder
     w.send_to_session_owned(sid, event_pkt);
@@ -4922,12 +5235,17 @@ fn lua_draki_rift_change(lua: &Lua, (uid, stage, sub_stage): (i32, u16, u16)) ->
 
     // Note: Monster spawning (SummonDrakiMonsters) requires runtime room state
     // that is managed by the draki_tower handler's tick system, not via Lua.
-    tracing::debug!(
-        "[{}] DrakiRiftChange: stage={}, sub_stage={}, time_limit={}",
+    tracing::info!(
         sid,
-        stage,
-        sub_stage,
-        time_limit
+        event_room,
+        requested_stage = stage,
+        requested_sub_stage = sub_stage,
+        resolved_stage,
+        resolved_sub_stage,
+        stage_id,
+        spawned_monsters = spawned_monster_count,
+        time_limit,
+        "DrakiRiftChange completed"
     );
 
     Ok(())
@@ -5112,26 +5430,149 @@ fn lua_run_mining_exchange(lua: &Lua, (uid, ore_type): (i32, i32)) -> LuaResult<
 // Lua runtime errors.
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Sets quest state to "ongoing" (1) for the given quest_id, marking
-/// the player as participating in the Monster Stone quest. The actual
-/// Monster Stone event entry happens through WIZ_EVENT (item activation).
-/// Not in C++ source — custom private server feature.
-/// Used by 42+ quest scripts (Bros, Sace, Forkwain, Hwargo, councilor, etc.)
-fn lua_monster_stone_quest_join(lua: &Lua, (uid, quest_id): (i32, i32)) -> LuaResult<()> {
+/// Enter the quest-backed Monster Stone instance.
+///
+/// This mirrors CUser::MonsterStoneQuestJoin() from the reference server.
+/// Older Lua scripts pass only `(UID, 199)` and therefore use Stone 1,
+/// family 4; newer scripts may explicitly provide zone and family.
+fn lua_monster_stone_quest_join(
+    lua: &Lua,
+    (uid, quest_id, target_zone, target_family): (i32, i32, Option<u8>, Option<u16>),
+) -> LuaResult<bool> {
+    use crate::systems::{event_room, monster_stone};
+
     let w = get_world(lua)?;
     let sid = uid as SessionId;
 
-    // Set quest state to ongoing (1) for this quest_id
-    let qid = quest_id as u16;
+    let fail = |error_id: u8, reason: &'static str| {
+        w.send_to_session_owned(sid, monster_stone::build_fail_packet(error_id));
+        tracing::warn!(sid, quest_id, reason, "MonsterStoneQuestJoin rejected");
+        false
+    };
+
+    if w.is_trading(sid) || w.is_merchanting(sid) || w.is_mining(sid) || w.is_fishing(sid) {
+        return Ok(false);
+    }
+
+    if !w
+        .get_server_settings()
+        .map(|settings| settings.monsterstone_status)
+        .unwrap_or(false)
+    {
+        return Ok(fail(1, "monster stone is disabled"));
+    }
+
+    if quest_id != 199 {
+        return Ok(fail(5, "invalid quest id"));
+    }
+
+    let Some(character) = w.get_character_info(sid) else {
+        return Ok(false);
+    };
+    if character.hp < character.max_hp / 2 {
+        return Ok(fail(9, "health is below fifty percent"));
+    }
+
+    let Some(position) = w.get_position(sid) else {
+        return Ok(false);
+    };
+    if position.zone_id == ZONE_PRISON
+        || monster_stone::is_monster_stone_zone(position.zone_id)
+        || event_room::is_in_temple_event_zone(position.zone_id)
+    {
+        return Ok(fail(1, "current zone does not permit entry"));
+    }
+
+    if w.with_session(sid, |h| h.monster_stone_status || h.event_room > 0)
+        .unwrap_or(true)
+    {
+        return Ok(fail(5, "player is already in an event room"));
+    }
+
+    let zone_id = target_zone.unwrap_or(monster_stone::ZONE_STONE1 as u8);
+    let family = target_family.unwrap_or(4);
+    if !monster_stone::is_monster_stone_zone(zone_id as u16) || family == 0 {
+        return Ok(fail(5, "invalid target zone or family"));
+    }
+
+    // Validate the spawn set before reserving a room. This prevents an empty
+    // instance and exactly matches the reference implementation's ordering.
+    let spawns = w.get_monster_stone_spawns(zone_id, family);
+    if spawns.is_empty() {
+        return Ok(fail(5, "spawn data was not found"));
+    }
+
+    let Some(room_id) = w.monster_stone_write().allocate_room() else {
+        return Ok(fail(5, "no available room"));
+    };
+    let event_room_id = room_id + 1;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    {
+        let mut manager = w.monster_stone_write();
+        if !manager.activate_room(room_id, zone_id, family, position.zone_id, now) {
+            return Ok(fail(5, "room activation failed"));
+        }
+        manager.add_user(room_id, sid);
+    }
+
     w.update_session(sid, |h| {
-        let quest = h.quests.entry(qid).or_default();
+        h.event_room = event_room_id;
+        h.monster_stone_status = true;
+        let quest = h.quests.entry(quest_id as u16).or_default();
         if quest.quest_state == 0 {
-            quest.quest_state = 1; // ongoing
+            quest.quest_state = 1;
         }
     });
 
-    tracing::info!(sid, quest_id, "MonsterStoneQuestJoin: player joined quest");
-    Ok(())
+    for row in &spawns {
+        w.spawn_event_npc_ex_with_direction(
+            row.s_sid as u16,
+            row.b_type == 0,
+            zone_id as u16,
+            row.x as f32,
+            row.z as f32,
+            row.s_count.max(1) as u16,
+            event_room_id,
+            u8::from(row.is_boss),
+            row.by_direction.clamp(0, u8::MAX as i16) as u8,
+        );
+    }
+
+    let vendor_coords: [(f32, f32); 3] = match zone_id {
+        81 => [(204.0, 201.0), (204.0, 197.0), (204.0, 193.0)],
+        82 => [(203.0, 202.0), (203.0, 197.0), (203.0, 193.0)],
+        83 => [(204.0, 207.0), (204.0, 200.0), (204.0, 194.0)],
+        _ => unreachable!("Monster Stone zone was validated above"),
+    };
+    for (npc_sid, (x, z)) in [16062, 12117, 31508].into_iter().zip(vendor_coords) {
+        w.spawn_event_npc_ex(npc_sid, false, zone_id as u16, x, z, 1, event_room_id, 0);
+    }
+
+    crate::handler::zone_change::server_teleport_to_zone(&w, sid, zone_id as u16, 0.0, 0.0);
+    w.send_to_session_owned(
+        sid,
+        monster_stone::build_timer_packet(monster_stone::ROOM_DURATION_SECS as u16),
+    );
+    w.send_to_session_owned(
+        sid,
+        monster_stone::build_select_msg_timer(monster_stone::ROOM_DURATION_SECS as u16),
+    );
+
+    tracing::info!(
+        sid,
+        quest_id,
+        room_id,
+        event_room_id,
+        zone_id,
+        family,
+        spawn_count = spawns.len(),
+        "MonsterStoneQuestJoin: room activated and player teleported"
+    );
+    Ok(true)
 }
 
 /// GiveCash(uid, amount) — gives Knight Cash to a player
@@ -5320,9 +5761,7 @@ fn lua_send_warp_list(lua: &Lua, uid: i32) -> LuaResult<()> {
     let w = get_world(lua)?;
     let sid = uid as SessionId;
 
-    let zone_id = w
-        .with_session(sid, |h| h.position.zone_id)
-        .unwrap_or(0);
+    let zone_id = w.with_session(sid, |h| h.position.zone_id).unwrap_or(0);
 
     if zone_id == 0 {
         tracing::warn!(sid, "SendWarpList: zone_id=0");
@@ -5405,6 +5844,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn npc_msg_uses_v2615_u16_npc_sid() {
+        let pkt = build_npc_msg_packet(500, 31_772);
+        assert_eq!(pkt.opcode, Opcode::WizQuest as u8);
+        assert_eq!(pkt.data.len(), 7);
+        assert_eq!(pkt.data, vec![7, 0xF4, 0x01, 0x00, 0x00, 0x1C, 0x7C]);
+    }
+
+    #[test]
     fn test_check_percent_boundaries() {
         // 0-1000 permillage: 0 = never, 1000 = near-certain
         assert!(!lua_check_percent(&Lua::new(), 0).unwrap());
@@ -5440,6 +5887,7 @@ mod tests {
             "SaveEvent",
             "GiveItem",
             "RobItem",
+            "ExchangeItemForAchievement",
             "GoldGain",
             "GoldLose",
             "NpcSay",
@@ -6824,11 +7272,13 @@ mod tests {
         assert_eq!(k.flag, 2); // ClanTypePromoted
         assert_eq!(k.cape, 0);
 
-        // Explicit flag=3 (Accredited)
+        // Explicit flag=3 (Accredited) preserves a cape purchased after the
+        // initial promotion, matching UpdateKnightsGrade in the C++ server.
+        world.update_knights(102, |k| k.cape = 42);
         lua.load("PromoteKnight(1, 3)").exec().unwrap();
         let k = world.get_knights(102).unwrap();
         assert_eq!(k.flag, 3);
-        assert_eq!(k.cape, 0);
+        assert_eq!(k.cape, 42);
 
         // Flag=1 (Training) -> cape should be -1 (0xFFFF as u16)
         lua.load("PromoteKnight(1, 1)").exec().unwrap();
@@ -7442,6 +7892,36 @@ mod tests {
         let (lua, _world) = setup_lua_world();
         // Player is in zone 21 (Moradon), should still send packet (has character)
         lua.load("DrakiOutZone(1)").exec().unwrap();
+    }
+
+    #[test]
+    fn test_exist_monster_quest_sub_matches_reference_stub() {
+        let (lua, _world) = setup_lua_world();
+        let result: u16 = lua.load("return ExistMonsterQuestSub(1)").eval().unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_draki_out_zone_starts_kickout_timer() {
+        let (lua, world) = setup_lua_world();
+        world.update_session(1, |h| {
+            h.draki_room_id = 1;
+            h.event_room = 1;
+        });
+        world
+            .draki_tower_rooms_write()
+            .insert(1, crate::handler::draki_tower::DrakiTowerRoomInfo::new(1));
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        lua.load("DrakiOutZone(1)").exec().unwrap();
+
+        let rooms = world.draki_tower_rooms_read();
+        let room = rooms.get(&1).unwrap();
+        assert!(room.out_timer_active);
+        assert!(room.draki_out_timer >= before + 20);
     }
 
     #[test]

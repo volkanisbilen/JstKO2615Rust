@@ -438,7 +438,8 @@ pub(crate) fn activate_blink_with_duration(
             };
             let state_pkt =
                 build_state_change_broadcast(sid as u32, STATE_CHANGE_ABNORMAL, normal_type);
-            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, event_room)) = world.with_session(sid, |h| (h.position, h.event_room))
+            {
                 world.broadcast_to_3x3(
                     pos.zone_id,
                     pos.region_x,

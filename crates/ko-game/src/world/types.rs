@@ -255,6 +255,12 @@ pub struct TypeCooldown {
 pub struct SessionHandle {
     /// Channel sender to the session's writer task.
     pub tx: mpsc::UnboundedSender<Arc<Packet>>,
+    /// Consecutive PK kills used by the v2615 WIZ_KILLASSIST narration UI.
+    pub pvp_serial_kill_count: u32,
+    /// Total PK kills in the current narration session.
+    pub pvp_total_kill_count: u32,
+    /// UNIX timestamp of the most recent narrated PK kill.
+    pub pvp_last_kill_time: u64,
     /// Character info for building INOUT packets (None if not in-game yet).
     pub character: Option<CharacterInfo>,
     /// Current position in the world.
@@ -318,6 +324,14 @@ pub struct SessionHandle {
     /// Proto ID of the NPC being interacted with (for Lua/quest convenience).
     ///
     pub event_sid: i16,
+    /// True only while the star-button native event selector may dispatch one
+    /// row. It is consumed by the first selection to prevent clicks leaking
+    /// through a panel that the client has left underneath another UIF.
+    pub native_event_hub_armed: bool,
+    /// True after Akara's native altar panel is opened. The v2615 client
+    /// reuses WIZ_COSTUME (0xC3) for both costume and special-auction traffic;
+    /// this server-owned context is what safely separates those contracts.
+    pub akara_altar_armed: bool,
     /// Current quest helper ID for NPC dialog (Lua script).
     ///
     pub quest_helper_id: u32,
@@ -1211,7 +1225,12 @@ pub struct PetState {
     /// Whether the pet is actively attacking a target.
     pub attack_started: bool,
     /// Target NPC ID for auto-attack (-1 = none).
-    pub attack_target_id: i16,
+    ///
+    /// v2615 runtime NPC IDs are 32-bit on the wire and commonly exceed
+    /// `i16::MAX` (for example 49886).  Keeping this as `i16` turns those IDs
+    /// negative and makes the pet attack tick discard an otherwise valid
+    /// target.
+    pub attack_target_id: i32,
 }
 
 /// Number of item slots in a pet's inventory.
@@ -3169,9 +3188,13 @@ pub enum RegionChangeResult {
 /// We assign IDs starting at `BOT_ID_BASE` to distinguish from player session IDs.
 pub type BotId = u32;
 
-/// Band for bot runtime IDs — bots use IDs >= BOT_ID_BASE.
-/// We use a higher band (10_000) to avoid any collision with NPC IDs (NPC_BAND).
-pub const BOT_ID_BASE: u32 = 10_000;
+/// Band for bot runtime IDs.
+///
+/// Player sessions occupy 0..4999 and live NPC IDs start at 10000.  Runtime
+/// bots deliberately use 20000..24999: this keeps them out of both ranges,
+/// lets the combat protocol take the NPC-target path, and still fits every bot
+/// target ID in the signed 16-bit fields used by the bot AI.
+pub const BOT_ID_BASE: u32 = 20_000;
 
 /// Bot AI state — mirrors `CBot::m_BotState` values (BotHandler.h).
 /// C++ defines (User.h lines 71-85):
@@ -3287,6 +3310,9 @@ pub struct BotInstance {
     pub loyalty: u32,
     /// Monthly NP.
     pub loyalty_monthly: u32,
+    /// NP earned during this runtime PK session. Today's Rank must not expose
+    /// the bot character's persisted lifetime NP when it is summoned.
+    pub loyalty_daily: u32,
 
     // ─── Presence & AI State ────────────────────────────────────────────
     /// Whether the bot is currently registered in-game (INOUT_IN sent).
@@ -3346,6 +3372,11 @@ pub struct BotInstance {
     pub premium_merchant: bool,
     /// Merchant broadcast chat string.
     pub merchant_chat: String,
+    /// Database-backed merchant slots. Runtime bot merchants do not have a
+    /// ClientSession inventory, so their persistent stall is kept here.
+    pub merchant_items: [MerchData; MAX_MERCH_ITEMS],
+    /// Real player currently browsing this bot's stall.
+    pub merchant_looker: Option<SessionId>,
     /// Rebirth level.
     pub reb_level: u8,
     /// Achieve cover title ID.
@@ -3477,9 +3508,9 @@ mod types_tests {
     /// is_gate_npc_type matches gate NPC IDs.
     #[test]
     fn test_is_gate_npc_type() {
-        assert!(is_gate_npc_type(50));  // NPC_GATE
-        assert!(is_gate_npc_type(51));  // NPC_PHOENIX_GATE
-        assert!(is_gate_npc_type(55));  // NPC_GATE_LEVER
+        assert!(is_gate_npc_type(50)); // NPC_GATE
+        assert!(is_gate_npc_type(51)); // NPC_PHOENIX_GATE
+        assert!(is_gate_npc_type(55)); // NPC_GATE_LEVER
         assert!(is_gate_npc_type(150)); // NPC_GATE2
         assert!(is_gate_npc_type(180)); // NPC_KROWAZ_GATE
         assert!(!is_gate_npc_type(21)); // NPC_MERCHANT
@@ -3744,7 +3775,10 @@ mod types_tests {
     #[test]
     fn test_daily_opcode_from_u8() {
         assert_eq!(DailyOpCode::from_u8(1), Some(DailyOpCode::ChaosMap));
-        assert_eq!(DailyOpCode::from_u8(8), Some(DailyOpCode::UserLoyaltyWingReward));
+        assert_eq!(
+            DailyOpCode::from_u8(8),
+            Some(DailyOpCode::UserLoyaltyWingReward)
+        );
         assert_eq!(DailyOpCode::from_u8(0), None);
         assert_eq!(DailyOpCode::from_u8(9), None);
     }
@@ -4187,7 +4221,10 @@ mod types_tests {
     #[test]
     fn test_daily_op_code_all_roundtrip() {
         for v in 1..=8u8 {
-            assert!(DailyOpCode::from_u8(v).is_some(), "from_u8({v}) should be Some");
+            assert!(
+                DailyOpCode::from_u8(v).is_some(),
+                "from_u8({v}) should be Some"
+            );
         }
         assert!(DailyOpCode::from_u8(0).is_none());
         assert!(DailyOpCode::from_u8(9).is_none());

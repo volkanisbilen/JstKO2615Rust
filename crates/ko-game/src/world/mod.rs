@@ -5,12 +5,23 @@
 pub mod combat;
 pub mod inventory;
 mod loading;
+pub mod moraranker;
 pub mod npc;
 pub mod session;
 pub mod social;
 pub mod tables;
 pub mod trade;
 pub mod zone;
+
+fn initial_item_serial() -> u64 {
+    // Seed the process-local counter from Unix microseconds so item serials do
+    // not restart at 1 and collide with persisted inventory after a restart.
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .min(i64::MAX as u128) as u64
+}
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -531,6 +542,9 @@ pub struct WorldState {
     /// event scheduling, sign-up tracking, and timer state machine.
     pub(crate) event_room_manager: EventRoomManager,
 
+    /// Manes Survival spawn configuration and runtime NPC lifecycle.
+    pub(crate) manes_survival_manager: crate::systems::manes_survival::ManesSurvivalManager,
+
     /// BDW per-room state (altar, monument counts, respawn timer).
     ///
     pub(crate) bdw_manager: parking_lot::RwLock<BdwManager>,
@@ -646,6 +660,10 @@ pub struct WorldState {
     /// `handle_npc_attack()`. Key = room_id (1-based).
     ///
     juraid_bridge_states: DashMap<u8, JuraidBridgeState>,
+    /// Pending Juraid Monument respawn timestamps.
+    ///
+    /// Key = (room_id, nation), nation 1=Karus Monument, 2=El Morad Monument.
+    juraid_monument_respawns: DashMap<(u8, u8), u64>,
 
     /// Juraid Mountain monster respawn definitions loaded from DB at startup (136 rows).
     ///
@@ -943,7 +961,7 @@ impl WorldState {
             alliances: DashMap::new(),
             ground_bundles: DashMap::new(),
             next_bundle_id: AtomicU32::new(1),
-            next_item_serial: std::sync::atomic::AtomicU64::new(1),
+            next_item_serial: std::sync::atomic::AtomicU64::new(initial_item_serial()),
             quest_helpers: DashMap::new(),
             quest_monsters: DashMap::new(),
             quest_npc_list: DashMap::new(),
@@ -1038,6 +1056,7 @@ impl WorldState {
             item_right_click_exchange: DashMap::new(),
             item_right_exchange: DashMap::new(),
             event_room_manager: EventRoomManager::new(),
+            manes_survival_manager: crate::systems::manes_survival::ManesSurvivalManager::default(),
             bdw_manager: parking_lot::RwLock::new(BdwManager::default()),
             event_rewards: DashMap::new(),
             event_timer_show_list: parking_lot::RwLock::new(Vec::new()),
@@ -1078,6 +1097,7 @@ impl WorldState {
             monster_stone_manager: parking_lot::RwLock::new(MonsterStoneManager::new()),
             monster_boss_random_stages: parking_lot::RwLock::new(Vec::new()),
             juraid_bridge_states: DashMap::new(),
+            juraid_monument_respawns: DashMap::new(),
             monster_juraid_respawn: parking_lot::RwLock::new(Vec::new()),
             monster_challenge: parking_lot::RwLock::new(Vec::new()),
             monster_challenge_summon: parking_lot::RwLock::new(Vec::new()),
@@ -1180,7 +1200,7 @@ impl WorldState {
             alliances: DashMap::new(),
             ground_bundles: DashMap::new(),
             next_bundle_id: AtomicU32::new(1),
-            next_item_serial: std::sync::atomic::AtomicU64::new(1),
+            next_item_serial: std::sync::atomic::AtomicU64::new(initial_item_serial()),
             quest_helpers: DashMap::new(),
             quest_monsters: DashMap::new(),
             quest_npc_list: DashMap::new(),
@@ -1275,6 +1295,7 @@ impl WorldState {
             item_right_click_exchange: DashMap::new(),
             item_right_exchange: DashMap::new(),
             event_room_manager: EventRoomManager::new(),
+            manes_survival_manager: crate::systems::manes_survival::ManesSurvivalManager::default(),
             bdw_manager: parking_lot::RwLock::new(BdwManager::default()),
             monster_stone_manager: parking_lot::RwLock::new(MonsterStoneManager::new()),
             event_rewards: DashMap::new(),
@@ -1315,6 +1336,7 @@ impl WorldState {
             monster_stone_respawn: parking_lot::RwLock::new(Vec::new()),
             monster_boss_random_stages: parking_lot::RwLock::new(Vec::new()),
             juraid_bridge_states: DashMap::new(),
+            juraid_monument_respawns: DashMap::new(),
             monster_juraid_respawn: parking_lot::RwLock::new(Vec::new()),
             monster_challenge: parking_lot::RwLock::new(Vec::new()),
             monster_challenge_summon: parking_lot::RwLock::new(Vec::new()),
@@ -1602,6 +1624,15 @@ impl WorldState {
     ///
     /// When `tEndTime != -1 && UNIXTIME >= tEndTime`, the stealth is expired.
     ///
+    /// Snapshot every currently registered session ID.
+    ///
+    /// Used by event shutdown cleanup so inventory sanitisation does not depend
+    /// on an event participant set that may already have been updated by a zone
+    /// change or disconnect.
+    pub fn collect_session_ids(&self) -> Vec<SessionId> {
+        self.sessions.iter().map(|entry| *entry.key()).collect()
+    }
+
     /// Returns a list of session IDs whose stealth_end_time > 0 and <= now.
     pub fn collect_expired_stealths(&self, now_unix: u64) -> Vec<SessionId> {
         let mut expired = Vec::new();

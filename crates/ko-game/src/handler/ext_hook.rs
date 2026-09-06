@@ -664,7 +664,10 @@ pub fn handle_procinfo(session: &mut ClientSession, data: &[u8]) -> anyhow::Resu
     // Check if target is a GM + get nation (single read)
     let (is_gm, gm_nation) = world
         .with_session(target_sid as u16, |h| {
-            h.character.as_ref().map(|c| (c.authority == AUTHORITY_GAME_MASTER, c.nation)).unwrap_or((false, 0))
+            h.character
+                .as_ref()
+                .map(|c| (c.authority == AUTHORITY_GAME_MASTER, c.nation))
+                .unwrap_or((false, 0))
         })
         .unwrap_or((false, 0));
 
@@ -1526,9 +1529,12 @@ pub async fn handle_chaotic_exchange(
     // Process each exchange count
     let multiple = count > 1;
     for _ in 0..count {
-        // Build weighted random array
-        let mut rand_array = vec![0u32; 10000];
-        let mut offset = 0usize;
+        // Build the complete weighted pool. The former fixed 10,000-slot
+        // array truncated large pools in DashMap iteration order, which could
+        // silently exclude low-rate rewards such as Fortified Sterling's
+        // accessory entries. Keep every positive TBL weight instead.
+        let mut weighted_items = Vec::with_capacity(exchanges.len());
+        let mut total_weight = 0u64;
 
         for ex in &exchanges {
             if ex.random_flag >= 101 {
@@ -1542,25 +1548,21 @@ pub async fn handle_chaotic_exchange(
             ) {
                 continue;
             }
-            let fill_count = (ex.exchange_item_count1 / 5) as usize;
-            for i in 0..fill_count {
-                if offset + i >= 9999 {
-                    break;
-                }
-                rand_array[offset + i] = ex.exchange_item_num1 as u32;
+            if ex.exchange_item_num1 <= 0 || ex.exchange_item_count1 <= 0 {
+                continue;
             }
-            offset += fill_count;
-            if offset >= 9999 {
-                break;
-            }
+            let weight = ex.exchange_item_count1 as u64;
+            total_weight = total_weight.saturating_add(weight);
+            weighted_items.push((ex.exchange_item_num1 as u32, weight));
         }
 
-        if offset == 0 {
+        if total_weight == 0 {
             return send_bifrost_fail(session, error_code).await;
         }
 
-        let rand_slot = rand::random::<usize>() % offset;
-        let give_item_id = rand_array[rand_slot];
+        let roll = rand::random::<u64>() % total_weight;
+        let give_item_id = select_weighted_exchange_item(&weighted_items, roll)
+            .ok_or_else(|| anyhow::anyhow!("Chaotic Generator weighted pool was inconsistent"))?;
 
         let give_tmpl = match world.get_item(give_item_id) {
             Some(t) => t,
@@ -1650,6 +1652,21 @@ pub async fn handle_chaotic_exchange(
         }
     }
     Ok(())
+}
+
+/// Select a generator reward using a zero-based roll in `[0, total_weight)`.
+/// Kept independent from RNG so pool-boundary behavior is unit-testable.
+fn select_weighted_exchange_item(weighted_items: &[(u32, u64)], mut roll: u64) -> Option<u32> {
+    for &(item_id, weight) in weighted_items {
+        if weight == 0 {
+            continue;
+        }
+        if roll < weight {
+            return Some(item_id);
+        }
+        roll -= weight;
+    }
+    None
 }
 
 /// Send chaotic exchange result notification.
@@ -2784,6 +2801,32 @@ pub(crate) fn build_death_notice(
     pkt
 }
 
+/// Build the JstKO 1098/2615 narration packet used by the hooked client.
+///
+/// This is intentionally different from the generic extended death-notice
+/// structure above. The original `CUser::SendNewDeathNotice()` sets SByte
+/// string mode and writes only viewer-relative kill type, both names and the
+/// victim coordinates:
+/// `[0xE9][0xD7][u8 kill_type][SByte killer][SByte victim][u16 x][u16 z]`.
+///
+/// kill_type: 1 = killer/victim, 2 = killer party, 3 = other observer.
+pub(crate) fn build_new_death_narration(
+    kill_type: u8,
+    killer_name: &str,
+    victim_name: &str,
+    victim_x: u16,
+    victim_z: u16,
+) -> Packet {
+    let mut pkt = Packet::new(WIZ_EXT_HOOK);
+    pkt.write_u8(EXT_SUB_DEATH_NOTICE);
+    pkt.write_u8(kill_type);
+    pkt.write_sbyte_string(killer_name);
+    pkt.write_sbyte_string(victim_name);
+    pkt.write_u16(victim_x);
+    pkt.write_u16(victim_z);
+    pkt
+}
+
 /// Build a PLAYER_RANK (0xD5) update packet — ranking badge push to client.
 /// Packet: `[0xE9][0xD5][u8 rank_type][u16 session_id][u32 kills][u32 deaths][u32 loyalty]`
 /// - `rank_type`: 0=PK Zone, 1=BDW, 2=Chaos Dungeon, etc.
@@ -2812,11 +2855,7 @@ pub(crate) fn build_player_rank_update(
 /// Build a JURAID (0xE2) score packet — scoreboard on zone entry.
 /// Packet: `[0xE9][0xE2][u8 sub=0][u32 karus_score][u32 elmo_score][u32 remaining_secs]`
 #[allow(dead_code)]
-pub(crate) fn build_juraid_score(
-    karus_score: u32,
-    elmo_score: u32,
-    remaining_secs: u32,
-) -> Packet {
+pub(crate) fn build_juraid_score(karus_score: u32, elmo_score: u32, remaining_secs: u32) -> Packet {
     let mut pkt = Packet::new(WIZ_EXT_HOOK);
     pkt.write_u8(EXT_SUB_JURAID);
     pkt.write_u8(0); // score sub
@@ -2841,11 +2880,7 @@ pub(crate) fn build_juraid_updatescore(nation: u8, new_score: u32) -> Packet {
 /// Build a JURAID (0xE2) result packet — event ended, show results.
 /// Packet: `[0xE9][0xE2][u8 sub=2][u8 winner_nation][u32 karus_score][u32 elmo_score]`
 #[allow(dead_code)]
-pub(crate) fn build_juraid_result(
-    winner_nation: u8,
-    karus_score: u32,
-    elmo_score: u32,
-) -> Packet {
+pub(crate) fn build_juraid_result(winner_nation: u8, karus_score: u32, elmo_score: u32) -> Packet {
     let mut pkt = Packet::new(WIZ_EXT_HOOK);
     pkt.write_u8(EXT_SUB_JURAID);
     pkt.write_u8(2); // result sub
@@ -2882,11 +2917,7 @@ pub(crate) fn build_castle_siege_timer(sub: u8, remaining_secs: u32, status: u8)
 /// Build a ZindanWar result packet — event ended, show final result.
 /// Packet: `[0xE9][0xD2][u8 sub=3][u8 winner_nation][u32 elmo_kills][u32 karus_kills]`
 #[allow(dead_code)]
-pub(crate) fn build_zindan_result(
-    winner_nation: u8,
-    elmo_kills: u32,
-    karus_kills: u32,
-) -> Packet {
+pub(crate) fn build_zindan_result(winner_nation: u8, elmo_kills: u32, karus_kills: u32) -> Packet {
     let mut pkt = Packet::new(WIZ_EXT_HOOK);
     pkt.write_u8(EXT_SUB_ZINDAN_WAR);
     pkt.write_u8(3); // result sub
@@ -2923,7 +2954,7 @@ pub async fn handle_bansystem(session: &mut ClientSession, _data: &[u8]) -> anyh
     pkt.write_u8(EXT_SUB_BANSYSTEM);
     // 4 skills × (u8 level + u32 exp + u32 target_exp)
     for _ in 0..4 {
-        pkt.write_u8(0);  // level
+        pkt.write_u8(0); // level
         pkt.write_u32(0); // current exp
         pkt.write_u32(0); // target exp
     }
@@ -2967,11 +2998,7 @@ pub async fn handle_game_master_mode(
     let requested = data[0]; // 0 or 1
     let enabled = if requested != 0 { 1u8 } else { 0u8 };
 
-    debug!(
-        "[{}] GM mode toggle: enabled={}",
-        session.addr(),
-        enabled
-    );
+    debug!("[{}] GM mode toggle: enabled={}", session.addr(), enabled);
 
     let pkt = build_gm_mode_toggle(enabled);
     session.send_packet(&pkt).await
@@ -3066,6 +3093,22 @@ pub(crate) fn build_zindan_logout() -> Packet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weighted_generator_selection_keeps_low_rate_tail_reachable() {
+        let pool = [(100, 10_000), (1310515301, 5), (1310518304, 5)];
+        assert_eq!(select_weighted_exchange_item(&pool, 0), Some(100));
+        assert_eq!(select_weighted_exchange_item(&pool, 9_999), Some(100));
+        assert_eq!(
+            select_weighted_exchange_item(&pool, 10_000),
+            Some(1310515301)
+        );
+        assert_eq!(
+            select_weighted_exchange_item(&pool, 10_009),
+            Some(1310518304)
+        );
+        assert_eq!(select_weighted_exchange_item(&pool, 10_010), None);
+    }
 
     #[test]
     fn test_compute_money_req_premium_12_free() {
@@ -3930,12 +3973,26 @@ mod tests {
     #[test]
     fn test_ext_all_opcodes_unique() {
         let all = [
-            EXT_SUB_AUTHINFO, EXT_SUB_PROCINFO, EXT_SUB_OPEN, EXT_SUB_LOG,
-            EXT_SUB_XALIVE, EXT_SUB_UIINFO, EXT_SUB_PUS, EXT_SUB_CASHCHANGE,
-            EXT_SUB_KESN, EXT_SUB_DROP_LIST, EXT_SUB_ITEM_PROCESS, EXT_SUB_RESET,
-            EXT_SUB_DROP_REQUEST, EXT_SUB_COLLECTION_RACE, EXT_SUB_CLANBANK,
-            EXT_SUB_USERINFO, EXT_SUB_KCPAZAR, EXT_SUB_LOOT_SETTINGS,
-            EXT_SUB_CHAOTIC_EXCHANGE, EXT_SUB_MERCHANT,
+            EXT_SUB_AUTHINFO,
+            EXT_SUB_PROCINFO,
+            EXT_SUB_OPEN,
+            EXT_SUB_LOG,
+            EXT_SUB_XALIVE,
+            EXT_SUB_UIINFO,
+            EXT_SUB_PUS,
+            EXT_SUB_CASHCHANGE,
+            EXT_SUB_KESN,
+            EXT_SUB_DROP_LIST,
+            EXT_SUB_ITEM_PROCESS,
+            EXT_SUB_RESET,
+            EXT_SUB_DROP_REQUEST,
+            EXT_SUB_COLLECTION_RACE,
+            EXT_SUB_CLANBANK,
+            EXT_SUB_USERINFO,
+            EXT_SUB_KCPAZAR,
+            EXT_SUB_LOOT_SETTINGS,
+            EXT_SUB_CHAOTIC_EXCHANGE,
+            EXT_SUB_MERCHANT,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -3967,8 +4024,11 @@ mod tests {
         assert_eq!(EXT_SUB_DAILY_REWARD, 0xF7);
         // Must be above all other ext sub-opcodes
         let others = [
-            EXT_SUB_AUTHINFO, EXT_SUB_GAME_MASTER_MODE, EXT_SUB_HOOK_VISIBLE,
-            EXT_SUB_ITEM_EXCHANGE_INFO, EXT_SUB_CHEST_BLOCKITEM,
+            EXT_SUB_AUTHINFO,
+            EXT_SUB_GAME_MASTER_MODE,
+            EXT_SUB_HOOK_VISIBLE,
+            EXT_SUB_ITEM_EXCHANGE_INFO,
+            EXT_SUB_CHEST_BLOCKITEM,
         ];
         for &op in &others {
             assert!(EXT_SUB_DAILY_REWARD > op);
@@ -4197,25 +4257,70 @@ mod tests {
     #[test]
     fn test_ext_sub_total_count() {
         let all_subs: std::collections::HashSet<u8> = [
-            EXT_SUB_AUTHINFO, EXT_SUB_XALIVE, EXT_SUB_UIINFO, EXT_SUB_USERINFO,
-            EXT_SUB_LOOT_SETTINGS, EXT_SUB_SUPPORT, EXT_SUB_CHAT_LASTSEEN,
-            EXT_SUB_SKILL_STAT_RESET, EXT_SUB_PROCINFO, EXT_SUB_LOG, EXT_SUB_PUS,
-            EXT_SUB_CASHCHANGE, EXT_SUB_DROP_LIST, EXT_SUB_RESET, EXT_SUB_DROP_REQUEST,
-            EXT_SUB_CLANBANK, EXT_SUB_CHAOTIC_EXCHANGE, EXT_SUB_MERCHANT, EXT_SUB_TEMPITEMS,
-            EXT_SUB_MERCHANTLIST, EXT_SUB_RESETREBSTAT, EXT_SUB_ACCOUNT_INFO_SAVE,
-            EXT_SUB_REPURCHASE, EXT_SUB_CHEST_BLOCKITEM, EXT_SUB_ITEM_EXCHANGE_INFO,
-            EXT_SUB_DAILY_REWARD, EXT_SUB_CSW, EXT_SUB_ZINDAN_WAR, EXT_SUB_OPEN,
-            EXT_SUB_KESN, EXT_SUB_ITEM_PROCESS, EXT_SUB_COLLECTION_RACE, EXT_SUB_KCPAZAR,
-            EXT_SUB_USERDATA, EXT_SUB_KCUPDATE, EXT_SUB_AUTODROP, EXT_SUB_INFOMESSAGE,
-            EXT_SUB_MESSAGE, EXT_SUB_BANSYSTEM, EXT_SUB_MERC_VIEWER_INFO,
-            EXT_SUB_UPGRADE_RATE, EXT_SUB_CASTLE_SIEGE_TIMER, EXT_SUB_VOICE,
-            EXT_SUB_LOTTERY, EXT_SUB_TOPLEFT, EXT_SUB_ERRORMSG, EXT_SUB_UNKNOWN1,
-            EXT_SUB_TAG_INFO, EXT_SUB_DAILY_QUEST, EXT_SUB_PUS_REFUND,
-            EXT_SUB_PLAYER_RANK, EXT_SUB_DEATH_NOTICE, EXT_SUB_SHOW_QUEST_LIST,
-            EXT_SUB_WHEEL_DATA, EXT_SUB_GENIE_INFO, EXT_SUB_CINDERELLA, EXT_SUB_JURAID,
-            EXT_SUB_PERKS, EXT_SUB_MESSAGE2, EXT_SUB_HOOK_VISIBLE,
+            EXT_SUB_AUTHINFO,
+            EXT_SUB_XALIVE,
+            EXT_SUB_UIINFO,
+            EXT_SUB_USERINFO,
+            EXT_SUB_LOOT_SETTINGS,
+            EXT_SUB_SUPPORT,
+            EXT_SUB_CHAT_LASTSEEN,
+            EXT_SUB_SKILL_STAT_RESET,
+            EXT_SUB_PROCINFO,
+            EXT_SUB_LOG,
+            EXT_SUB_PUS,
+            EXT_SUB_CASHCHANGE,
+            EXT_SUB_DROP_LIST,
+            EXT_SUB_RESET,
+            EXT_SUB_DROP_REQUEST,
+            EXT_SUB_CLANBANK,
+            EXT_SUB_CHAOTIC_EXCHANGE,
+            EXT_SUB_MERCHANT,
+            EXT_SUB_TEMPITEMS,
+            EXT_SUB_MERCHANTLIST,
+            EXT_SUB_RESETREBSTAT,
+            EXT_SUB_ACCOUNT_INFO_SAVE,
+            EXT_SUB_REPURCHASE,
+            EXT_SUB_CHEST_BLOCKITEM,
+            EXT_SUB_ITEM_EXCHANGE_INFO,
+            EXT_SUB_DAILY_REWARD,
+            EXT_SUB_CSW,
+            EXT_SUB_ZINDAN_WAR,
+            EXT_SUB_OPEN,
+            EXT_SUB_KESN,
+            EXT_SUB_ITEM_PROCESS,
+            EXT_SUB_COLLECTION_RACE,
+            EXT_SUB_KCPAZAR,
+            EXT_SUB_USERDATA,
+            EXT_SUB_KCUPDATE,
+            EXT_SUB_AUTODROP,
+            EXT_SUB_INFOMESSAGE,
+            EXT_SUB_MESSAGE,
+            EXT_SUB_BANSYSTEM,
+            EXT_SUB_MERC_VIEWER_INFO,
+            EXT_SUB_UPGRADE_RATE,
+            EXT_SUB_CASTLE_SIEGE_TIMER,
+            EXT_SUB_VOICE,
+            EXT_SUB_LOTTERY,
+            EXT_SUB_TOPLEFT,
+            EXT_SUB_ERRORMSG,
+            EXT_SUB_UNKNOWN1,
+            EXT_SUB_TAG_INFO,
+            EXT_SUB_DAILY_QUEST,
+            EXT_SUB_PUS_REFUND,
+            EXT_SUB_PLAYER_RANK,
+            EXT_SUB_DEATH_NOTICE,
+            EXT_SUB_SHOW_QUEST_LIST,
+            EXT_SUB_WHEEL_DATA,
+            EXT_SUB_GENIE_INFO,
+            EXT_SUB_CINDERELLA,
+            EXT_SUB_JURAID,
+            EXT_SUB_PERKS,
+            EXT_SUB_MESSAGE2,
+            EXT_SUB_HOOK_VISIBLE,
             EXT_SUB_GAME_MASTER_MODE,
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(all_subs.len(), 61);
     }
 
@@ -4322,6 +4427,21 @@ mod tests {
         assert_eq!(r.read_sbyte_string(), Some("Victim".to_string()));
         assert_eq!(r.read_u16(), Some(500)); // victim_x
         assert_eq!(r.read_u16(), Some(600)); // victim_z
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_build_new_death_narration_matches_1098_wire_format() {
+        use ko_protocol::PacketReader;
+        let pkt = build_new_death_narration(2, "Killer", "Victim", 1054, 1082);
+        assert_eq!(pkt.opcode, WIZ_EXT_HOOK);
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u8(), Some(EXT_SUB_DEATH_NOTICE));
+        assert_eq!(r.read_u8(), Some(2));
+        assert_eq!(r.read_sbyte_string(), Some("Killer".to_string()));
+        assert_eq!(r.read_sbyte_string(), Some("Victim".to_string()));
+        assert_eq!(r.read_u16(), Some(1054));
+        assert_eq!(r.read_u16(), Some(1082));
         assert_eq!(r.remaining(), 0);
     }
 

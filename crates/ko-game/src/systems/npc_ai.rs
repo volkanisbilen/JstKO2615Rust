@@ -188,6 +188,10 @@ pub fn start_npc_ai_task(world: Arc<WorldState>) -> tokio::task::JoinHandle<()> 
 /// Process one AI tick for all active NPCs.
 /// NPCs are grouped by zone and processed in parallel across tokio worker threads.
 async fn process_ai_tick(world: Arc<WorldState>, now_ms: u64) {
+    world
+        .manes_survival_manager
+        .finalize_requested_event(world.clone());
+
     // ── Process scheduled respawns (monster respawn loop chain) ──────
     {
         let now_secs = std::time::SystemTime::now()
@@ -448,11 +452,23 @@ fn npc_dead(
     ai: &NpcAiState,
     _tmpl: &NpcTemplate,
 ) -> Option<u64> {
+    // A zero regen time explicitly marks dynamically spawned event NPCs as
+    // non-respawning. Monster Stone monsters use this path; treating zero as
+    // the minimum delay made them come back at the same location after 250ms.
+    if !can_auto_respawn(ai.regen_time_ms) {
+        return None;
+    }
+
     // Transition to LIVE (which will restore HP and set standing)
     world.update_npc_ai(npc_id, |s| {
         s.state = NpcState::Live;
     });
     Some(ai.regen_time_ms.max(250))
+}
+
+#[inline]
+fn can_auto_respawn(regen_time_ms: u64) -> bool {
+    regen_time_ms > 0
 }
 
 /// NPC_LIVE state: Restore HP to max, reposition to spawn, transition to Standing.
@@ -1206,7 +1222,7 @@ async fn npc_fighting(
     //     FindFriend(GetType() == NPC_BOSS ? MonSearchAny : MonSearchSameFamily);
     let is_boss = tmpl.npc_type == NPC_BOSS;
     if ai.has_friends || is_boss {
-        alert_pack(world, npc_id, ai, target_id, is_boss);
+        alert_pack(world, npc_id, ai, tmpl, target_id, is_boss);
     }
 
     // Ranged/magic attack — NPCs with direct_attack > 0 use skills
@@ -1384,6 +1400,9 @@ async fn npc_fighting(
         }
     }
 
+    final_damage = world
+        .manes_survival_manager
+        .reduce_incoming_damage(target_id, final_damage);
     let new_hp = (target.hp - final_damage).max(0);
     world.update_character_hp(target_id, new_hp);
 
@@ -2490,6 +2509,7 @@ fn alert_pack(
     world: &WorldState,
     npc_id: NpcId,
     ai: &NpcAiState,
+    caller_template: &NpcTemplate,
     target_id: SessionId,
     is_boss: bool,
 ) {
@@ -2546,12 +2566,15 @@ fn alert_pack(
             continue;
         }
 
-        // Distance check — use tracing range
+        // C++ CNpc::FindFriendRegion() measures every candidate against the
+        // CALLER's m_byTracingRange. Using each ally's range here causes a
+        // long-range ally to pull itself (and then its whole pack) into combat,
+        // producing the map-wide chain aggro seen in game.
         let dx = ai.cur_x - ally_ai.cur_x;
         let dz = ai.cur_z - ally_ai.cur_z;
         let dist = (dx * dx + dz * dz).sqrt();
 
-        if dist > ally_tmpl.tracing_range.max(ally_tmpl.search_range) as f32 {
+        if caller_template.search_range == 0 || dist > caller_template.tracing_range as f32 {
             continue;
         }
 
@@ -3228,6 +3251,9 @@ async fn npc_apply_magic_effect(
         }
     }
 
+    final_damage = world
+        .manes_survival_manager
+        .reduce_incoming_damage(target_sid, final_damage);
     let new_hp = (target.hp - final_damage).max(0);
     world.update_character_hp(target_sid, new_hp);
 
@@ -3644,6 +3670,17 @@ fn send_gate_flag(
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn test_zero_regen_time_disables_auto_respawn() {
+        assert!(!can_auto_respawn(0));
+    }
+
+    #[test]
+    fn test_positive_regen_time_allows_auto_respawn() {
+        assert!(can_auto_respawn(250));
+        assert!(can_auto_respawn(30_000));
+    }
 
     #[test]
     fn test_npc_state_values_match_cpp() {

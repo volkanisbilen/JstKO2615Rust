@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: korust-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ko_server
+      POSTGRES_USER: koserver
+      POSTGRES_PASSWORD: koserver123
+    ports:
+      - "5432:5432"
+    volumes:
+      - korust_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U koserver -d ko_server"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  korust_pgdata:

@@ -29,6 +29,7 @@ use ko_db::repositories::knights::KnightsRepository;
 use ko_db::repositories::knights_cape::KnightsCapeRepository;
 use ko_db::repositories::level_up::LevelUpRepository;
 use ko_db::repositories::magic::MagicRepository;
+use ko_db::repositories::manes_survival::ManesSurvivalRepository;
 use ko_db::repositories::mining::MiningRepository;
 use ko_db::repositories::monster_event::MonsterEventRepository;
 use ko_db::repositories::npc::NpcRepository;
@@ -45,7 +46,9 @@ use ko_db::repositories::zone_rewards::ZoneRewardsRepository;
 use ko_db::DbPool;
 use ko_protocol::smd::SmdFile;
 
+use crate::clan_constants::CLAN_TYPE_ACCREDITED5;
 use crate::npc::{NpcInstance, NpcTemplate};
+use crate::systems::daily_reset::get_knights_grade;
 use crate::zone::{calc_region, ObjectEventInfo, ZoneState};
 
 use super::{
@@ -133,6 +136,18 @@ impl WorldState {
         // ─── NPC / Monster Loading ──────────────────────────────────────────────
         self.load_npcs_and_monsters(pool).await?;
 
+        // ─── Native MORANKER Statues (top 3 per nation by NP) ──────────────────
+        self.reload_moraranker(pool, false).await?;
+
+        // ─── Manes Survival Runtime Configuration ──────────────────────────────
+        if let Err(e) = self.load_manes_survival(pool).await {
+            tracing::warn!(
+                zone = 96,
+                error = %e,
+                "Manes Survival configuration failed to load; continuing without it"
+            );
+        }
+
         // ─── Knights (Clan) Loading ─────────────────────────────────────────────
         self.load_knights(pool).await?;
 
@@ -182,6 +197,24 @@ impl WorldState {
         // ─── Banish of Winner Loading ─────────────────────────────────────────
         self.load_banish_of_winner(pool).await;
 
+        Ok(())
+    }
+
+    /// Load the validated zone-96 runtime spawn configuration.
+    async fn load_manes_survival(&self, pool: &DbPool) -> anyhow::Result<()> {
+        let repository = ManesSurvivalRepository::new(pool);
+        let rows = repository.load_spawns().await?;
+        let count = rows.len();
+        self.manes_survival_manager.set_spawns(rows)?;
+        let magic = repository.load_magic().await?;
+        let magic_count = magic.len();
+        self.manes_survival_manager.set_magic(magic)?;
+        tracing::info!(
+            spawns = count,
+            magic_rows = magic_count,
+            zone = 96,
+            "Manes Survival configuration loaded"
+        );
         Ok(())
     }
 
@@ -1333,7 +1366,7 @@ impl WorldState {
                     x,
                     y: 0.0,
                     z,
-                    direction: (spawn.direction as u8) % 8,
+                    direction: spawn.direction.rem_euclid(256) as u8,
                     region_x,
                     region_z,
                     gate_open: 0,
@@ -1355,7 +1388,11 @@ impl WorldState {
                 self.npc_instances.insert(nid, instance);
                 // Non-monster NPCs (merchants, event NPCs, etc.) never die in combat.
                 // If their template HP is 0, use 1 so is_npc_dead() doesn't filter them out.
-                let init_hp = if !tmpl.is_monster && tmpl.max_hp == 0 { 1 } else { tmpl.max_hp as i32 };
+                let init_hp = if !tmpl.is_monster && tmpl.max_hp == 0 {
+                    1
+                } else {
+                    tmpl.max_hp as i32
+                };
                 self.npc_hp.insert(nid, init_hp);
 
                 if tmpl.is_monster && tmpl.search_range > 0 {
@@ -1635,7 +1672,11 @@ impl WorldState {
 
                 zone.add_npc(region_x, region_z, nid);
                 self.npc_instances.insert(nid, instance);
-                let init_hp = if tmpl.max_hp == 0 { 1 } else { tmpl.max_hp as i32 };
+                let init_hp = if tmpl.max_hp == 0 {
+                    1
+                } else {
+                    tmpl.max_hp as i32
+                };
                 self.npc_hp.insert(nid, init_hp);
                 obj_npc_count += 1;
             }
@@ -1687,12 +1728,23 @@ impl WorldState {
     async fn load_knights(&self, pool: &DbPool) -> anyhow::Result<()> {
         let knights_repo = KnightsRepository::new(pool);
         let knights_rows = knights_repo.load_all().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         for row in &knights_rows {
             let info = KnightsInfo {
                 id: row.id_num as u16,
                 flag: row.flag as u8,
                 nation: row.nation as u8,
-                grade: 5,
+                // Accredited and Royal clan grades are rank-driven and the
+                // client expects grade 1 even before KNIGHTS_RATING reloads.
+                // Training/Promoted clans retain the point-based grade.
+                grade: if row.flag as u8 >= CLAN_TYPE_ACCREDITED5 {
+                    1
+                } else {
+                    get_knights_grade(row.points.max(0) as u32)
+                },
                 ranking: row.ranking as u8,
                 name: row.id_name.clone(),
                 chief: row.chief.clone(),
@@ -1714,7 +1766,7 @@ impl WorldState {
                     Vec::new()
                 },
                 alliance: row.s_alliance_knights as u16,
-                castellan_cape: row.s_cast_cape >= 0 && row.b_cast_time > 0,
+                castellan_cape: row.s_cast_cape >= 0 && i64::from(row.b_cast_time) >= now,
                 cast_cape_id: row.s_cast_cape,
                 cast_cape_r: row.b_cast_cape_r as u8,
                 cast_cape_g: row.b_cast_cape_g as u8,

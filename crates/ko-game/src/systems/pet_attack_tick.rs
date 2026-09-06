@@ -84,7 +84,9 @@ async fn process_single_pet_attack(world: &WorldState, pd: &crate::world::PetAtt
     let dz = target_npc.z - pet_npc.z;
     let dist_sq = dx * dx + dz * dz;
 
-    if dist_sq > RANGE_50M {
+    const PET_MELEE_RANGE_SQ: f32 = 9.0;
+
+    if dist_sq > PET_MELEE_RANGE_SQ {
         // Move pet 2 units closer to target
         let distance = dist_sq.sqrt();
         if distance == 0.0 {
@@ -96,8 +98,8 @@ async fn process_single_pet_attack(world: &WorldState, pd: &crate::world::PetAtt
         // This overshoots slightly, ensuring the pet reaches attack range.
         let dir_x = dx / distance;
         let dir_z = dz / distance;
-        let new_x = target_npc.x + dir_x * 2.0;
-        let new_z = target_npc.z + dir_z * 2.0;
+        let new_x = target_npc.x - dir_x * 2.0;
+        let new_z = target_npc.z - dir_z * 2.0;
 
         // Update pet NPC position
         world.update_npc_position(pd.pet_nid as NpcId, new_x, new_z);
@@ -170,6 +172,7 @@ async fn process_single_pet_attack(world: &WorldState, pd: &crate::world::PetAtt
                 pd.target_npc_id,
                 &target_npc,
                 tmpl,
+                false,
             )
             .await;
         }
@@ -200,14 +203,14 @@ async fn process_single_pet_attack(world: &WorldState, pd: &crate::world::PetAtt
         .map(|t| t.max_hp)
         .unwrap_or(0);
 
-    let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-    hp_pkt.write_u32(pd.target_npc_id);
-    hp_pkt.write_u8(0);
-    hp_pkt.write_u32(max_hp as u32);
-    hp_pkt.write_u32(new_hp.max(0) as u32);
-    hp_pkt.write_u32((-damage as i32) as u32); // C++ sends negative
-    hp_pkt.write_u32(0);
-    hp_pkt.write_u8(0);
+    let hp_pkt = crate::handler::target_hp::build_target_hp_packet(
+        pd.target_npc_id,
+        0,
+        max_hp as u32,
+        new_hp.max(0) as u32,
+        pd.session_id as u32,
+        -(damage as i32),
+    );
     world.send_to_session_owned(pd.session_id, hp_pkt);
 
     debug!(
@@ -262,7 +265,9 @@ fn award_pet_exp(world: &WorldState, sid: SessionId, pet_nid: u16, gained_exp: i
 
     // Read current pet state
     let pet_snapshot = world.with_session(sid, |h| {
-        h.pet_data.as_ref().map(|p| (p.level, p.exp, p.satisfaction, p.index, p.name.clone()))
+        h.pet_data
+            .as_ref()
+            .map(|p| (p.level, p.exp, p.satisfaction, p.index, p.name.clone()))
     });
     let (mut level, mut exp, satisfaction, pet_index, pet_name) = match pet_snapshot {
         Some(Some(data)) => data,
@@ -338,8 +343,7 @@ fn award_pet_exp(world: &WorldState, sid: SessionId, pet_nid: u16, gained_exp: i
             world.send_to_session_owned(sid, spawn_pkt);
 
             // Send MP change packet — MP is restored to max on level-up.
-            let mp_pkt =
-                crate::handler::pet::build_pet_mp_change_packet(max_mp, max_mp, pet_nid);
+            let mp_pkt = crate::handler::pet::build_pet_mp_change_packet(max_mp, max_mp, pet_nid);
             world.send_to_session_owned(sid, mp_pkt);
         }
 

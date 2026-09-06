@@ -24,6 +24,11 @@ use crate::npc_type_constants::{
 /// NPC type: Cape mark NPC (clan cape customization).
 const NPC_MARK: u8 = 25;
 
+/// WIZ_KNIGHTS_PROCESS sub-opcode used by the v2615 client to open the
+/// clan-cape palette.  This is `KnightsPacket::KNIGHTS_CAPE_NPC` (27/0x1B),
+/// not the older/incorrect 0x14 value.
+const KNIGHTS_CAPE_NPC: u8 = 0x1B;
+
 /// NPC type: Captain NPC (class change).
 const NPC_CAPTAIN: u8 = 35;
 
@@ -39,6 +44,26 @@ const NPC_CHAOTIC_GENERATOR2: u8 = 162;
 /// WIZ_ITEM_UPGRADE sub-opcode for Chaotic Generator dialog.
 const ITEM_BIFROST_REQ: u8 = 4;
 
+/// Build the Inn Hostess menu request. This packet must not contain warehouse
+/// page data; normal/VIP storage is opened by the client's next request.
+fn build_warehouse_menu_open() -> Packet {
+    let mut pkt = Packet::new(Opcode::WizWarehouse as u8);
+    pkt.write_u8(0x10); // WAREHOUSE_REQ
+    pkt
+}
+
+/// Build the Chaotic Generator dialog-open response.
+///
+/// The v2525 client reads the NPC runtime ID as a 32-bit little-endian value.
+/// Sending only u16 leaves the request context incomplete, causing the client
+/// to submit ITEM_BIFROST_PROCESS with npc_id=0.
+fn build_chaotic_generator_open(npc_nid: u32) -> Packet {
+    let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+    pkt.write_u8(ITEM_BIFROST_REQ);
+    pkt.write_u32(npc_nid);
+    pkt
+}
+
 /// NPC type: King election NPC.
 const NPC_ELECTION: u8 = 79;
 
@@ -48,6 +73,11 @@ const NPC_TREASURY: u8 = 80;
 /// NPC type: Event Manager NPC (v2603 IDA: type 174, shares handler with 171).
 /// Clicking opens the active event info dialog (WIZ_EVENT TEMPLE_EVENT).
 const NPC_EVENT_MANAGER: u8 = 174;
+
+/// Dedicated daily-quest NPC template. Its visual data is copied from a
+/// v2615-known model in the database migration, but it has its own proto ID
+/// and is never shared with an existing NPC.
+const NPC_DAILY_QUEST_MANAGER: u16 = 31999;
 
 /// Handle WIZ_CLIENT_EVENT from the client.
 pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
@@ -76,6 +106,14 @@ pub async fn handle_npc_event(session: &mut ClientSession, pkt: Packet) -> anyho
         return Ok(());
     }
 
+    // v2615 CUITiketExchange confirms with exactly nine payload bytes:
+    // [u8 sub=6][u32 ticket item][u32 selected reward]. This shares
+    // WIZ_NPC_EVENT with ordinary NPC clicks, so length and sub-opcode must be
+    // separated before the legacy [unknown][npc nid][quest id] parser.
+    if pkt.data.len() == 9 && pkt.data.first() == Some(&6) {
+        return handle_ticket_exchange(session, &pkt).await;
+    }
+
     let mut reader = PacketReader::new(&pkt.data);
     let _unknown = reader.read_u8().unwrap_or(0);
     let npc_nid = match reader.read_u32() {
@@ -86,6 +124,101 @@ pub async fn handle_npc_event(session: &mut ClientSession, pkt: Packet) -> anyho
     let _quest_id = reader.read_u32().unwrap_or(0) as i32;
 
     handle_npc_by_nid(session, npc_nid).await
+}
+
+async fn handle_ticket_exchange(session: &mut ClientSession, pkt: &Packet) -> anyhow::Result<()> {
+    let mut reader = PacketReader::new(&pkt.data);
+    let _sub = reader.read_u8();
+    let ticket_item = reader.read_u32().unwrap_or(0);
+    let reward_item = reader.read_u32().unwrap_or(0);
+
+    // The allow-list is imported from the client's TICKET_EXCHANGE.tbl. The
+    // client controls both IDs on the wire, so never trust the pair without
+    // this server-side lookup.
+    let rule = sqlx::query_as::<_, (i32, i16)>(
+        "SELECT duration_hours, selector FROM native_ticket_exchange_rule \
+         WHERE ticket_item_id = $1 AND reward_item_id = $2 LIMIT 1",
+    )
+    .bind(ticket_item as i32)
+    .bind(reward_item as i32)
+    .fetch_optional(session.pool())
+    .await?;
+
+    let world = session.world().clone();
+    let sid = session.session_id();
+    let nation = world
+        .get_character_info(sid)
+        .map(|character| character.nation)
+        .unwrap_or(0);
+    let selector_allowed = rule.is_some_and(|(_, selector)| match selector {
+        1 => nation == 1, // Karus-only row
+        2 => nation == 2, // El Morad-only row
+        _ => true,
+    });
+    let status = if !selector_allowed || world.get_item(reward_item).is_none() {
+        3u8 // invalid ticket/reward pair
+    } else {
+        let ticket_count: u32 = world
+            .get_inventory(sid)
+            .iter()
+            .filter(|slot| slot.item_id == ticket_item)
+            .map(|slot| slot.count as u32)
+            .sum();
+        if ticket_count == 0 {
+            2u8 // ticket is no longer in inventory
+        } else if !world.check_weight(sid, reward_item, 1) {
+            4u8 // inventory slot or weight failure
+        } else if !world.rob_item(sid, ticket_item, 1) {
+            2u8
+        } else {
+            let hours = rule.map(|(hours, _)| hours).unwrap_or(0).max(0) as u32;
+            let days = hours.div_ceil(24);
+            let given = if days > 0 {
+                world.give_item_with_expiry(sid, reward_item, 1, days)
+            } else {
+                world.give_item(sid, reward_item, 1)
+            };
+            if given {
+                let account = world
+                    .with_session(sid, |h| h.account_id.clone())
+                    .unwrap_or_default();
+                let character = world.get_session_name(sid).unwrap_or_default();
+                let pos = world.get_position(sid);
+                crate::handler::audit_log::log_give_item(
+                    session.pool(),
+                    &account,
+                    &character,
+                    pos.as_ref().map(|p| p.zone_id as i16).unwrap_or(0),
+                    pos.as_ref().map(|p| p.x as i16).unwrap_or(0),
+                    pos.as_ref().map(|p| p.z as i16).unwrap_or(0),
+                    "ticket_exchange",
+                    reward_item,
+                    1,
+                );
+                tracing::info!(
+                    sid,
+                    ticket_item,
+                    reward_item,
+                    duration_hours = hours,
+                    "Ticket Exchange completed"
+                );
+                1u8
+            } else {
+                // Pre-validation should make this exceptional; restore the
+                // consumed ticket if delivery still fails.
+                let _ = world.give_item(sid, ticket_item, 1);
+                5u8
+            }
+        }
+    };
+
+    // sub_807C20 consumes [sub=6][status]. Status 1 is silent success;
+    // statuses 2..5 select the client's native error strings.
+    let mut out = Packet::new(Opcode::WizNpcEvent as u8);
+    out.write_u8(6);
+    out.write_u8(status);
+    session.send_packet(&out).await?;
+    Ok(())
 }
 
 /// Core NPC interaction logic shared by WIZ_CLIENT_EVENT and WIZ_NPC_EVENT.
@@ -157,6 +290,19 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
         h.event_nid = npc_nid as i16;
         h.event_sid = proto_id as i16;
     });
+
+    // Akara must be opened only by a real NPC interaction (right-click), never
+    // by WIZ_TARGET_HP: that packet is also emitted by ordinary left-click
+    // target selection.
+    if proto_id == 31774 {
+        super::native_events::try_open_akara_menu_from_target(session, npc_nid).await?;
+        return Ok(());
+    }
+
+    if proto_id == NPC_DAILY_QUEST_MANAGER {
+        super::daily_quest::open_daily_quest_manager(session, 0).await?;
+        return Ok(());
+    }
 
     // Look up template for NPC type
     let tmpl = world.get_npc_template(proto_id, npc.is_monster);
@@ -249,13 +395,23 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
             }
             NPC_MARK => {
                 // Cape mark NPC — open clan cape customization UI
+                let clan_state = session
+                    .world()
+                    .get_character_info(session.session_id())
+                    .and_then(|ch| session.world().get_knights(ch.knights_id))
+                    .map(|k| (k.id, k.flag, k.grade, k.cape, k.ranking));
+                // v2615 NPCHandler sends only this sub-opcode. The client
+                // already owns the clan/cape state from MyInfo; injecting a
+                // KNIGHTS_UPDATE before this packet leaves the mantle palette
+                // without its locally-filtered Cloak.tbl entries.
                 let mut pkt = Packet::new(Opcode::WizKnightsProcess as u8);
-                pkt.write_u8(0x14); // KNIGHTS_CAPE_NPC sub-opcode
+                pkt.write_u8(KNIGHTS_CAPE_NPC);
                 session.send_packet(&pkt).await?;
                 debug!(
-                    "[{}] ClientEvent: NPC {} (MARK/CAPE)",
+                    "[{}] ClientEvent: NPC {} (MARK/CAPE), clan_state={:?}",
                     session.addr(),
-                    npc_nid
+                    npc_nid,
+                    clan_state
                 );
                 return Ok(());
             }
@@ -282,9 +438,11 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
                 return Ok(());
             }
             NPC_WAREHOUSE => {
-                // Warehouse NPC — open warehouse
-                let mut pkt = Packet::new(Opcode::WizWarehouse as u8);
-                pkt.write_u8(0x10); // WAREHOUSE_REQ
+                // v2615/reference flow: the NPC click only asks the client to
+                // show the integrated warehouse menu. The client sends the
+                // normal/VIP open request after the player makes a selection.
+                // Opening either store here skips that menu entirely.
+                let pkt = build_warehouse_menu_open();
                 session.send_packet(&pkt).await?;
                 debug!(
                     "[{}] ClientEvent: NPC {} (WAREHOUSE)",
@@ -294,12 +452,9 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
                 return Ok(());
             }
             NPC_CHAOTIC_GENERATOR | NPC_CHAOTIC_GENERATOR2 => {
-                // Chaotic Generator — open gem exchange dialog
-                // S2C: WIZ_ITEM_UPGRADE [sub=ITEM_BIFROST_REQ(4)] [npc_id:u16le]
-                // Sniffer verified: session 10, id 72521 — `5b 04 b6c2 0000`
-                let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-                pkt.write_u8(ITEM_BIFROST_REQ);
-                pkt.write_u16(npc_nid as u16);
+                // Chaotic Generator — open gem/fragment exchange dialog.
+                // S2C: WIZ_ITEM_UPGRADE [sub=ITEM_BIFROST_REQ(4)] [npc_id:u32le]
+                let pkt = build_chaotic_generator_open(npc_nid);
                 session.send_packet(&pkt).await?;
                 debug!(
                     "[{}] ClientEvent: NPC {} (CHAOTIC_GENERATOR) bifrost_req",
@@ -592,6 +747,23 @@ mod tests {
         assert_eq!(r.remaining(), 0);
     }
 
+    #[test]
+    fn test_ticket_exchange_packet_format() {
+        // CUITiketExchange.cpp sub_71C6B0:
+        // [sub=6][ticket item:u32][selected reward:u32].
+        let mut pkt = Packet::new(Opcode::WizNpcEvent as u8);
+        pkt.write_u8(6);
+        pkt.write_u32(508_056_000);
+        pkt.write_u32(508_013_318);
+        assert_eq!(pkt.data.len(), 9);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u8(), Some(6));
+        assert_eq!(r.read_u32(), Some(508_056_000));
+        assert_eq!(r.read_u32(), Some(508_013_318));
+        assert_eq!(r.remaining(), 0);
+    }
+
     /// Merchant NPC → WIZ_TRADE_NPC with selling_group.
     #[test]
     fn test_merchant_shop_response_format() {
@@ -614,13 +786,22 @@ mod tests {
         assert_eq!(r.remaining(), 0);
     }
 
-    /// Cape mark NPC → WIZ_KNIGHTS_PROCESS sub=0x14.
+    /// Cape mark NPC → WIZ_KNIGHTS_PROCESS/KNIGHTS_CAPE_NPC (27/0x1B).
     #[test]
     fn test_cape_mark_npc_response() {
         let mut pkt = Packet::new(Opcode::WizKnightsProcess as u8);
-        pkt.write_u8(0x14); // KNIGHTS_CAPE_NPC
+        pkt.write_u8(KNIGHTS_CAPE_NPC);
         assert_eq!(pkt.data.len(), 1);
-        assert_eq!(pkt.data[0], 0x14);
+        assert_eq!(pkt.data[0], 0x1B);
+    }
+
+    /// Inn Hostess sends only the menu request; storage page data must wait
+    /// for the player's normal/VIP selection.
+    #[test]
+    fn test_warehouse_npc_opens_selection_menu_only() {
+        let pkt = build_warehouse_menu_open();
+        assert_eq!(pkt.opcode, Opcode::WizWarehouse as u8);
+        assert_eq!(pkt.data, [0x10]);
     }
 
     /// Rental NPC → WIZ_RENTAL sub=3, enabled=1, selling_group.
@@ -636,6 +817,15 @@ mod tests {
         assert_eq!(r.read_u16(), Some(1));
         assert_eq!(r.read_u32(), Some(7001));
         assert_eq!(r.remaining(), 0);
+    }
+
+    /// Chaotic Generator open response keeps the full 32-bit NPC runtime ID.
+    #[test]
+    fn test_chaotic_generator_open_response_format() {
+        let pkt = build_chaotic_generator_open(0x0000_C2B6);
+
+        assert_eq!(pkt.opcode, Opcode::WizItemUpgrade as u8);
+        assert_eq!(pkt.data, [ITEM_BIFROST_REQ, 0xB6, 0xC2, 0x00, 0x00]);
     }
 
     /// Special NPC type constants match C++ defines.

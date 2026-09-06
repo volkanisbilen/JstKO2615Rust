@@ -298,3 +298,18 @@ end
 if (EVENT == 3001) then
 	Ret = 1;
 end
+
+-- ═══════════════════════════════════════════════════════════════════
+-- AUTO-GENERATED EVENT HANDLERS (ko-quest-gen)
+-- ═══════════════════════════════════════════════════════════════════
+
+-- [AUTO-GEN] quest=1694 status=0 n_index=14235
+if (EVENT == 22000) then
+	SelectMsg(UID, 4, 1694, 0, NPC, 22, 22001, 23, -1);
+end
+
+-- [AUTO-GEN] quest=1694 status=0 n_index=14235
+if (EVENT == 22001) then
+	SaveEvent(UID, 14235);
+end
+

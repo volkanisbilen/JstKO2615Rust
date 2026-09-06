@@ -170,10 +170,20 @@ impl ClientSession {
 
             // Raw packet logging for debugging v2600 connection flow
             if self.state != SessionState::InGame {
-                let hex: String = packet.data.iter().take(32).map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+                let hex: String = packet
+                    .data
+                    .iter()
+                    .take(32)
+                    .map(|b| format!("{:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 info!(
                     "[{}] C2S opcode=0x{:02X} len={} state={:?} data=[{}]",
-                    self.addr, packet.opcode, packet.data.len(), self.state, hex
+                    self.addr,
+                    packet.opcode,
+                    packet.data.len(),
+                    self.state,
+                    hex
                 );
             }
 
@@ -214,10 +224,7 @@ impl ClientSession {
             result
         } else if let Some(ref mut stream) = self.stream {
             // Pre-auth mode: check AES first, then JvCryption.
-            let aes_enabled = self
-                .aes_owned
-                .as_ref()
-                .is_some_and(|a| a.is_enabled());
+            let aes_enabled = self.aes_owned.as_ref().is_some_and(|a| a.is_enabled());
             if aes_enabled {
                 let aes = self.aes_owned.as_ref().unwrap();
                 return packet_io::read_packet_aes(stream, aes).await;
@@ -246,32 +253,46 @@ impl ClientSession {
     pub async fn send_packet(&mut self, packet: &Packet) -> anyhow::Result<()> {
         // S2C logging for ALL phases (Phase 1 + Phase 2)
         {
-            let hex: String = packet.data.iter().take(32).map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
-            let mode = if self.tx.is_some() { "channel" } else { "direct" };
+            let hex: String = packet
+                .data
+                .iter()
+                .take(32)
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mode = if self.tx.is_some() {
+                "channel"
+            } else {
+                "direct"
+            };
             tracing::info!(
                 "[{}] S2C opcode=0x{:02X} len={} state={:?} mode={} plaintext={} data=[{}]",
-                self.addr, packet.opcode, packet.data.len(), self.state, mode, packet.plaintext, hex
+                self.addr,
+                packet.opcode,
+                packet.data.len(),
+                self.state,
+                mode,
+                packet.plaintext,
+                hex
             );
         }
 
         if let Some(ref tx) = self.tx {
             // In-game: send via channel to writer task
-            tx.send(Arc::new(packet.clone()))
-                .map_err(|e| {
-                    tracing::warn!(
-                        "[{}] Writer channel CLOSED — opcode=0x{:02X} lost (sid={})",
-                        self.addr, e.0.opcode, self.session_id,
-                    );
-                    anyhow::anyhow!("writer channel closed")
-                })?;
+            tx.send(Arc::new(packet.clone())).map_err(|e| {
+                tracing::warn!(
+                    "[{}] Writer channel CLOSED — opcode=0x{:02X} lost (sid={})",
+                    self.addr,
+                    e.0.opcode,
+                    self.session_id,
+                );
+                anyhow::anyhow!("writer channel closed")
+            })?;
             Ok(())
         } else if let Some(ref mut stream) = self.stream {
             // Pre-auth: direct write.
             // Check AES first, then fall back to JvCryption.
-            let aes_enabled = self
-                .aes_owned
-                .as_ref()
-                .is_some_and(|a| a.is_enabled());
+            let aes_enabled = self.aes_owned.as_ref().is_some_and(|a| a.is_enabled());
             if aes_enabled {
                 let aes = self.aes_owned.as_ref().unwrap();
                 return packet_io::send_packet_aes(stream, aes, packet).await;
@@ -510,15 +531,22 @@ impl ClientSession {
 
             // ── 1b. Bulk save inventory items ──────────────────────────────
             if !char_id.is_empty() {
-                let inventory = self.world.get_inventory(sid);
-                let non_empty: Vec<(usize, u32)> = inventory.iter().enumerate()
+                let inventory = self.world.get_persistent_inventory(sid);
+                let non_empty: Vec<(usize, u32)> = inventory
+                    .iter()
+                    .enumerate()
                     .filter(|(_, i)| i.item_id != 0)
                     .map(|(s, i)| (s, i.item_id))
                     .collect();
                 tracing::info!(
                     "Disconnect save: char={} inventory_len={} non_empty={}  slots={:?}",
-                    char_id, inventory.len(), non_empty.len(),
-                    non_empty.iter().map(|(s, id)| format!("[{}]={}", s, id)).collect::<Vec<_>>()
+                    char_id,
+                    inventory.len(),
+                    non_empty.len(),
+                    non_empty
+                        .iter()
+                        .map(|(s, id)| format!("[{}]={}", s, id))
+                        .collect::<Vec<_>>()
                 );
                 if !inventory.is_empty() {
                     let pool = self.pool.clone();
@@ -543,8 +571,14 @@ impl ClientSession {
                             )
                             .collect();
                         match repo.save_items_batch(&params).await {
-                            Ok(()) => tracing::info!("Disconnect save OK: char={} slots={}", cid, params.len()),
-                            Err(e) => warn!("Disconnect: failed to save inventory for {}: {}", cid, e),
+                            Ok(()) => tracing::info!(
+                                "Disconnect save OK: char={} slots={}",
+                                cid,
+                                params.len()
+                            ),
+                            Err(e) => {
+                                warn!("Disconnect: failed to save inventory for {}: {}", cid, e)
+                            }
                         }
                     });
                 } else {
@@ -1260,7 +1294,9 @@ impl ClientSession {
             }
 
             // ── 12. Zone/region removal + INOUT_OUT broadcast ─────────────
-            if let Some((pos, event_room)) = self.world.with_session(sid, |h| (h.position, h.event_room)) {
+            if let Some((pos, event_room)) =
+                self.world.with_session(sid, |h| (h.position, h.event_room))
+            {
                 if let Some(zone) = self.world.get_zone(pos.zone_id) {
                     zone.remove_user(pos.region_x, pos.region_z, sid);
                 }
@@ -1381,9 +1417,7 @@ impl ClientSession {
 
     /// Check if AES encryption is currently enabled for this session.
     pub fn aes_enabled(&self) -> bool {
-        self.aes_owned
-            .as_ref()
-            .is_some_and(|a| a.is_enabled())
+        self.aes_owned.as_ref().is_some_and(|a| a.is_enabled())
     }
 
     /// Account ID (set after successful login).

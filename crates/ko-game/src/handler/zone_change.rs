@@ -933,6 +933,7 @@ pub async fn same_zone_warp(
     region::send_region_user_in_out_for_me(session).await?;
     region::send_merchant_user_in_out_for_me(session).await?;
     region::send_region_npc_info_for_me(session).await?;
+    region::send_nearby_npc_inouts(session).await?;
 
     // 7. Broadcast INOUT_WARP to new region
     region::broadcast_user_in_with_type(session, region::INOUT_WARP).await?;
@@ -959,6 +960,7 @@ async fn handle_loading(session: &mut ClientSession) -> anyhow::Result<()> {
     // Send NPC region list — client uses cached templates for rendering
     // C++ ZoneChangeWarpHandler.cpp:662 — only RegionNpcInfoForMe(), no NPC_INOUT
     region::send_region_npc_info_for_me(session).await?;
+    region::send_nearby_npc_inouts(session).await?;
 
     // Send user region list (WIZ_REGIONCHANGE 3-phase) + merchants
     region::send_region_user_in_out_for_me(session).await?;
@@ -1292,11 +1294,35 @@ fn is_transform_allowed_zone(zone_id: u16) -> bool {
 /// This is a lightweight version of `trigger_zone_change` that works with
 /// just a session ID + WorldState (no ClientSession needed).
 pub(crate) fn server_teleport_to_zone(
-    world: &std::sync::Arc<crate::world::WorldState>,
+    world: &crate::world::WorldState,
     sid: crate::zone::SessionId,
     dest_zone: u16,
     dest_x: f32,
     dest_z: f32,
+) {
+    server_teleport_to_zone_impl(world, sid, dest_zone, dest_x, dest_z, false);
+}
+
+/// Event entry variant which also repositions a player already inside the
+/// destination zone. This is required for Manes participants that entered a
+/// physical instance manually before the registration countdown completed.
+pub(crate) fn server_teleport_to_zone_force(
+    world: &crate::world::WorldState,
+    sid: crate::zone::SessionId,
+    dest_zone: u16,
+    dest_x: f32,
+    dest_z: f32,
+) {
+    server_teleport_to_zone_impl(world, sid, dest_zone, dest_x, dest_z, true);
+}
+
+fn server_teleport_to_zone_impl(
+    world: &crate::world::WorldState,
+    sid: crate::zone::SessionId,
+    dest_zone: u16,
+    dest_x: f32,
+    dest_z: f32,
+    force_same_zone: bool,
 ) {
     let pos = match world.get_position(sid) {
         Some(p) => p,
@@ -1304,7 +1330,7 @@ pub(crate) fn server_teleport_to_zone(
     };
 
     // Skip if already in the destination zone
-    if pos.zone_id == dest_zone {
+    if !force_same_zone && pos.zone_id == dest_zone {
         return;
     }
 

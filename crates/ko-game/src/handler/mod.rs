@@ -96,11 +96,13 @@ pub mod max_hp_change;
 pub mod merchant;
 pub mod mining;
 pub mod monument;
+pub mod moraranker;
 pub mod move_handler;
 pub mod moving_tower;
 pub mod name_change;
 pub mod nation;
 pub mod nation_transfer;
+pub mod native_events;
 pub mod newchar;
 pub mod notice;
 pub mod npc_loot;
@@ -144,6 +146,7 @@ pub mod state_change;
 pub mod stats;
 pub mod stealth;
 pub mod story;
+pub mod survival;
 pub mod tag_change;
 pub mod target_hp;
 pub mod terrain_effects;
@@ -389,7 +392,7 @@ pub async fn dispatch(session: &mut ClientSession, packet: Packet) -> anyhow::Re
         Some(Opcode::WizClientEvent) => client_event::handle(session, packet).await,
         Some(Opcode::WizMapEvent) => map_event::handle(session, packet).await,
         Some(Opcode::WizWeightChange) => weight_change::handle(session, packet).await,
-        Some(Opcode::WizSelectMsg) => select_msg::handle(session, packet),
+        Some(Opcode::WizSelectMsg) => select_msg::handle(session, packet).await,
         Some(Opcode::WizAuthorityChange) => Ok(()), // server→client only (fame/authority broadcast)
         Some(Opcode::WizEditBox) => edit_box::handle(session, packet).await,
         Some(Opcode::WizSanta) => Ok(()), // server→client only (flying Santa/Angel visual event)
@@ -513,14 +516,44 @@ pub async fn dispatch(session: &mut ClientSession, packet: Packet) -> anyhow::Re
         Some(Opcode::WizCostume) => costume::handle(session, packet).await,
         Some(Opcode::WizSoul) => soul::handle(session, packet).await,
         Some(Opcode::WizDailyQuest) => daily_quest_v2525::handle(session, packet).await,
-        Some(Opcode::WizEnchant) => enchant::handle(session, packet).await,
-        Some(Opcode::WizAbility) => ability::handle(session, packet).await,
-        Some(Opcode::WizGuildBank) => guild_bank::handle(session, packet).await,
+        Some(Opcode::WizEnchant) => {
+            let native = session.world().get_server_settings()
+                .map(|s| s.game_version >= 2600).unwrap_or(false);
+            if native { native_events::handle_jigsaw_coin(session, packet).await }
+            else { enchant::handle(session, packet).await }
+        },
+        Some(Opcode::WizAbility) => {
+            let native = session.world().get_server_settings()
+                .map(|s| s.game_version >= 2600).unwrap_or(false);
+            if native { native_events::handle_marble(session, packet).await }
+            else { ability::handle(session, packet).await }
+        },
+        // 0xD0 is version-dependent: v2525 uses Guild Bank, while the
+        // verified 26xx client contract uses Manes Survival. Missing settings
+        // deliberately preserve the established Guild Bank behavior.
+        Some(Opcode::WizGuildBank) => {
+            let is_survival_client = session
+                .world()
+                .get_server_settings()
+                .map(|settings| settings.game_version >= 2600)
+                .unwrap_or(false);
+            if is_survival_client {
+                survival::handle(session, packet).await
+            } else {
+                guild_bank::handle(session, packet).await
+            }
+        },
         Some(Opcode::WizRebirth) => rebirth::handle(session, packet).await,
         Some(Opcode::WizWorldBoss) => world_boss::handle(session, packet).await,
         Some(Opcode::WizSeason) => season::handle(session, packet).await,
+        Some(Opcode::WizRanker) => moraranker::handle(session, packet).await,
         // Special protocol (resource transfer — stub is correct):
-        Some(Opcode::WizContinousPacketData) => continuous_packet::handle(session, packet),
+        Some(Opcode::WizContinousPacketData) => {
+            let native = session.world().get_server_settings()
+                .map(|s| s.game_version >= 2600).unwrap_or(false);
+            if native { native_events::handle_roulette(session, packet).await }
+            else { continuous_packet::handle(session, packet) }
+        },
         _ => {
             warn!(
                 "[{}] Unhandled opcode: 0x{:02X}",
@@ -676,9 +709,7 @@ async fn handle_ext_hook(session: &mut ClientSession, pkt: Packet) -> anyhow::Re
         }
         ext_hook::EXT_SUB_RESETREBSTAT => ext_hook::handle_resetrebstat(session),
         // Sprint 26: BANSYSTEM (0xBF) — life skill data query (C++ repurposed this sub-opcode)
-        ext_hook::EXT_SUB_BANSYSTEM => {
-            ext_hook::handle_bansystem(session, &pkt.data[1..]).await
-        }
+        ext_hook::EXT_SUB_BANSYSTEM => ext_hook::handle_bansystem(session, &pkt.data[1..]).await,
         // Sprint 26: GAME_MASTER_MODE (0xE9) — GM mode UI toggle
         ext_hook::EXT_SUB_GAME_MASTER_MODE => {
             ext_hook::handle_game_master_mode(session, &pkt.data[1..]).await

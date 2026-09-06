@@ -13,6 +13,24 @@ use crate::world::NATION_KARUS;
 /// Number of patrol routes for Ronark Land.
 const RONARK_ROUTE_COUNT: u8 = 10;
 
+/// Compact Ronark bowl circuit. Runtime PK bots use these points instead of
+/// repeatedly travelling from one nation base to the other. Route ID rotates
+/// the starting point and nations walk the loop in opposite directions.
+const RONARK_BOWL: [(i16, i16); 12] = [
+    (1024, 850),
+    (1110, 875),
+    (1170, 935),
+    (1195, 1024),
+    (1170, 1110),
+    (1110, 1170),
+    (1024, 1195),
+    (935, 1170),
+    (875, 1110),
+    (850, 1024),
+    (875, 935),
+    (935, 875),
+];
+
 /// Number of patrol routes for Ardream.
 const ARDREAM_ROUTE_COUNT: u8 = 10;
 
@@ -636,6 +654,30 @@ pub fn get_waypoint(zone_id: u16, route: u8, state: u8, nation: u8) -> Option<(f
     }
 
     Some((x as f32, z as f32))
+}
+
+/// Return a smooth Ronark bowl patrol point. Route rotates the starting point
+/// so a wave does not stack, while nations walk the circuit in opposite
+/// directions and naturally encounter each other.
+pub fn get_bowl_waypoint(route: u8, state: u8, nation: u8) -> Option<(f32, f32)> {
+    let len = RONARK_BOWL.len();
+    let route_offset = route.saturating_sub(1) as usize % len;
+    let state_offset = state.checked_sub(1)? as usize;
+    if state_offset >= len {
+        return None;
+    }
+    let forward = (route_offset + state_offset) % len;
+    let index = if nation == NATION_KARUS {
+        forward
+    } else {
+        (len - forward) % len
+    };
+    let (x, z) = RONARK_BOWL[index];
+    Some((x as f32, z as f32))
+}
+
+pub const fn bowl_waypoint_count() -> u8 {
+    RONARK_BOWL.len() as u8
 }
 
 use rand::Rng;

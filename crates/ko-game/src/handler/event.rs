@@ -379,7 +379,7 @@ async fn handle_monster_stone(
         let is_monster = row.b_type == 0;
         let count = row.s_count.max(1) as u16;
         let summon_type = if row.is_boss { 1u8 } else { 0u8 };
-        world.spawn_event_npc_ex(
+        world.spawn_event_npc_ex_with_direction(
             row.s_sid as u16,
             is_monster,
             zone_id as u16,
@@ -388,6 +388,7 @@ async fn handle_monster_stone(
             count,
             event_room_id,
             summon_type,
+            row.by_direction.clamp(0, u8::MAX as i16) as u8,
         );
     }
 
@@ -759,6 +760,17 @@ async fn handle_draki_enter(
 
             // Load from DB (C++ LoadUserDrakiTowerData)
             let repo = ko_db::repositories::draki_tower::DrakiTowerRepository::new(session.pool());
+            match repo.reset_user_entrance_limit_if_due(&ch.name).await {
+                Ok(true) => tracing::info!(
+                    user = %ch.name,
+                    "Draki Tower entrance limit lazily reset for current 18:00 bucket"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    user = %ch.name,
+                    "Draki Tower lazy entrance reset failed: {e}"
+                ),
+            }
             let user_data = match repo.load_user_data(&ch.name).await {
                 Ok(data) => data,
                 Err(e) => {
@@ -902,10 +914,11 @@ async fn handle_draki_enter(
             0, // monster stage
         ) {
             if let Some(stage) = draki_tower::get_stage_at(&stages, stage_idx) {
+                let stage_is_monster = stage.draki_tower_npc_state == 0;
                 for m in draki_tower::get_monsters_for_stage(&monsters, stage.id) {
                     list.push((
                         m.monster_id as u16,
-                        m.is_monster,
+                        stage_is_monster,
                         m.pos_x as f32,
                         m.pos_z as f32,
                     ));
@@ -980,8 +993,14 @@ async fn handle_draki_enter(
     }
 
     debug!(
-        "[sid={}] Draki Tower entered: dungeon={}, room={}, spawn=({},{})",
-        sid, enter_dungeon, room_id, spawn_x, spawn_z
+        "[sid={}] Draki Tower entered: dungeon={}, room={}, spawn=({},{}), spawned={}, monsters={}",
+        sid,
+        enter_dungeon,
+        room_id,
+        spawn_x,
+        spawn_z,
+        spawn_list.len(),
+        spawn_list.iter().filter(|(_, is_m, _, _)| *is_m).count()
     );
 
     Ok(())
@@ -1008,6 +1027,14 @@ async fn handle_draki_list(session: &mut ClientSession) -> anyhow::Result<()> {
     let user_draki_class = draki_tower::draki_class(ch.class);
 
     let repo = DrakiTowerRepository::new(session.pool());
+
+    if let Err(e) = repo.reset_user_entrance_limit_if_due(&user_name).await {
+        tracing::warn!(
+            "[{}] draki_tower lazy entrance reset failed for {}: {e}",
+            session.addr(),
+            user_name
+        );
+    }
 
     // Load all rift rankings and filter by user's class
     let all_ranks = match repo.load_rift_ranks().await {
@@ -1894,10 +1921,19 @@ mod tests {
     #[test]
     fn test_draki_tower_opcode_gaps() {
         // ENTER=33, LIST=34, TIMER=35 are contiguous
-        assert_eq!(sub_opcode::TEMPLE_DRAKI_TOWER_LIST - sub_opcode::TEMPLE_DRAKI_TOWER_ENTER, 1);
-        assert_eq!(sub_opcode::TEMPLE_DRAKI_TOWER_TIMER - sub_opcode::TEMPLE_DRAKI_TOWER_LIST, 1);
+        assert_eq!(
+            sub_opcode::TEMPLE_DRAKI_TOWER_LIST - sub_opcode::TEMPLE_DRAKI_TOWER_ENTER,
+            1
+        );
+        assert_eq!(
+            sub_opcode::TEMPLE_DRAKI_TOWER_TIMER - sub_opcode::TEMPLE_DRAKI_TOWER_LIST,
+            1
+        );
         // TOWN=38 skips OUT1(36) and OUT2(37)
-        assert_eq!(sub_opcode::TEMPLE_DRAKI_TOWER_TOWN - sub_opcode::TEMPLE_DRAKI_TOWER_TIMER, 3);
+        assert_eq!(
+            sub_opcode::TEMPLE_DRAKI_TOWER_TOWN - sub_opcode::TEMPLE_DRAKI_TOWER_TIMER,
+            3
+        );
     }
 
     /// Event types are non-contiguous i16 values.
@@ -1929,7 +1965,7 @@ mod tests {
         pkt.write_u8(sub_opcode::TEMPLE_EVENT);
         pkt.write_i16(-1); // no active event
         pkt.write_u16(0); // no remaining time
-        // sub(1) + active_event(2) + remain(2) = 5 bytes
+                          // sub(1) + active_event(2) + remain(2) = 5 bytes
         assert_eq!(pkt.data.len(), 5);
         assert_eq!(pkt.data[0], sub_opcode::TEMPLE_EVENT);
     }
@@ -1948,7 +1984,10 @@ mod tests {
     fn test_temple_event_join_disband_adjacent() {
         assert_eq!(sub_opcode::TEMPLE_EVENT_JOIN, 8);
         assert_eq!(sub_opcode::TEMPLE_EVENT_DISBAND, 9);
-        assert_eq!(sub_opcode::TEMPLE_EVENT_DISBAND - sub_opcode::TEMPLE_EVENT_JOIN, 1);
+        assert_eq!(
+            sub_opcode::TEMPLE_EVENT_DISBAND - sub_opcode::TEMPLE_EVENT_JOIN,
+            1
+        );
     }
 
     /// Server-sent sub-opcodes: FINISH (10) and COUNTER (16) are distinct from client sub-opcodes.
@@ -1956,7 +1995,10 @@ mod tests {
     fn test_server_sent_subopcodes_distinct() {
         assert_eq!(sub_opcode::TEMPLE_EVENT_FINISH, 10);
         assert_eq!(sub_opcode::TEMPLE_EVENT_COUNTER, 16);
-        assert_ne!(sub_opcode::TEMPLE_EVENT_FINISH, sub_opcode::TEMPLE_EVENT_COUNTER);
+        assert_ne!(
+            sub_opcode::TEMPLE_EVENT_FINISH,
+            sub_opcode::TEMPLE_EVENT_COUNTER
+        );
         // Both above client join/disband range
         assert!(sub_opcode::TEMPLE_EVENT_FINISH > sub_opcode::TEMPLE_EVENT_DISBAND);
         assert!(sub_opcode::TEMPLE_EVENT_COUNTER > sub_opcode::TEMPLE_EVENT_FINISH);
@@ -1971,9 +2013,13 @@ mod tests {
         assert_eq!(event_type::TEMPLE_EVENT_JURAD_MOUNTAIN, 100);
         assert_eq!(event_type::TEMPLE_EVENT_KNIGHT_BATTLE_ROYALE, 104);
         // Strictly increasing
-        assert!(event_type::TEMPLE_EVENT_BORDER_DEFENCE_WAR < event_type::TEMPLE_EVENT_MONSTER_STONE);
+        assert!(
+            event_type::TEMPLE_EVENT_BORDER_DEFENCE_WAR < event_type::TEMPLE_EVENT_MONSTER_STONE
+        );
         assert!(event_type::TEMPLE_EVENT_CHAOS < event_type::TEMPLE_EVENT_JURAD_MOUNTAIN);
-        assert!(event_type::TEMPLE_EVENT_JURAD_MOUNTAIN < event_type::TEMPLE_EVENT_KNIGHT_BATTLE_ROYALE);
+        assert!(
+            event_type::TEMPLE_EVENT_JURAD_MOUNTAIN < event_type::TEMPLE_EVENT_KNIGHT_BATTLE_ROYALE
+        );
     }
 
     /// Draki tower sub-opcodes: timer (35) sits between list (34) and town (38).

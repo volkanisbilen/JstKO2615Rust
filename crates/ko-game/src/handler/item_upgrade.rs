@@ -35,6 +35,11 @@ const ITEM_MIDDLE_CLASS_TRINA: u32 = 352900000;
 const ITEM_BLESSING_LOGOS: u32 = 890092000;
 /// Accessory trina piece.
 const ITEM_RING_TRINA: u32 = 354000000;
+const ITEM_ACCESSORY_DISASSEMBLE_SCROLL: u32 = 810325000;
+const ACCESSORY_UPGRADE_SCROLLS: [i32; 6] = [
+    379159000, 379160000, 379161000, 379162000, 379163000, 379164000,
+];
+const ITEM_BLESSED_ELEMENTAL_SCROLL: u32 = 379025000;
 
 const NPC_ANVIL: u8 = 24;
 
@@ -46,10 +51,12 @@ const MAX_ITEMS_REQ: usize = 8;
 const ITEM_UPGRADE: u8 = 2;
 const ITEM_ACCESSORIES: u8 = 3;
 const ITEM_UPGRADE_REBIRTH: u8 = 7;
+const ITEM_UPGRADE_REVERSE: u8 = 14;
 const ITEM_BIFROST_REQ: u8 = 4;
 const ITEM_BIFROST_EXCHANGE: u8 = 5;
 const SPECIAL_PART_SEWING: u8 = 11;
 const ITEM_OLDMAN_EXCHANGE: u8 = 13;
+const ITEM_ACCESSORY_DISASSEMBLE: u8 = 15;
 const ITEM_SEAL: u8 = 8;
 
 // ── Item Seal sub-opcodes ────────────────────────────────────────────
@@ -82,6 +89,27 @@ enum UpgradeResult {
     Rental = 5,
 }
 
+async fn send_upgrade_fail(
+    session: &mut ClientSession,
+    upgrade_type: u8,
+    b_type: u8,
+    result: UpgradeResult,
+    logos: bool,
+    items: &[UpgradeItem],
+    reason: &str,
+) -> anyhow::Result<()> {
+    debug!(
+        "[{}] ItemUpgrade fail: type={} b_type={} result={:?} reason={} items={:?}",
+        session.addr(),
+        upgrade_type,
+        b_type,
+        result,
+        reason,
+        items
+    );
+    send_fail(session, upgrade_type, b_type, result, logos, items).await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i8)]
 enum ScrollType {
@@ -93,6 +121,7 @@ enum ScrollType {
     Class = 5,
     HighToRebirth = 15,
     Accessories = 8,
+    RebirthRestoration = 17,
 }
 
 // Item flag constants imported from crate::world (ITEM_FLAG_BOUND, ITEM_FLAG_DUPLICATE, ITEM_FLAG_SEALED, ITEM_FLAG_RENTED).
@@ -121,6 +150,7 @@ fn get_scroll_type(scroll_id: u32) -> ScrollType {
 
         379256000 => ScrollType::HighToRebirth,
         379257000 => ScrollType::Rebirth,
+        810322000 => ScrollType::RebirthRestoration,
 
         379159000 | 379160000 | 379161000 | 379162000 | 379163000 | 379164000 => {
             ScrollType::Accessories
@@ -153,7 +183,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let upgrade_type = reader.read_u8().unwrap_or(0);
 
     match upgrade_type {
-        ITEM_UPGRADE | ITEM_ACCESSORIES | ITEM_UPGRADE_REBIRTH => {
+        ITEM_UPGRADE | ITEM_ACCESSORIES | ITEM_UPGRADE_REBIRTH | ITEM_UPGRADE_REVERSE => {
             item_upgrade(session, &mut reader, upgrade_type).await
         }
         ITEM_BIFROST_REQ => bifrost_piece_req(session).await,
@@ -162,7 +192,9 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         ITEM_SEAL => item_seal_process(session, &mut reader).await,
         PET_IMAGE_TRANSFORM => pet_image_transform(session, &mut reader).await,
         SPECIAL_PART_SEWING => shozin_exchange(session, &mut reader).await,
-        ITEM_OLDMAN_EXCHANGE => item_disassemble(session, &mut reader).await,
+        ITEM_OLDMAN_EXCHANGE | ITEM_ACCESSORY_DISASSEMBLE => {
+            item_disassemble(session, &mut reader, upgrade_type).await
+        }
         super::character_seal::ITEM_CHARACTER_SEAL => {
             super::character_seal::handle(session, &mut reader).await
         }
@@ -190,49 +222,97 @@ async fn item_upgrade(
     let b_type = reader.read_u8().unwrap_or(0);
     let npc_id = reader.read_u32().unwrap_or(0);
 
-    // NPC range check — must be near an Anvil NPC
-    if !world.is_in_npc_range(sid, npc_id) {
-        send_fail(
+    let selected_npc_id = world
+        .with_session(sid, |h| h.event_nid)
+        .filter(|nid| *nid > 0)
+        .map(|nid| nid as u32);
+    let resolved_npc_id = if world.get_npc_instance(npc_id).is_some() {
+        npc_id
+    } else if let Some(selected_id) = selected_npc_id {
+        selected_id
+    } else {
+        send_upgrade_fail(
             session,
             upgrade_type,
             b_type,
             UpgradeResult::Trading,
             false,
             &[],
+            "npc not found and no selected anvil",
+        )
+        .await?;
+        return Ok(());
+    };
+    let Some(npc_inst) = world.get_npc_instance(resolved_npc_id) else {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::Trading,
+            false,
+            &[],
+            "selected anvil not found",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let npc_type = world
+        .get_npc_template(npc_inst.proto_id, npc_inst.is_monster)
+        .map(|tmpl| tmpl.npc_type)
+        .unwrap_or(0);
+    let selected_anvil_ui = world
+        .with_session(sid, |h| {
+            h.event_nid == resolved_npc_id as i16 && h.event_sid == npc_inst.proto_id as i16
+        })
+        .unwrap_or(false);
+    let is_template_anvil = npc_type == NPC_ANVIL;
+    let is_object_anvil = npc_type == OBJECT_ANVIL || selected_anvil_ui;
+    if !is_template_anvil && !is_object_anvil {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::Trading,
+            false,
+            &[],
+            "npc is not an anvil",
         )
         .await?;
         return Ok(());
     }
 
-    // NPC type check — must be NPC_ANVIL (24)
-    {
-        let is_anvil = world
-            .get_npc_instance(npc_id)
-            .and_then(|inst| world.get_npc_template(inst.proto_id, inst.is_monster))
-            .is_some_and(|tmpl| tmpl.npc_type == NPC_ANVIL);
-        if !is_anvil {
-            send_fail(
-                session,
-                upgrade_type,
-                b_type,
-                UpgradeResult::Trading,
-                false,
-                &[],
-            )
-            .await?;
-            return Ok(());
-        }
+    // Static object anvils are opened via WIZ_OBJECT_EVENT, which already checks
+    // object_event_pos range. Some object NPC instance coordinates differ from
+    // that object position, so allow the immediate upgrade packet only if this
+    // session opened the same anvil UI.
+    let in_npc_range = world.is_in_npc_range(sid, resolved_npc_id);
+    let selected_object_anvil = is_object_anvil && selected_anvil_ui;
+    if !in_npc_range && !selected_object_anvil {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::Trading,
+            false,
+            &[],
+            "npc out of range",
+        )
+        .await?;
+        return Ok(());
     }
 
     // Read 10 items from the client
     let mut raw_items: [u32; 10] = [0; 10];
+    let mut raw_slots: [i8; 10] = [-1; 10];
     let mut items: Vec<UpgradeItem> = Vec::with_capacity(10);
 
-    for raw_slot in &mut raw_items {
+    for i in 0..raw_items.len() {
         let item_id = reader.read_u32().unwrap_or(0) as i32;
         let slot = reader.read_u8().unwrap_or(0xff) as i8;
 
-        *raw_slot = item_id as u32;
+        raw_items[i] = item_id as u32;
+        raw_slots[i] = slot;
 
         if item_id > 0 && slot >= 0 && (slot as usize) < HAVE_MAX {
             items.push(UpgradeItem {
@@ -241,6 +321,16 @@ async fn item_upgrade(
             });
         }
     }
+
+    debug!(
+        "[{}] ItemUpgrade request: type={} b_type={} npc={} raw_items={:?} parsed_items={:?}",
+        session.addr(),
+        upgrade_type,
+        b_type,
+        npc_id,
+        raw_items,
+        items
+    );
 
     // ── Validation checks (matching C++ order) ──
 
@@ -251,13 +341,44 @@ async fn item_upgrade(
         || world.is_merchanting(sid)
         || world.is_mining(sid)
     {
-        send_fail(
+        send_upgrade_fail(
             session,
             upgrade_type,
             b_type,
             UpgradeResult::Trading,
             false,
             &[],
+            "blocked player state",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // bType must be 1 (execute) or 2 (preview)
+    if !(UPGRADE_TYPE_NORMAL..=UPGRADE_TYPE_PREVIEW).contains(&b_type) {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::NoMatch,
+            false,
+            &[],
+            "invalid b_type",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Must have at least one item
+    if items.is_empty() {
+        send_upgrade_fail(
+            session,
+            upgrade_type,
+            b_type,
+            UpgradeResult::NoMatch,
+            false,
+            &[],
+            "empty item list",
         )
         .await?;
         return Ok(());
@@ -278,13 +399,14 @@ async fn item_upgrade(
             })
             .unwrap_or(true);
         if blocked {
-            send_fail(
+            send_upgrade_fail(
                 session,
                 upgrade_type,
                 b_type,
                 UpgradeResult::Trading,
                 false,
                 &[],
+                "rate limit",
             )
             .await?;
             return Ok(());
@@ -294,34 +416,6 @@ async fn item_upgrade(
             h.last_upgrade_time = std::time::Instant::now();
             h.upgrade_count = h.upgrade_count.saturating_add(1);
         });
-    }
-
-    // bType must be 1 (execute) or 2 (preview)
-    if !(UPGRADE_TYPE_NORMAL..=UPGRADE_TYPE_PREVIEW).contains(&b_type) {
-        send_fail(
-            session,
-            upgrade_type,
-            b_type,
-            UpgradeResult::NoMatch,
-            false,
-            &[],
-        )
-        .await?;
-        return Ok(());
-    }
-
-    // Must have at least one item
-    if items.is_empty() {
-        send_fail(
-            session,
-            upgrade_type,
-            b_type,
-            UpgradeResult::NoMatch,
-            false,
-            &[],
-        )
-        .await?;
-        return Ok(());
     }
 
     // Validate all items exist in inventory and are not bound/sealed/rented/duplicate
@@ -396,17 +490,23 @@ async fn item_upgrade(
 
     // Find the scroll in the items list
     let mut user_scroll_type = ScrollType::Invalid;
-    let mut _scroll_id: u32 = 0;
+    let mut scroll_id: u32 = 0;
     for item in &items {
         let st = get_scroll_type(item.item_id);
         if st != ScrollType::Invalid {
             user_scroll_type = st;
-            _scroll_id = item.item_id;
+            scroll_id = item.item_id;
             break;
         }
     }
 
     if user_scroll_type == ScrollType::Invalid {
+        debug!(
+            "[{}] ItemUpgrade fail: type={} reason=no recognized scroll raw_items={:?}",
+            session.addr(),
+            upgrade_type,
+            raw_items
+        );
         send_fail(
             session,
             upgrade_type,
@@ -517,6 +617,14 @@ async fn item_upgrade(
 
     // Validate scroll type compatibility (C++ scroll class matching logic)
     if !is_scroll_compatible(item_scroll_type, user_scroll_type) {
+        debug!(
+            "[{}] ItemUpgrade fail: type={} reason=incompatible scroll item_class={} item_scroll={:?} user_scroll={:?}",
+            session.addr(),
+            upgrade_type,
+            item_class,
+            item_scroll_type,
+            user_scroll_type
+        );
         send_fail(
             session,
             upgrade_type,
@@ -620,6 +728,8 @@ async fn item_upgrade(
 
     // Find matching recipe: check scroll number match
     let mut new_item_id: u32 = 0;
+    let mut matched_req_item: i32 = 0;
+    let mut matched_recipe_grade: i16 = -1;
     let mut recipe_found = false;
 
     for recipe in &recipes {
@@ -653,11 +763,22 @@ async fn item_upgrade(
         }
 
         new_item_id = recipe.new_number as u32;
+        matched_req_item = recipe.req_item;
+        matched_recipe_grade = recipe.grade;
         recipe_found = true;
         break;
     }
 
     if !recipe_found || new_item_id == 0 {
+        debug!(
+            "[{}] ItemUpgrade fail: type={} reason=recipe not found origin={} scroll={:?} raw_items={:?} recipe_count={}",
+            session.addr(),
+            upgrade_type,
+            origin_item_id,
+            user_scroll_type,
+            raw_items,
+            recipes.len()
+        );
         send_fail(
             session,
             upgrade_type,
@@ -691,8 +812,13 @@ async fn item_upgrade(
         } else {
             raw_items[2] as i32
         };
+        let settings_grade = if matched_recipe_grade >= 0 {
+            matched_recipe_grade
+        } else {
+            by_grade
+        };
 
-        if let Some(setting) = world.find_upgrade_setting(item_type, by_grade, req1, req2) {
+        if let Some(setting) = world.find_upgrade_setting(item_type, settings_grade, req1, req2) {
             gen_rate = setting.success_rate as u32;
             if gen_rate > 10000 {
                 gen_rate = 10000;
@@ -716,9 +842,59 @@ async fn item_upgrade(
                 settings_found = false;
             }
         }
+
+        if !settings_found
+            && scroll_id == ITEM_BLESSED_ELEMENTAL_SCROLL
+            && matched_req_item == ITEM_BLESSED_ELEMENTAL_SCROLL as i32
+            && settings_grade == 0
+        {
+            gen_rate = 10000;
+            req_coins = 500_000;
+            settings_found = true;
+            debug!(
+                "[{}] ItemUpgrade settings fallback: Blessed Elemental +0 origin={} new_item={} item_type={} grade={}",
+                session.addr(),
+                origin_item_id,
+                new_item_id,
+                item_type,
+                settings_grade
+            );
+        }
     }
 
     if !settings_found || gen_rate == 0 {
+        if upgrade_type == ITEM_ACCESSORIES
+            && user_scroll_type == ScrollType::Accessories
+            && matched_req_item == scroll_id as i32
+        {
+            gen_rate = 10000;
+            req_coins = 100_000;
+            settings_found = true;
+            debug!(
+                "[{}] ItemUpgrade accessory settings fallback: origin={} new_item={} scroll={} grade={}",
+                session.addr(),
+                origin_item_id,
+                new_item_id,
+                scroll_id,
+                matched_recipe_grade
+            );
+        }
+    }
+
+    if !settings_found || gen_rate == 0 {
+        debug!(
+            "[{}] ItemUpgrade fail: type={} reason=settings not found origin={} new_item={} scroll={} scroll_type={:?} item_type={} grade={} recipe_grade={} matched_req={}",
+            session.addr(),
+            upgrade_type,
+            origin_item_id,
+            new_item_id,
+            scroll_id,
+            user_scroll_type,
+            item_type,
+            by_grade,
+            matched_recipe_grade,
+            matched_req_item
+        );
         send_fail(
             session,
             upgrade_type,
@@ -869,14 +1045,16 @@ async fn item_upgrade(
     // ── Build response packet ──
     let mut result = Packet::new(Opcode::WizItemUpgrade as u8);
     result.write_u8(upgrade_type);
+    if b_result == UpgradeResult::Failed {
+        // C++ fail_return places the logos flag before bType/result. Keeping
+        // this order prevents the client from rolling failed upgrades back.
+        result.write_u8(if has_logos { 1 } else { 0 });
+    }
     result.write_u8(b_type);
     result.write_u8(b_result as u8);
 
-    if b_result == UpgradeResult::Failed && upgrade_type != ITEM_ACCESSORIES {
-        result.write_u8(if has_logos { 1 } else { 0 });
-    }
-
-    for item in &result_items {
+    let response_items = build_upgrade_response_items(&raw_items, &raw_slots, &result_items);
+    for item in &response_items {
         result.write_i32(item.item_id as i32);
         result.write_i8(item.slot);
     }
@@ -958,7 +1136,7 @@ async fn item_upgrade(
         let mut anvil_pkt = Packet::new(Opcode::WizObjectEvent as u8);
         anvil_pkt.write_u8(OBJECT_ANVIL);
         anvil_pkt.write_u8(b_result as u8);
-        anvil_pkt.write_u32(npc_id);
+        anvil_pkt.write_u32(resolved_npc_id);
 
         if let Some(pos) = world.get_position(sid) {
             world.broadcast_to_zone(pos.zone_id, Arc::new(anvil_pkt), Some(sid));
@@ -1002,13 +1180,17 @@ fn is_scroll_compatible(item_class: ScrollType, user_scroll: ScrollType) -> bool
         ),
         ScrollType::Rebirth => matches!(
             user_scroll,
-            ScrollType::Rebirth | ScrollType::HighToRebirth | ScrollType::HighClass
+            ScrollType::Rebirth
+                | ScrollType::HighToRebirth
+                | ScrollType::HighClass
+                | ScrollType::RebirthRestoration
         ),
         ScrollType::Accessories => user_scroll == ScrollType::Accessories,
         ScrollType::HighToRebirth => matches!(
             user_scroll,
             ScrollType::HighToRebirth | ScrollType::HighClass
         ),
+        ScrollType::RebirthRestoration => user_scroll == ScrollType::RebirthRestoration,
         ScrollType::Invalid => false,
         _ => false,
     }
@@ -1038,7 +1220,35 @@ async fn send_fail(
         pkt.write_i32(item.item_id as i32);
         pkt.write_i8(item.slot);
     }
+    if matches!(
+        upgrade_type,
+        ITEM_UPGRADE | ITEM_ACCESSORIES | ITEM_UPGRADE_REBIRTH | ITEM_UPGRADE_REVERSE
+    ) {
+        for _ in items.len()..10 {
+            pkt.write_i32(0);
+            pkt.write_i8(-1);
+        }
+    }
     session.send_packet(&pkt).await
+}
+
+fn build_upgrade_response_items(
+    raw_items: &[u32; 10],
+    raw_slots: &[i8; 10],
+    result_items: &[UpgradeItem],
+) -> Vec<UpgradeItem> {
+    let mut response = Vec::with_capacity(10);
+    for i in 0..10 {
+        let mut item_id = raw_items[i];
+        let slot = raw_slots[i];
+
+        if i < result_items.len() {
+            item_id = result_items[i].item_id;
+        }
+
+        response.push(UpgradeItem { item_id, slot });
+    }
+    response
 }
 
 /// Generate a random number in [min, max).
@@ -1095,10 +1305,38 @@ async fn send_crafting_fail(
 }
 
 /// Send an item smash failure packet.
-async fn send_smash_fail(session: &mut ClientSession, error: SmashError) -> anyhow::Result<()> {
+async fn send_smash_fail(
+    session: &mut ClientSession,
+    response_type: u8,
+    error: SmashError,
+) -> anyhow::Result<()> {
+    if response_type == ITEM_ACCESSORY_DISASSEMBLE {
+        return send_accessory_disassemble_fail(session, error).await;
+    }
+
     let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-    pkt.write_u8(ITEM_OLDMAN_EXCHANGE);
+    pkt.write_u8(response_type);
     pkt.write_u16(error as u16);
+    session.send_packet(&pkt).await
+}
+
+async fn send_accessory_disassemble_fail(
+    session: &mut ClientSession,
+    error: SmashError,
+) -> anyhow::Result<()> {
+    let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+    pkt.write_u8(ITEM_ACCESSORY_DISASSEMBLE);
+    // CUIAccessoryReturn parses a fixed result body on failure too. A short
+    // 3-byte response makes the 2615 client read past the packet and crash.
+    pkt.write_u16(error as u16);
+    pkt.write_u32(0);
+    pkt.write_u8(0xff);
+    pkt.write_u16(0);
+    for _ in 0..3 {
+        pkt.write_u32(0);
+        pkt.write_u8(0xff);
+        pkt.write_u16(0);
+    }
     session.send_packet(&pkt).await
 }
 
@@ -1525,14 +1763,122 @@ async fn shozin_exchange(
 async fn item_disassemble(
     session: &mut ClientSession,
     reader: &mut PacketReader<'_>,
+    response_type: u8,
 ) -> anyhow::Result<()> {
     let world = session.world().clone();
     let sid = session.session_id();
 
-    // Parse packet
-    let item_id = reader.read_u32().unwrap_or(0);
-    let slot = reader.read_u8().unwrap_or(0xff);
-    let _npc_id_raw = reader.read_u32().unwrap_or(0);
+    // Parse packet. Old Man Exchange (13) uses the legacy compact format:
+    // [u32 itemID] [u8 slot] [u32 npcID].
+    //
+    // Accessory disassemble (15) in the 2615 client sends the anvil-style
+    // payload: [u32 npcID] [4 x (u32 itemID, u8 slot)]. Pick the entry whose
+    // upgraded item can be reversed through NEW_UPGRADE.
+    let (item_id, slot, _npc_id_raw, consume_item): (u32, u8, u32, Option<(u32, u8)>) =
+        if response_type == ITEM_ACCESSORY_DISASSEMBLE && reader.remaining() >= 24 {
+            let npc_id = reader.read_u32().unwrap_or(0);
+            let mut selected: Option<(u32, u8)> = None;
+            let mut material: Option<(u32, u8)> = None;
+            let mut candidates: Vec<(u32, u8, u32)> = Vec::new();
+
+            for _ in 0..4 {
+                let packet_item_id = reader.read_u32().unwrap_or(0);
+                let candidate_slot = reader.read_u8().unwrap_or(0xff);
+                if candidate_slot as usize >= HAVE_MAX {
+                    continue;
+                }
+                let inv_idx = SLOT_MAX + candidate_slot as usize;
+                let Some(inv_item_id) = world
+                    .get_inventory_slot(sid, inv_idx)
+                    .map(|inv| inv.item_id)
+                    .filter(|id| *id != 0)
+                else {
+                    continue;
+                };
+                candidates.push((packet_item_id, candidate_slot, inv_item_id));
+                if inv_item_id == ITEM_ACCESSORY_DISASSEMBLE_SCROLL
+                    || packet_item_id == ITEM_ACCESSORY_DISASSEMBLE_SCROLL
+                {
+                    material.get_or_insert((inv_item_id, candidate_slot));
+                    continue;
+                }
+
+                let is_reverseable = world
+                    .find_upgrade_recipe_by_new_number_and_req_items(
+                        inv_item_id as i32,
+                        &ACCESSORY_UPGRADE_SCROLLS,
+                    )
+                    .is_some();
+                let looks_like_upgraded_accessory = inv_item_id % 10 > 0
+                    && world.get_item(inv_item_id).is_some_and(|proto| {
+                        proto.countable.unwrap_or(0) == 0
+                            && proto.kind.unwrap_or(0) != ITEM_KIND_UNIQUE
+                            && matches!(
+                                proto.item_class.unwrap_or(0) as i16,
+                                21 | 22 | 31 | 32 | 33 | 34 | 35 | 37 | 38
+                            )
+                    });
+
+                if selected.is_none() && (is_reverseable || looks_like_upgraded_accessory) {
+                    selected = Some((inv_item_id, candidate_slot));
+                } else if material.is_none() {
+                    material = Some((inv_item_id, candidate_slot));
+                }
+            }
+
+            if selected.is_none() {
+                for i in 0..HAVE_MAX {
+                    let Some(inv_item_id) = world
+                        .get_inventory_slot(sid, SLOT_MAX + i)
+                        .map(|inv| inv.item_id)
+                        .filter(|id| *id != 0 && *id != ITEM_ACCESSORY_DISASSEMBLE_SCROLL)
+                    else {
+                        continue;
+                    };
+
+                    let is_reverseable = world
+                        .find_upgrade_recipe_by_new_number_and_req_items(
+                            inv_item_id as i32,
+                            &ACCESSORY_UPGRADE_SCROLLS,
+                        )
+                        .is_some();
+                    let looks_like_upgraded_accessory = inv_item_id % 10 > 0
+                        && world.get_item(inv_item_id).is_some_and(|proto| {
+                            proto.countable.unwrap_or(0) == 0
+                                && proto.kind.unwrap_or(0) != ITEM_KIND_UNIQUE
+                                && matches!(
+                                    proto.item_class.unwrap_or(0) as i16,
+                                    21 | 22 | 31 | 32 | 33 | 34 | 35 | 37 | 38
+                                )
+                        });
+
+                    if is_reverseable || looks_like_upgraded_accessory {
+                        selected = Some((inv_item_id, i as u8));
+                        break;
+                    }
+                }
+            }
+
+            let (selected_item_id, selected_slot) = match selected {
+                Some(v) => v,
+                None => {
+                    debug!(
+                        "[{}] ItemDisassemble accessory fail: no reverseable item in type=15 payload npc_id={} candidates={:?}",
+                        session.addr(),
+                        npc_id,
+                        candidates
+                    );
+                    return send_smash_fail(session, response_type, SmashError::Item).await;
+                }
+            };
+
+            (selected_item_id, selected_slot, npc_id, material)
+        } else {
+            let item_id = reader.read_u32().unwrap_or(0);
+            let slot = reader.read_u8().unwrap_or(0xff);
+            let npc_id = reader.read_u32().unwrap_or(0);
+            (item_id, slot, npc_id, None)
+        };
 
     // Player state validation
     if world.is_player_dead(sid)
@@ -1543,32 +1889,32 @@ async fn item_disassemble(
         || world.is_mining(sid)
         || world.is_fishing(sid)
     {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Must be in Moradon
     let pos = match world.get_position(sid) {
         Some(p) => p,
-        None => return send_smash_fail(session, SmashError::Npc).await,
+        None => return send_smash_fail(session, response_type, SmashError::Npc).await,
     };
     if !is_moradon(pos.zone_id) {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Validate slot
     if slot as usize >= HAVE_MAX {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Look up item definition
     let proto = match world.get_item(item_id) {
         Some(p) => p,
-        None => return send_smash_fail(session, SmashError::Npc).await,
+        None => return send_smash_fail(session, response_type, SmashError::Npc).await,
     };
 
     // Item must not be countable, kind must not be 255
     if proto.countable.unwrap_or(0) != 0 || proto.kind.unwrap_or(0) == ITEM_KIND_UNIQUE {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Validate item class (C++ ItemClass check)
@@ -1577,7 +1923,7 @@ async fn item_disassemble(
         item_class,
         3 | 4 | 5 | 8 | 31 | 32 | 33 | 34 | 35 | 37 | 38 | 21 | 22
     ) {
-        return send_smash_fail(session, SmashError::Item).await;
+        return send_smash_fail(session, response_type, SmashError::Item).await;
     }
 
     // Gold cost: 10000 (normal) or 100000 (type 4/12 items)
@@ -1591,7 +1937,7 @@ async fn item_disassemble(
     // Check gold
     let player_gold = world.get_character_info(sid).map(|ch| ch.gold).unwrap_or(0);
     if player_gold < req_coins {
-        return send_smash_fail(session, SmashError::Item).await;
+        return send_smash_fail(session, response_type, SmashError::Item).await;
     }
 
     // Validate the item in inventory
@@ -1603,10 +1949,132 @@ async fn item_disassemble(
                 || inv_slot.flag == ITEM_FLAG_DUPLICATE
                 || inv_slot.flag == ITEM_FLAG_RENTED
             {
-                return send_smash_fail(session, SmashError::Item).await;
+                return send_smash_fail(session, response_type, SmashError::Item).await;
             }
         }
-        None => return send_smash_fail(session, SmashError::Item).await,
+        None => return send_smash_fail(session, response_type, SmashError::Item).await,
+    }
+
+    if response_type == ITEM_ACCESSORY_DISASSEMBLE {
+        let reward_item_id = if let Some(recipe) = world
+            .find_upgrade_recipe_by_new_number_and_req_items(
+                item_id as i32,
+                &ACCESSORY_UPGRADE_SCROLLS,
+            ) {
+            recipe.origin_number as u32
+        } else if item_id % 10 > 0 {
+            let fallback = item_id - 1;
+            debug!(
+                "[{}] ItemDisassemble accessory fallback: item_id={} reward_item_id={}",
+                session.addr(),
+                item_id,
+                fallback
+            );
+            fallback
+        } else {
+            debug!(
+                "[{}] ItemDisassemble accessory fail: no reverse recipe/fallback for item_id={}",
+                session.addr(),
+                item_id
+            );
+            return send_smash_fail(session, response_type, SmashError::Item).await;
+        };
+
+        if reward_item_id == 0 || world.get_item(reward_item_id).is_none() {
+            return send_smash_fail(session, response_type, SmashError::Item).await;
+        }
+
+        let reward_count: u16 = 3;
+        let mut free_slots = 1u8; // the source slot becomes free after removal
+        for i in 0..HAVE_MAX {
+            if let Some(inv_slot) = world.get_inventory_slot(sid, SLOT_MAX + i) {
+                if inv_slot.item_id == 0 {
+                    free_slots += 1;
+                    if free_slots >= reward_count as u8 {
+                        break;
+                    }
+                }
+            }
+        }
+        if free_slots < reward_count as u8 {
+            return send_smash_fail(session, response_type, SmashError::Inventory).await;
+        }
+
+        let reward_weight = world
+            .get_item(reward_item_id)
+            .map(|p| (p.weight.unwrap_or(0) as i32).saturating_mul(reward_count as i32))
+            .unwrap_or(0);
+        if let Some(ch) = world.get_character_info(sid) {
+            if ch.item_weight + reward_weight > ch.max_weight {
+                return send_smash_fail(session, response_type, SmashError::Item).await;
+            }
+        }
+
+        if !world.gold_lose(sid, req_coins) {
+            return send_smash_fail(session, response_type, SmashError::Item).await;
+        }
+
+        if let Some((material_item_id, material_slot)) = consume_item {
+            let material_idx = SLOT_MAX + material_slot as usize;
+            world.update_inventory(sid, |inv| {
+                if material_idx < inv.len()
+                    && inv[material_idx].item_id == material_item_id
+                    && inv[material_idx].count > 0
+                {
+                    if inv[material_idx].count > 1 {
+                        inv[material_idx].count -= 1;
+                    } else {
+                        inv[material_idx] = Default::default();
+                    }
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+
+        world.update_inventory(sid, |inv| {
+            if actual_idx < inv.len() {
+                inv[actual_idx] = Default::default();
+                true
+            } else {
+                false
+            }
+        });
+
+        let mut reward_slots: Vec<(u32, u8)> = Vec::with_capacity(reward_count as usize);
+
+        for _ in 0..reward_count {
+            if let Some(slot_idx) = world.find_slot_for_item(sid, reward_item_id, 1) {
+                if slot_idx >= SLOT_MAX && world.give_item(sid, reward_item_id, 1) {
+                    reward_slots.push((reward_item_id, (slot_idx - SLOT_MAX) as u8));
+                }
+            }
+        }
+
+        if reward_slots.len() != reward_count as usize {
+            return send_smash_fail(session, response_type, SmashError::Inventory).await;
+        }
+
+        let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+        pkt.write_u8(response_type);
+        pkt.write_u16(SmashError::Success as u16);
+        pkt.write_u32(item_id);
+        pkt.write_u8(slot);
+        pkt.write_u16(reward_count);
+        for (reward_id, reward_slot) in &reward_slots {
+            pkt.write_u32(*reward_id);
+            pkt.write_u8(*reward_slot);
+            pkt.write_u16(1);
+        }
+        session.send_packet(&pkt).await?;
+
+        // Accessory Return consumes the legacy 31-byte result above.  A
+        // second normal-upgrade (53-byte) result makes the 2615 client parse
+        // an unrelated contract and disconnect with 10054.
+
+        world.set_user_ability(sid);
+        return Ok(());
     }
 
     // Determine index range for the item class
@@ -1615,12 +2083,12 @@ async fn item_disassemble(
         32 | 33 | 34 | 35 | 37 | 38 => (3_000_000, 4_000_000),
         21 => (4_000_000, 5_000_000),
         31 | 22 => (5_000_000, 6_000_000),
-        _ => return send_smash_fail(session, SmashError::Npc).await,
+        _ => return send_smash_fail(session, response_type, SmashError::Npc).await,
     };
 
     let smash_list = world.get_item_smash_in_range(range_start, range_end);
     if smash_list.is_empty() {
-        return send_smash_fail(session, SmashError::Npc).await;
+        return send_smash_fail(session, response_type, SmashError::Npc).await;
     }
 
     // Determine roll count based on item class
@@ -1646,7 +2114,7 @@ async fn item_disassemble(
         }
     }
     if free_slots < roll_count as u8 {
-        return send_smash_fail(session, SmashError::Inventory).await;
+        return send_smash_fail(session, response_type, SmashError::Inventory).await;
     }
 
     // ── Weighted random selection for each roll ──
@@ -1670,7 +2138,7 @@ async fn item_disassemble(
         }
 
         if total_weight == 0 || weighted.is_empty() {
-            return send_smash_fail(session, SmashError::Item).await;
+            return send_smash_fail(session, response_type, SmashError::Item).await;
         }
 
         let roll = rand_range(0, total_weight);
@@ -1691,25 +2159,26 @@ async fn item_disassemble(
     }
 
     if results.is_empty() {
-        return send_smash_fail(session, SmashError::Item).await;
+        return send_smash_fail(session, response_type, SmashError::Item).await;
     }
 
     // Weight check for all resulting items
     let mut total_result_weight: i32 = 0;
     for res in &results {
         if let Some(p) = world.get_item(res.item_id) {
-            total_result_weight = total_result_weight.saturating_add((p.weight.unwrap_or(0) as i32).saturating_mul(res.count as i32));
+            total_result_weight = total_result_weight
+                .saturating_add((p.weight.unwrap_or(0) as i32).saturating_mul(res.count as i32));
         }
     }
     if let Some(ch) = world.get_character_info(sid) {
         if ch.item_weight + total_result_weight > ch.max_weight {
-            return send_smash_fail(session, SmashError::Item).await;
+            return send_smash_fail(session, response_type, SmashError::Item).await;
         }
     }
 
     // Deduct gold
     if !world.gold_lose(sid, req_coins) {
-        return send_smash_fail(session, SmashError::Item).await;
+        return send_smash_fail(session, response_type, SmashError::Item).await;
     }
 
     // Remove the original item
@@ -1724,7 +2193,7 @@ async fn item_disassemble(
 
     // Build response packet
     let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-    pkt.write_u8(ITEM_OLDMAN_EXCHANGE);
+    pkt.write_u8(response_type);
     pkt.write_u16(SmashError::Success as u16);
     pkt.write_u32(item_id);
     pkt.write_u8(slot);
@@ -1986,28 +2455,56 @@ async fn bifrost_piece_exchange(
         return bifrost_send_fail(session, error_code).await;
     }
 
-    // Find a slot for the reward item
+    // Verify that the reward can fit before consuming the piece. The final
+    // slot must be resolved again after consumption: when the last piece in
+    // the source stack is removed, that newly-empty slot may become the first
+    // valid destination for the reward.
+    if world.find_slot_for_item(sid, reward_item_id, 1).is_none() {
+        return bifrost_send_fail(session, error_code).await;
+    }
+
+    // Remove exactly one piece from the client-selected source slot. Capture
+    // the authoritative remaining count so it can be sent after the exchange
+    // result; the result packet alone is not sufficient to keep v2615's
+    // inventory cache synchronized after repeated exchanges.
+    let mut consumed_slot: Option<(u32, u16)> = None;
+    let consumed = world.update_inventory(sid, |inv| {
+        if actual_slot >= inv.len()
+            || inv[actual_slot].item_id != piece_item_id
+            || inv[actual_slot].count == 0
+        {
+            return false;
+        }
+
+        inv[actual_slot].count -= 1;
+        let remaining = inv[actual_slot].count;
+        let durability = inv[actual_slot].durability.max(0) as u16;
+        if remaining == 0 {
+            inv[actual_slot] = Default::default();
+        }
+        consumed_slot = Some((remaining as u32, durability));
+        true
+    });
+    if !consumed {
+        return bifrost_send_fail(session, error_code).await;
+    }
+
+    // Resolve the actual reward slot after consuming the source item. This
+    // prevents reporting a stale slot when the consumed stack became empty.
     let reward_slot = match world.find_slot_for_item(sid, reward_item_id, 1) {
         Some(s) => s,
-        None => return bifrost_send_fail(session, error_code).await,
-    };
-
-    // Remove 1 piece from inventory
-    world.update_inventory(sid, |inv| {
-        if actual_slot < inv.len() && inv[actual_slot].item_id == piece_item_id {
-            if inv[actual_slot].count > 1 {
-                inv[actual_slot].count -= 1;
-            } else {
-                inv[actual_slot] = Default::default();
-            }
-            true
-        } else {
-            false
+        None => {
+            // The pre-check succeeded and session packets are processed
+            // serially, so this is defensive rollback for unexpected state.
+            let _ = world.give_item(sid, piece_item_id, 1);
+            return bifrost_send_fail(session, error_code).await;
         }
-    });
+    };
 
     // Give reward item
     if !world.give_item(sid, reward_item_id, 1) {
+        // Do not consume a piece when reward delivery unexpectedly fails.
+        let _ = world.give_item(sid, piece_item_id, 1);
         return bifrost_send_fail(session, 0).await;
     }
 
@@ -2041,6 +2538,22 @@ async fn bifrost_piece_exchange(
     result.write_u8(effect_type as u8);
     session.send_packet(&result).await?;
 
+    // Send the exact remaining source count after the exchange response. This
+    // is authoritative and corrects the client's local decrement/cache state.
+    if let Some((remaining, durability)) = consumed_slot {
+        let mut count_pkt = Packet::new(Opcode::WizItemCountChange as u8);
+        count_pkt.write_u16(1); // count_type
+        count_pkt.write_u8(1); // slot_section: inventory
+        count_pkt.write_u8(src_pos as u8);
+        count_pkt.write_u32(piece_item_id);
+        count_pkt.write_u32(remaining);
+        count_pkt.write_u8(0); // bNewItem = false (consumption)
+        count_pkt.write_u16(durability);
+        count_pkt.write_u32(0); // reserved
+        count_pkt.write_u32(0); // expiration
+        world.send_to_session_owned(sid, count_pkt);
+    }
+
     // Broadcast artifact effect to region (3×3 grid)
     let mut artifact_pkt = Packet::new(Opcode::WizObjectEvent as u8);
     artifact_pkt.write_u8(OBJECT_ARTIFACT);
@@ -2061,7 +2574,11 @@ async fn bifrost_piece_exchange(
     if reward_item_type == 4 || reward_item_id == 379_068_000 {
         let (char_name, personal_rank) = world
             .with_session(sid, |h| {
-                let name = h.character.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+                let name = h
+                    .character
+                    .as_ref()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
                 (name, h.personal_rank)
             })
             .unwrap_or_default();
@@ -2314,11 +2831,22 @@ async fn item_seal_bound(
     world: &std::sync::Arc<crate::world::WorldState>,
     sid: crate::zone::SessionId,
 ) -> anyhow::Result<()> {
-    let _unk1 = reader.read_u32().unwrap_or(0);
-    let item_id = reader.read_u32().unwrap_or(0);
-    let src_pos = reader.read_u8().unwrap_or(0);
-    let _unk3 = reader.read_u8().unwrap_or(0);
-    let _unk2 = reader.read_u32().unwrap_or(0);
+    // Live v2615 evidence (2026-08-12) proves the 12 bytes after ITEM_BOUND are:
+    // u32 unk0, u32 item_id, u8 inventory_pos, u8 unk1, u16 unk2.
+    // Example for DB slot 34 / item 278005111:
+    //   00 00 00 00 | 77 05 92 10 | 14 | 01 | 00 31
+    // The older C++ layout decoded this as item=91684864/slot=146.
+    let (unk0, item_id, src_pos, unk1, unk2) = read_item_bound_fields(reader);
+
+    tracing::info!(
+        sid,
+        unk0,
+        item_id,
+        src_pos,
+        unk1,
+        unk2,
+        "ITEM_BOUND request decoded"
+    );
 
     // C++ early return if item_id == 0
     if item_id == 0 {
@@ -2342,15 +2870,41 @@ async fn item_seal_bound(
         || inv_item.flag == ITEM_FLAG_RENTED
         || inv_item.serial_num == 0
     {
+        tracing::warn!(
+            sid,
+            item_id,
+            src_pos,
+            inventory_item_id = inv_item.item_id,
+            count = inv_item.count,
+            flag = inv_item.flag,
+            serial_num = inv_item.serial_num,
+            expire_time = inv_item.expire_time,
+            "ITEM_BOUND rejected by inventory validation"
+        );
         return send_seal_result(session, SEAL_BOUND, 2, item_id, src_pos).await;
     }
 
     // Item must not be countable
     let item_table = match world.get_item(item_id) {
         Some(t) => t,
-        None => return send_seal_result(session, SEAL_BOUND, 2, item_id, src_pos).await,
+        None => {
+            tracing::warn!(
+                sid,
+                item_id,
+                src_pos,
+                "ITEM_BOUND rejected: item table row missing"
+            );
+            return send_seal_result(session, SEAL_BOUND, 2, item_id, src_pos).await;
+        }
     };
     if item_table.countable.unwrap_or(0) != 0 {
+        tracing::warn!(
+            sid,
+            item_id,
+            src_pos,
+            countable = item_table.countable,
+            "ITEM_BOUND rejected: countable item"
+        );
         return send_seal_result(session, SEAL_BOUND, 2, item_id, src_pos).await;
     }
 
@@ -2372,6 +2926,16 @@ async fn item_seal_bound(
         sid, item_id, src_pos
     );
     send_seal_result(session, SEAL_BOUND, 1, item_id, src_pos).await
+}
+
+fn read_item_bound_fields(reader: &mut PacketReader<'_>) -> (u32, u32, u8, u8, u16) {
+    (
+        reader.read_u32().unwrap_or(0),
+        reader.read_u32().unwrap_or(0),
+        reader.read_u8().unwrap_or(0),
+        reader.read_u8().unwrap_or(0),
+        reader.read_u16().unwrap_or(0),
+    )
 }
 
 /// ITEM_UNBOUND — unbind an item (requires VIP password + binding scrolls).
@@ -2563,9 +3127,9 @@ async fn pet_hatching(
         )
         .await
     {
-        Ok(idx) if idx >= 10 => idx as u32,
+        Ok(idx) if idx > 0 => idx as u32,
         Ok(status) => {
-            // DB returned error code (<10)
+            // Non-positive index means pet creation failed.
             warn!("[sid={}] pet_hatching: DB returned status {}", sid, status);
             // Send DB error response (C++ sends nStatus as the first byte)
             let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
@@ -2919,6 +3483,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_v2615_item_bound_packet_layout() {
+        let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+        pkt.write_u32(0);
+        pkt.write_u32(278_005_111);
+        pkt.write_u8(20);
+        pkt.write_u8(1);
+        pkt.write_u16(0x3100);
+
+        assert_eq!(pkt.data.len(), 12);
+        let mut reader = PacketReader::new(&pkt.data);
+        let fields = read_item_bound_fields(&mut reader);
+        assert_eq!(fields, (0, 278_005_111, 20, 1, 0x3100));
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
     fn test_scroll_type_classification() {
         // Low class scrolls
         assert_eq!(get_scroll_type(379221000) as i8, ScrollType::LowClass as i8);
@@ -2951,6 +3531,10 @@ mod tests {
             ScrollType::HighToRebirth as i8
         );
         assert_eq!(get_scroll_type(379257000) as i8, ScrollType::Rebirth as i8);
+        assert_eq!(
+            get_scroll_type(810322000) as i8,
+            ScrollType::RebirthRestoration as i8
+        );
         assert_eq!(get_scroll_type(379152000) as i8, ScrollType::Class as i8);
 
         // Accessories scrolls
@@ -3143,6 +3727,7 @@ mod tests {
     fn test_special_part_sewing_opcode() {
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
+        assert_eq!(ITEM_ACCESSORY_DISASSEMBLE, 15);
     }
 
     #[test]
@@ -3449,8 +4034,10 @@ mod tests {
         assert_eq!(ITEM_UPGRADE, 2);
         assert_eq!(ITEM_ACCESSORIES, 3);
         assert_eq!(ITEM_UPGRADE_REBIRTH, 7);
+        assert_eq!(ITEM_UPGRADE_REVERSE, 14);
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
+        assert_eq!(ITEM_ACCESSORY_DISASSEMBLE, 15);
     }
 
     #[test]
@@ -3570,7 +4157,7 @@ mod tests {
 
     #[test]
     fn test_upgrade_result_packet_format() {
-        // Verify packet layout: [u8 upgradeType] [u8 bType] [u8 result] [optional logos] [items]
+        // Success layout: [u8 upgradeType] [u8 bType] [u8 result] [items]
         let upgrade_type: u8 = ITEM_UPGRADE;
         let b_type: u8 = UPGRADE_TYPE_PREVIEW;
         let result: u8 = UpgradeResult::Succeeded as u8;
@@ -3586,6 +4173,20 @@ mod tests {
 
         // Verify packet starts with the right opcode
         assert!(pkt.data.len() >= 3);
+    }
+
+    #[test]
+    fn test_upgrade_failure_packet_has_logos_before_result() {
+        let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
+        pkt.write_u8(ITEM_UPGRADE);
+        pkt.write_u8(0); // logos flag
+        pkt.write_u8(UPGRADE_TYPE_NORMAL);
+        pkt.write_u8(UpgradeResult::Failed as u8);
+
+        assert_eq!(pkt.data[0], ITEM_UPGRADE);
+        assert_eq!(pkt.data[1], 0);
+        assert_eq!(pkt.data[2], UPGRADE_TYPE_NORMAL);
+        assert_eq!(pkt.data[3], UpgradeResult::Failed as u8);
     }
 
     #[test]
@@ -4011,6 +4612,8 @@ mod tests {
         assert_eq!(PET_IMAGE_TRANSFORM, 10);
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
+        assert_eq!(ITEM_UPGRADE_REVERSE, 14);
+        assert_eq!(ITEM_ACCESSORY_DISASSEMBLE, 15);
     }
 
     /// Seal sub-opcodes are sequential 1-4.
@@ -4030,7 +4633,12 @@ mod tests {
         assert_eq!(ITEM_MIDDLE_CLASS_TRINA, 352900000);
         assert_eq!(ITEM_RING_TRINA, 354000000);
         // All distinct
-        let trinas = [ITEM_TRINA, ITEM_LOW_CLASS_TRINA, ITEM_MIDDLE_CLASS_TRINA, ITEM_RING_TRINA];
+        let trinas = [
+            ITEM_TRINA,
+            ITEM_LOW_CLASS_TRINA,
+            ITEM_MIDDLE_CLASS_TRINA,
+            ITEM_RING_TRINA,
+        ];
         for i in 0..trinas.len() {
             for j in (i + 1)..trinas.len() {
                 assert_ne!(trinas[i], trinas[j]);
@@ -4075,7 +4683,7 @@ mod tests {
         assert_eq!(UPGRADE_TYPE_PREVIEW - UPGRADE_TYPE_NORMAL, 1);
     }
 
-    /// ScrollType enum covers 7 named variants plus Invalid.
+    /// ScrollType enum covers the known upgrade scroll classes plus Invalid.
     #[test]
     fn test_scroll_type_coverage() {
         assert_eq!(ScrollType::Invalid as i8, -1);
@@ -4086,6 +4694,7 @@ mod tests {
         assert_eq!(ScrollType::Class as i8, 5);
         assert_eq!(ScrollType::Accessories as i8, 8);
         assert_eq!(ScrollType::HighToRebirth as i8, 15);
+        assert_eq!(ScrollType::RebirthRestoration as i8, 17);
     }
 
     /// NPC_ANVIL, ITEM_KARIVDIS, and ITEM_BLESSING_LOGOS are correct C++ values.
@@ -4121,8 +4730,12 @@ mod tests {
         assert_eq!(UpgradeResult::Rental as u8, 5);
         // 6 distinct result codes
         let results = [
-            UpgradeResult::Failed, UpgradeResult::Succeeded, UpgradeResult::Trading,
-            UpgradeResult::NeedCoins, UpgradeResult::NoMatch, UpgradeResult::Rental,
+            UpgradeResult::Failed,
+            UpgradeResult::Succeeded,
+            UpgradeResult::Trading,
+            UpgradeResult::NeedCoins,
+            UpgradeResult::NoMatch,
+            UpgradeResult::Rental,
         ];
         assert_eq!(results.len(), 6);
     }
@@ -4150,11 +4763,20 @@ mod tests {
         assert_eq!(PET_IMAGE_TRANSFORM, 10);
         assert_eq!(SPECIAL_PART_SEWING, 11);
         assert_eq!(ITEM_OLDMAN_EXCHANGE, 13);
+        assert_eq!(ITEM_ACCESSORY_DISASSEMBLE, 15);
         // All distinct
-        let subs = [ITEM_BIFROST_REQ, ITEM_BIFROST_EXCHANGE, PET_HATCHING, ITEM_SEAL,
-                     PET_IMAGE_TRANSFORM, SPECIAL_PART_SEWING, ITEM_OLDMAN_EXCHANGE];
+        let subs = [
+            ITEM_BIFROST_REQ,
+            ITEM_BIFROST_EXCHANGE,
+            PET_HATCHING,
+            ITEM_SEAL,
+            PET_IMAGE_TRANSFORM,
+            SPECIAL_PART_SEWING,
+            ITEM_OLDMAN_EXCHANGE,
+            ITEM_ACCESSORY_DISASSEMBLE,
+        ];
         for i in 0..subs.len() {
-            for j in (i+1)..subs.len() {
+            for j in (i + 1)..subs.len() {
                 assert_ne!(subs[i], subs[j]);
             }
         }

@@ -206,6 +206,7 @@ pub fn build_user_inout(
         position,
         None,
         None,
+        false,
         0,
         1,
         &BroadcastState::default(),
@@ -233,6 +234,7 @@ pub fn build_user_inout_with_invis(
         position,
         None,
         None,
+        false,
         invisibility_type,
         abnormal_type,
         &BroadcastState::default(),
@@ -249,6 +251,7 @@ pub fn build_user_inout_with_clan(
     position: &Position,
     clan: Option<&KnightsInfo>,
     alliance_cape: Option<(u16, u8, u8, u8)>,
+    is_king: bool,
     invisibility_type: u8,
     abnormal_type: u32,
     bs: &BroadcastState,
@@ -267,6 +270,7 @@ pub fn build_user_inout_with_clan(
                 position,
                 clan,
                 alliance_cape,
+                is_king,
                 invisibility_type,
                 abnormal_type,
                 bs,
@@ -343,6 +347,7 @@ pub fn write_user_info(
     pos: &Position,
     clan: Option<&KnightsInfo>,
     alliance_cape: Option<(u16, u8, u8, u8)>,
+    is_king: bool,
     invisibility_type: u8,
     abnormal_type: u32,
     bs: &BroadcastState,
@@ -378,7 +383,7 @@ pub fn write_user_info(
 
             // Cape data — C++ UserInfoSystem.cpp:286-352
             // King always gets nation cape (97 Karus, 98 Elmo) regardless of clan/alliance
-            if ch.rank == 1 {
+            if is_king {
                 let king_cape = if ch.nation == 1 { 97u16 } else { 98u16 };
                 pkt.write_u16(king_cape);
                 pkt.write_u32(0);
@@ -411,14 +416,10 @@ pub fn write_user_info(
                 pkt.write_u8(0);
             }
 
-            // Clan symbol flag
-            // (flag > 1 && grade < 3) ? 2 : 0
-            let symbol_flag = if ki.flag > 1 && ki.grade < 3 {
-                2u8
-            } else {
-                0u8
-            };
-            pkt.write_u8(symbol_flag);
+            // v2615 UserInfoSystem.cpp writes m_byFlag at this exact field.
+            // Recomputing it from clan grade sent 0 for promoted clans and
+            // made the client hide both the equipped cape and cape catalog.
+            pkt.write_u8(ki.flag);
         }
         None => {
             // No clan: write empty clan data
@@ -429,7 +430,7 @@ pub fn write_user_info(
             pkt.write_u8(0); // ranking
             pkt.write_u16(0); // mark_version
                               // King cape: C++ line 274-275 — isKing() writes nation-specific cape ID
-            let cape_id = if ch.rank == 1 {
+            let cape_id = if is_king {
                 if ch.nation == 1 {
                     97u16
                 } else {
@@ -539,12 +540,23 @@ pub async fn send_region_user_in_out_for_me(session: &mut ClientSession) -> anyh
         Some(sid),
         my_event_room,
     );
+    let nearby_bots: Vec<_> = world
+        .get_bots_in_zone_live(pos.zone_id)
+        .into_iter()
+        .filter(|bot| {
+            (bot.region_x as i32 - pos.region_x as i32).unsigned_abs() <= 1
+                && (bot.region_z as i32 - pos.region_z as i32).unsigned_abs() <= 1
+        })
+        .collect();
 
     let mut data = Packet::new(Opcode::WizRegionChange as u8);
     data.write_u8(1); // phase 1
-    data.write_u16(nearby.len() as u16);
+    data.write_u16((nearby.len() + nearby_bots.len()) as u16);
     for &other_id in &nearby {
         data.write_u32(other_id as u32);
+    }
+    for bot in &nearby_bots {
+        data.write_u32(bot.id);
     }
 
     // Send compressed (C++ uses SendCompressed)
@@ -699,6 +711,9 @@ pub async fn broadcast_user_in_with_type(
     let my_alliance_cape = my_clan
         .as_ref()
         .and_then(|ki| resolve_alliance_cape(ki, &world));
+    let my_is_king = my_char
+        .as_ref()
+        .is_some_and(|ch| world.is_king(ch.nation, &ch.name));
     let my_inout = build_user_inout_with_clan(
         inout_type,
         sid,
@@ -706,6 +721,7 @@ pub async fn broadcast_user_in_with_type(
         &pos,
         my_clan.as_ref(),
         my_alliance_cape,
+        my_is_king,
         my_invis,
         my_abnormal,
         &my_bs,
@@ -747,6 +763,10 @@ pub async fn broadcast_user_in_with_type(
         let other_alliance_cape = other_clan
             .as_ref()
             .and_then(|ki| resolve_alliance_cape(ki, &world));
+        let other_is_king = snap
+            .character
+            .as_ref()
+            .is_some_and(|ch| world.is_king(ch.nation, &ch.name));
         let other_inout = build_user_inout_with_clan(
             INOUT_IN,
             other_id,
@@ -754,6 +774,7 @@ pub async fn broadcast_user_in_with_type(
             &snap.position,
             other_clan.as_ref(),
             other_alliance_cape,
+            other_is_king,
             snap.invisibility_type,
             snap.abnormal_type,
             &snap.broadcast_state,

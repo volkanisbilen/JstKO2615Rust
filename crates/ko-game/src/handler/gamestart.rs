@@ -81,7 +81,123 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
         }
     };
 
-    let items = items_result?;
+    let mut items = items_result?;
+
+    // C++ requires every real inventory item to have a non-zero serial before
+    // ITEM_BOUND/ITEM_LOCK can succeed.  Legacy imports and the original
+    // CREATE_NEW_CHAR_SET insert path left serial_num=0, which made v2615 show
+    // "Item restoration failed" whenever one of those items was equipped.
+    // Repair both the login snapshot and PostgreSQL before MyInfo is built so
+    // existing characters and newly-created characters are fixed permanently.
+    let mut repaired_serials = 0usize;
+    for item in items
+        .iter_mut()
+        .filter(|item| item.item_id > 0 && item.serial_num <= 0)
+    {
+        let serial = session.world().generate_item_serial().max(1);
+        item.serial_num = serial as i64;
+        repaired_serials += 1;
+    }
+    if repaired_serials > 0 {
+        let repaired_items: Vec<_> = items
+            .iter()
+            .map(|item| ko_db::repositories::character::SaveItemParams {
+                char_id: &char_id,
+                slot_index: item.slot_index,
+                item_id: item.item_id,
+                durability: item.durability,
+                count: item.count,
+                flag: item.flag,
+                original_flag: item.original_flag,
+                serial_num: item.serial_num,
+                expire_time: item.expire_time,
+            })
+            .collect();
+        char_repo.save_items_batch(&repaired_items).await?;
+        tracing::info!(
+            "[sid={}] GAMESTART: repaired {} zero item serial(s) for {}",
+            session.session_id(),
+            repaired_serials,
+            char_id
+        );
+    }
+
+    // Restore the equipped pet from pet_user_data.
+    //
+    // Pet records are keyed by the pet item's serial number. Older/current
+    // inventory mappings may expose the pet equipment as DB slot 5 or as the
+    // absolute CFAIRY slot 48, so check both mappings. The item-ID fallback
+    // also covers an existing Kaul before the slot mapping is normalised.
+    let mut loaded_pet_state: Option<crate::world::PetState> = None;
+    let pet_repo = ko_db::repositories::pet::PetRepository::new(&pool);
+
+    let mut pet_serial_candidates: Vec<i64> = items
+        .iter()
+        .filter(|item| {
+            item.serial_num > 0
+                && (item.slot_index as usize == crate::world::CFAIRY_SLOT
+                    || item.slot_index == 5
+                    || item.item_id == 610_001_000)
+        })
+        .map(|item| item.serial_num)
+        .collect();
+
+    pet_serial_candidates.sort_unstable();
+    pet_serial_candidates.dedup();
+
+    for serial_id in pet_serial_candidates {
+        match pet_repo.load_pet_data(serial_id).await {
+            Ok(Some(row)) => {
+                loaded_pet_state = Some(crate::world::PetState {
+                    serial_id: row.n_serial_id.max(0) as u64,
+                    level: row.b_level.clamp(1, 60) as u8,
+                    satisfaction: row.s_satisfaction.clamp(0, 10_000),
+                    exp: row.n_exp.max(0) as u32,
+                    hp: row.s_hp.max(0) as u16,
+                    nid: 0,
+                    index: row.n_index.max(0) as u32,
+                    mp: row.s_mp.max(0) as u16,
+                    state_change: 4,
+                    name: row.s_pet_name,
+                    pid: row.s_pid.max(0) as u16,
+                    size: row.s_size.max(0) as u16,
+                    attack_started: false,
+                    attack_target_id: -1,
+                    ..Default::default()
+                });
+
+                tracing::info!(
+                    "[sid={}] GAMESTART: restored pet serial={} index={} pid={}",
+                    session.session_id(),
+                    row.n_serial_id,
+                    row.n_index,
+                    row.s_pid
+                );
+                break;
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "[sid={}] GAMESTART: no pet_user_data row for serial={}",
+                    session.session_id(),
+                    serial_id
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[sid={}] GAMESTART: failed loading pet serial={}: {}",
+                    session.session_id(),
+                    serial_id,
+                    e
+                );
+            }
+        }
+    }
+
+    session
+        .world()
+        .update_session(session.session_id(), |holder| {
+            holder.pet_data = loaded_pet_state;
+        });
 
     // Process achieve summary for cover/skill title IDs
     let (cover_title, skill_title) = {
@@ -207,9 +323,9 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
 
     pkt.write_u8(ch.nation as u8); // nation
     pkt.write_u8(ch.race as u8); // race
-    // IDA-verified order: class(i16) → hairColor(u8,+3000) → hairPacked(u32,+3004)
-    //                     → face(u8,+3016) → title2(u8,+1964) → title1(u8,+1960)
-    //                     → rank(u8,+3020) → level(u8,+1744) → points(i16,+3044)
+                                 // IDA-verified order: class(i16) → hairColor(u8,+3000) → hairPacked(u32,+3004)
+                                 //                     → face(u8,+3016) → title2(u8,+1964) → title1(u8,+1960)
+                                 //                     → rank(u8,+3020) → level(u8,+1744) → points(i16,+3044)
     pkt.write_i16(ch.class as i16); // class (sub_61EE80 = i16)
     let hair_color: u8 = ((ch.hair_rgb >> 24) & 0xFF) as u8; // top byte of packed hair
     pkt.write_u8(hair_color); // hairColor (+3000)
@@ -217,7 +333,12 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     pkt.write_u8(ch.face as u8); // face (+3016) — AFTER hair, not before
     pkt.write_u8(ch.title as u8); // title2 (+1964)
     pkt.write_u8(0); // title1 (+1960)
-    pkt.write_u8(ch.rank as u8); // rank (+3020) — AFTER titles
+                     // C++ SendMyInfo recalculates m_bRank from the KING_SYSTEM record immediately
+                     // before serialising MyInfo.  The persisted character `rank` is the ladder
+                     // rank and must not be used here (rank=1 made ordinary users look like kings,
+                     // hid the regular cloak catalogue and replaced their clan cape with 97/98).
+    let is_king = session.world().is_king(ch.nation as u8, &ch.str_user_id);
+    pkt.write_u8(u8::from(is_king)); // king rank (+3020) — AFTER titles
     pkt.write_u8(ch.level as u8); // level (+1744)
     pkt.write_i16(ch.points as i16); // points (+3044, sub_61EE80 = i16)
 
@@ -248,16 +369,37 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
                 pkt.write_u8(ki.ranking);
                 pkt.write_u16(ki.mark_version);
                 // Cape: sniffer shows u16 cape_id + u32(R,G,B,flag)
-                let cape_id = if ch.rank == 1 {
-                    if ch.nation == 1 { 97u16 } else { 98u16 }
+                let cape_id = if is_king {
+                    if ch.nation == 1 {
+                        97u16
+                    } else {
+                        98u16
+                    }
                 } else {
                     ki.cape
                 };
+                tracing::info!(
+                    character = %ch.str_user_id,
+                    clan_id,
+                    clan_flag = ki.flag,
+                    clan_grade = ki.grade,
+                    cape_id,
+                    cape_r = ki.cape_r,
+                    cape_g = ki.cape_g,
+                    cape_b = ki.cape_b,
+                    cape_symbol = u8::from(ki.flag > 1 && ki.grade < 3),
+                    "MyInfo cape state"
+                );
                 pkt.write_u16(cape_id);
                 pkt.write_u8(ki.cape_r);
                 pkt.write_u8(ki.cape_g);
                 pkt.write_u8(ki.cape_b);
-                pkt.write_u8(0); // flag
+                // This is a cape-symbol visibility bit, not the clan type.
+                // The v2615 client accepts only 0/1 here.  A promoted clan
+                // (flag=2) is therefore sent as 1 when its grade may show a
+                // cape; writing the raw flag (2) makes its cloak model and
+                // the mantle catalogue disappear.
+                pkt.write_u8(u8::from(ki.flag > 1 && ki.grade < 3));
             }
             None => {
                 // Clan exists but not loaded — send empty clan data
@@ -270,7 +412,7 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
         // No clan — sniffer verified: u64(0) + cape(0xFFFF) + u32(0)
         pkt.write_u64(0);
         pkt.write_u16(0xFFFF); // cape_id = -1 (no cape)
-        pkt.write_u32(0);      // cape RGB
+        pkt.write_u32(0); // cape RGB
     }
 
     // 8 unknown bytes (sniffer verified: always zeros)
@@ -425,12 +567,18 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     // Build the 90-slot list in client's expected order
     let mut myinfo_slots: Vec<Option<i16>> = Vec::with_capacity(90);
     // Phase 1: Equipment (0-13)
-    for s in 0..14i16 { myinfo_slots.push(Some(s)); }
+    for s in 0..14i16 {
+        myinfo_slots.push(Some(s));
+    }
     // Phase 2: Bag (14-41)
-    for s in 14..42i16 { myinfo_slots.push(Some(s)); }
+    for s in 14..42i16 {
+        myinfo_slots.push(Some(s));
+    }
     // Phase 3: 9 cospre items — sequential abs slots 42-50
     // Client stores wire items at cosprItems[0,1,2,3,4,5,7,8,9] (skips [6]=CBAG1).
-    for s in 42..51i16 { myinfo_slots.push(Some(s)); }
+    for s in 42..51i16 {
+        myinfo_slots.push(Some(s));
+    }
     // Phase 4: 3 special items → client SetSpecialSlot(i, item) (myinfo.cpp:1247-1252)
     // These fill the gaps NOT covered by Phase 3 (which skips position 6=CBAG1):
     //   specialItems[0] → CBAG1 (abs 51, cospre pos 6)
@@ -439,9 +587,11 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     myinfo_slots.push(Some(51)); // CBAG1
     myinfo_slots.push(Some(52)); // CBAG2
     myinfo_slots.push(Some(INVENTORY_TOTAL as i16)); // CBAG3 at dedicated slot
-    // Phase 5: Magic bags (53-88, 3 bags × 12 slots)
-    // CBAG3 is stored at dedicated slot 96, so slot 53 is free for magic bag 1 items.
-    for s in 53..89i16 { myinfo_slots.push(Some(s)); }
+                                                     // Phase 5: Magic bags (53-88, 3 bags × 12 slots)
+                                                     // CBAG3 is stored at dedicated slot 96, so slot 53 is free for magic bag 1 items.
+    for s in 53..89i16 {
+        myinfo_slots.push(Some(s));
+    }
 
     for slot_opt in &myinfo_slots {
         let item = slot_opt.and_then(|s| items.iter().find(|i| i.slot_index == s));
@@ -507,10 +657,14 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     }
     // Sniffer-verified: activePremiumType u8 between premium entries and collRaceEnabled
     pkt.write_u8(premium_in_use); // activePremiumType (+1844)
-    // IDA-verified trailer order (lines 707205-707418):
+                                  // IDA-verified trailer order (lines 707205-707418):
     pkt.write_u8(0); // collRaceEnabled (forced to 0)
     pkt.write_u32(return_symbol_ok); // coverTitle_u32 (+3236)
-    pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); // skillSave x5
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0); // skillSave x5
     pkt.write_u8(0); // petType
     pkt.write_i16(genie_time as i16); // petHP/genieTime
     pkt.write_u8(ch.rebirth_level as u8);
@@ -533,14 +687,22 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
 
     // DEBUG: dump full uncompressed MyInfo to file for analysis
     {
-        let dump_path = "captures/myinfo_ours.bin";
+        let dump_dir = std::path::Path::new("captures");
+        let dump_path = dump_dir.join("myinfo_ours.bin");
         let mut full = Vec::with_capacity(1 + pkt.data.len());
         full.push(pkt.opcode);
         full.extend_from_slice(&pkt.data);
-        if let Err(e) = std::fs::write(dump_path, &full) {
+        if let Err(e) =
+            std::fs::create_dir_all(dump_dir).and_then(|_| std::fs::write(&dump_path, &full))
+        {
             tracing::warn!("Failed to write MyInfo dump: {}", e);
         } else {
-            tracing::info!("[{}] MyInfo dumped to {} ({} bytes)", session.addr(), dump_path, full.len());
+            tracing::info!(
+                "[{}] MyInfo dumped to {} ({} bytes)",
+                session.addr(),
+                dump_path.display(),
+                full.len()
+            );
         }
     }
 
@@ -647,7 +809,9 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
         }
         soul_pkt.write_u32(5);
         soul_pkt.write_u8(0);
-        for i in 1u32..=4 { soul_pkt.write_u32(i); }
+        for i in 1u32..=4 {
+            soul_pkt.write_u32(i);
+        }
         session.send_packet(&soul_pkt).await?;
     }
 
@@ -666,9 +830,21 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
         let npc_ids = world.get_nearby_npc_ids(zone_id, rx, rz, event_room);
         let mut npc_pkt = Packet::new(Opcode::WizNpcRegion as u8);
         npc_pkt.write_u16(npc_ids.len() as u16);
-        for &nid in &npc_ids { npc_pkt.write_u32(nid); }
-        let to_send_npc = match npc_pkt.to_compressed() { Some(c) => c, None => npc_pkt };
+        for &nid in &npc_ids {
+            npc_pkt.write_u32(nid);
+        }
+        let to_send_npc = match npc_pkt.to_compressed() {
+            Some(c) => c,
+            None => npc_pkt,
+        };
         session.send_packet(&to_send_npc).await?;
+
+        // The client normally follows the region list with asynchronous
+        // REQ_NPCIN requests.  In dense Moradon regions that queue can delay
+        // newly-created static NPCs noticeably.  Send their full INOUT data in
+        // the same entry sequence as well, so merchant/quest NPCs are visible
+        // immediately instead of waiting for the client request batches.
+        super::region::send_nearby_npc_inouts(session).await?;
     }
 
     // seq 32: WIZ_NOTICE (0x2E, 3 bytes) — sniffer: 2e0100
@@ -680,14 +856,19 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
     }
 
     // seq 33: WIZ_TIME (0x13, 11 bytes)
-    session.send_packet(&crate::systems::time_weather::build_time_packet()).await?;
+    session
+        .send_packet(&crate::systems::time_weather::build_time_packet())
+        .await?;
 
     // seq 34: WIZ_WEATHER (0x14, 4 bytes)
     {
         let tw = session.world().game_time_weather();
-        session.send_packet(&crate::systems::time_weather::build_weather_packet(
-            tw.get_weather_type(), tw.get_weather_amount(),
-        )).await?;
+        session
+            .send_packet(&crate::systems::time_weather::build_weather_packet(
+                tw.get_weather_type(),
+                tw.get_weather_amount(),
+            ))
+            .await?;
     }
 
     // seq 35: Empty GAMESTART
@@ -929,6 +1110,50 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
 
     world.register_ingame(session.session_id(), char_info, position);
 
+    // Phase 1 needs Genie time to build WIZ_MYINFO, but the session is not
+    // registered in WorldState until this point. Its earlier update_session()
+    // therefore cannot persist the loaded state. Load it into the now-live
+    // SessionHandle so Start/Save/Disconnect all see the real DB values.
+    {
+        let ud_repo = ko_db::repositories::user_data::UserDataRepository::new(&pool);
+        match ud_repo.load_genie_data(&char_id).await {
+            Ok(Some(genie)) => {
+                let abs_ts = genie.genie_time.max(0) as u32;
+                let options_len = genie.genie_options.len();
+                world.update_session(session.session_id(), |h| {
+                    h.genie_time_abs = abs_ts;
+                    h.genie_options = genie.genie_options;
+                    h.genie_loaded = true;
+                });
+                tracing::info!(
+                    "[{}] Phase2 Genie state applied: char={}, abs={}, options={} bytes",
+                    session.addr(),
+                    char_id,
+                    abs_ts,
+                    options_len
+                );
+            }
+            Ok(None) => {
+                world.update_session(session.session_id(), |h| h.genie_loaded = true);
+                tracing::info!(
+                    "[{}] Phase2 Genie state initialized: char={}, no saved row",
+                    session.addr(),
+                    char_id
+                );
+            }
+            Err(e) => {
+                // Keep genie_loaded=false so a transient load failure can never
+                // overwrite a valid database row with zero on periodic save.
+                tracing::warn!(
+                    "[{}] Phase2 Genie load failed: char={}, err={}",
+                    session.addr(),
+                    char_id,
+                    e
+                );
+            }
+        }
+    }
+
     // 3-seal. Load sealed_exp from DB and apply to character.
     {
         let seal_repo = ko_db::repositories::user_data::UserDataRepository::new(&pool);
@@ -972,6 +1197,17 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
             };
         }
     }
+    let removed_manes_items = world
+        .manes_survival_manager
+        .remove_temporary_items(&mut inventory);
+    if removed_manes_items > 0 {
+        tracing::warn!(
+            "[{}] Removed {} persisted Manes-only item slot(s) before normal inventory init for {}",
+            session.addr(),
+            removed_manes_items,
+            char_id
+        );
+    }
     world.set_inventory(session.session_id(), inventory);
 
     // 3b1. Remove expired items from inventory/warehouse/VIP warehouse on login.
@@ -986,7 +1222,6 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
     // 3b2. DEFERRED — set_user_ability + send_item_move_refresh moved to END of Phase 2.
     // SNIFFER EVIDENCE: Original server sends WIZ_ITEM_MOVE (seq 43) AFTER knights/friends/quest
     // (seq 36-42), NOT at the beginning. Sending it too early clears bag items from MyInfo.
-
 
     // 3b3. Detect fairy (CFAIRY=48) and robin loot (SHOULDER=5) on login.
     {
@@ -1079,6 +1314,12 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
     tracing::info!("[{}] Phase2 step6: broadcast_user_in", session.addr());
     region::broadcast_user_in(session).await?;
 
+    // Do not send KNIGHTS_UPDATE to the player during login.  The reference
+    // server establishes the local clan/cape state solely through WIZ_MYINFO;
+    // KNIGHTS_UPDATE is emitted only when a clan state actually changes.
+    // Sending the update immediately after USER_INOUT re-parses the local clan
+    // record in the v2615 client and can replace the MyInfo cloak catalogue.
+
     // 7b. If the player is dead on login, broadcast death animation so the
     //     client shows the revive UI
     if hp <= 0 {
@@ -1124,7 +1365,12 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
         .map(|s| s.auto_quest_skill != 0)
         .unwrap_or(false);
     if auto_quest_skill {
-        open_etc_skill(&world, session.session_id(), ch.class as u16, ch.level as u8);
+        open_etc_skill(
+            &world,
+            session.session_id(),
+            ch.class as u16,
+            ch.level as u8,
+        );
     }
 
     // 7d. Send completed achievement notifications (sniffer seq 38-39, before quest data)
@@ -1133,7 +1379,6 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
     // 8. Load quest data from DB and send to client
     tracing::info!("[{}] Phase2 step8: quest data load+send", session.addr());
     quest::load_quest_data(session).await?;
-    quest::send_quest_data(session).await?;
 
     // 8b. Load daily quest progress from DB and send to client
     {
@@ -1158,27 +1403,19 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
             }
         }
 
-        // Fill missing quests with default Ongoing state
-        let all_defs = world.get_all_daily_quests();
-        for def in &all_defs {
-            dq_map
-                .entry(def.id)
-                .or_insert_with(|| ko_db::models::daily_quest::UserDailyQuestRow {
-                    character_id: char_id.clone(),
-                    quest_id: def.id,
-                    kill_count: 0,
-                    status: ko_db::models::daily_quest::DailyQuestStatus::Ongoing as i16,
-                    replay_time: 0,
-                });
-        }
-
         world.update_session(sid, |h| {
             h.daily_quests = dq_map;
         });
-
-        // Send quest definitions + user progress to client
-        super::daily_quest::daily_quest_send_list(&world, sid);
     }
+
+    // Quest Tips reads the normal per-user quest map. Mirror selected daily
+    // quests into it before sending the combined quest list.
+    super::daily_quest::sync_daily_quests_into_normal_map(&world, session.session_id());
+
+    // Send one combined Quest Tips list only after both normal and selected
+    // daily quests are loaded. The daily protocol itself follows immediately.
+    quest::send_quest_data(session).await?;
+    super::daily_quest::daily_quest_send_list(&world, session.session_id());
 
     // 9. Load saved magic (buff persistence) and recast
     tracing::info!("[{}] Phase2 step9: saved magic + blink", session.addr());
@@ -1275,6 +1512,12 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
                 );
             }
         }
+        let initialized = super::achieve::initialize_achievement_map(&world, sid);
+        if initialized > 0 {
+            tracing::info!(sid, character = %char_id, initialized,
+                total = world.all_achieve_main().len(),
+                "Achievement map synchronized with v2615 definitions");
+        }
         match achieve_repo.load_user_achieve_summary(&char_id).await {
             Ok(Some(summary)) => {
                 world.update_session(sid, |h| {
@@ -1290,11 +1533,6 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
                     ];
                     h.achieve_summary.cover_id = summary.cover_id as u16;
                     h.achieve_summary.skill_id = summary.skill_id as u16;
-                    // Set login time for play_time tracking
-                    h.achieve_login_time = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as u32;
                 });
 
                 // 14c. Restore skill title stat bonuses from DB
@@ -1387,6 +1625,7 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
         if level >= 1 {
             achieve_normal_reach_level(&world, sid, level, zone_id);
         }
+        super::achieve::evaluate_achievement_dependencies(&world, sid);
     }
 
     // 16. KnightsClanBuffUpdate(true) — increment online member count, broadcast bonus
@@ -1845,7 +2084,10 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
     }
 
     // SetUserAbility + SendItemMove at END of Phase 2 (sniffer: seq 43)
-    tracing::info!("[{}] Phase2 FINAL: set_user_ability + item_move_refresh", session.addr());
+    tracing::info!(
+        "[{}] Phase2 FINAL: set_user_ability + item_move_refresh",
+        session.addr()
+    );
     world.set_user_ability(session.session_id());
     world.send_item_move_refresh(session.session_id());
 
@@ -2167,7 +2409,10 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
     pkt.write_u8(ch.face); // face (+3016) — AFTER hair, not before
     pkt.write_u8(ch.title); // title2 (+1964)
     pkt.write_u8(0); // title1 (+1960)
-    pkt.write_u8(ch.rank); // rank (+3020) — AFTER titles
+                     // SendMyInfo.cpp resets m_bRank from KING_SYSTEM on every MyInfo build.
+                     // `CharacterInfo::rank` is a ladder value and is not a king flag.
+    let is_king = world.is_king(ch.nation, &ch.name);
+    pkt.write_u8(u8::from(is_king)); // king rank (+3020) — AFTER titles
     pkt.write_u8(ch.level); // level (+1744)
     pkt.write_i16(ch.free_points as i16); // points (+3044, sub_61EE80 = i16)
 
@@ -2186,13 +2431,20 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
         match world.get_knights(clan_id as u16) {
             Some(ki) => {
                 pkt.write_u16(ki.alliance);
+                // This is the clan type/flag. Writing zero here makes the
+                // v2615 cloak palette treat a promoted clan as Training and
+                // filter every purchasable cape out of Cloak.tbl.
                 pkt.write_u8(ki.flag);
                 pkt.write_sbyte_string(&ki.name);
                 pkt.write_u8(ki.grade);
                 pkt.write_u8(ki.ranking);
                 pkt.write_u16(ki.mark_version);
-                let cape_id = if ch.rank == 1 {
-                    if ch.nation == 1 { 97u16 } else { 98u16 }
+                let cape_id = if is_king {
+                    if ch.nation == 1 {
+                        97u16
+                    } else {
+                        98u16
+                    }
                 } else {
                     ki.cape
                 };
@@ -2200,7 +2452,10 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
                 pkt.write_u8(ki.cape_r);
                 pkt.write_u8(ki.cape_g);
                 pkt.write_u8(ki.cape_b);
-                pkt.write_u8(0);
+                // MyInfo's trailing byte is the 0/1 cape-symbol visibility
+                // bit. It is deliberately different from USER_INOUT's clan
+                // type field: the v2615 cloak UI rejects raw clan flag 2.
+                pkt.write_u8(u8::from(ki.flag > 1 && ki.grade < 3));
             }
             None => {
                 pkt.write_u64(0);
@@ -2269,21 +2524,38 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
         let mut s = [None; 90];
         let mut idx = 0;
         // Phase 1: Equipment (0-13)
-        for i in 0..14 { s[idx] = Some(i); idx += 1; }
+        for i in 0..14 {
+            s[idx] = Some(i);
+            idx += 1;
+        }
         // Phase 2: Bag (14-41)
-        for i in 14..42 { s[idx] = Some(i); idx += 1; }
+        for i in 14..42 {
+            s[idx] = Some(i);
+            idx += 1;
+        }
         // Phase 3: Cospre (positions 0,1,2,3,4,5,7,8,9 → skip pos 6=slot 48)
-        for &pos in &[0, 1, 2, 3, 4, 5, 7, 8, 9] { s[idx] = Some(42 + pos); idx += 1; }
+        for &pos in &[0, 1, 2, 3, 4, 5, 7, 8, 9] {
+            s[idx] = Some(42 + pos);
+            idx += 1;
+        }
         // Phase 4: 3 special — CBAG1(51), CBAG2(52), CBAG3(slot 96)
-        s[idx] = Some(51); idx += 1;
-        s[idx] = Some(52); idx += 1;
-        s[idx] = Some(INVENTORY_TOTAL); idx += 1; // CBAG3 dedicated slot (96)
-        // Phase 5: Magic bags (53-88)
-        for i in 53..89 { s[idx] = Some(i); idx += 1; }
+        s[idx] = Some(51);
+        idx += 1;
+        s[idx] = Some(52);
+        idx += 1;
+        s[idx] = Some(INVENTORY_TOTAL);
+        idx += 1; // CBAG3 dedicated slot (96)
+                  // Phase 5: Magic bags (53-88)
+        for i in 53..89 {
+            s[idx] = Some(i);
+            idx += 1;
+        }
         s
     };
     for slot_opt in &myinfo_slots {
-        let item = slot_opt.and_then(|s| inv.get(s)).filter(|it| it.item_id != 0);
+        let item = slot_opt
+            .and_then(|s| inv.get(s))
+            .filter(|it| it.item_id != 0);
         match item {
             Some(it) => {
                 pkt.write_u32(it.item_id);
@@ -2331,8 +2603,13 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
     }
     // Sniffer-verified: 4 extra empty items after Phase 5 (always present)
     for _ in 0..4u8 {
-        pkt.write_u32(0); pkt.write_i16(0); pkt.write_u16(0);
-        pkt.write_u8(0); pkt.write_u16(0); pkt.write_u32(0); pkt.write_u32(0);
+        pkt.write_u32(0);
+        pkt.write_i16(0);
+        pkt.write_u16(0);
+        pkt.write_u8(0);
+        pkt.write_u16(0);
+        pkt.write_u32(0);
+        pkt.write_u32(0);
     }
 
     // accountStatus
@@ -2345,13 +2622,17 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
         pkt.write_u16(time_hours);
     }
     pkt.write_u8(premium_in_use); // activePremiumType — sniffer verified
-    // IDA-verified trailer order (lines 707205-707418):
+                                  // IDA-verified trailer order (lines 707205-707418):
     let genie_remaining = genie_abs.saturating_sub(now_ts);
     let genie_hours = crate::handler::genie::get_genie_hours_pub(genie_remaining);
 
     pkt.write_u8(0); // collRaceEnabled (forced to 0)
     pkt.write_u32(return_sym); // coverTitle_u32 (+3236)
-    pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); pkt.write_u8(0); // skillSave x5
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0);
+    pkt.write_u8(0); // skillSave x5
     pkt.write_u8(0); // petType
     pkt.write_i16(genie_hours as i16); // petHP/genieTime
     pkt.write_u8(ch.rebirth_level); // rebirthLevel
@@ -3985,7 +4266,11 @@ mod tests {
     fn test_robin_items_valid() {
         const ROBIN_ITEMS: [u32; 4] = [950680000, 850680000, 510000000, 520000000];
         for &id in &ROBIN_ITEMS {
-            assert!(id >= 500_000_000 && id <= 960_000_000, "robin item {} out of range", id);
+            assert!(
+                id >= 500_000_000 && id <= 960_000_000,
+                "robin item {} out of range",
+                id
+            );
         }
         for i in 0..ROBIN_ITEMS.len() {
             for j in (i + 1)..ROBIN_ITEMS.len() {
@@ -4054,7 +4339,12 @@ mod tests {
     /// is_pk_ranking_zone covers exactly 4 zones.
     #[test]
     fn test_pk_ranking_zone_count() {
-        let pk_zones = [ZONE_ARDREAM, ZONE_RONARK_LAND, ZONE_RONARK_LAND_BASE, ZONE_BIFROST];
+        let pk_zones = [
+            ZONE_ARDREAM,
+            ZONE_RONARK_LAND,
+            ZONE_RONARK_LAND_BASE,
+            ZONE_BIFROST,
+        ];
         for &z in &pk_zones {
             assert!(is_pk_ranking_zone(z));
         }
@@ -4163,7 +4453,11 @@ mod tests {
     fn test_total_temple_event_zone_count() {
         let zones: [u16; 11] = [55, 76, 81, 82, 83, 84, 85, 86, 87, 89, 95];
         for &z in &zones {
-            assert!(is_in_total_temple_event_zone(z), "zone {} should be temple", z);
+            assert!(
+                is_in_total_temple_event_zone(z),
+                "zone {} should be temple",
+                z
+            );
         }
         // Verify none of the gaps are included
         assert!(!is_in_total_temple_event_zone(56));
@@ -4174,7 +4468,13 @@ mod tests {
     /// War zone kickout covers exactly 5 zones.
     #[test]
     fn test_war_zone_kickout_count_5() {
-        let kickout_zones = [ZONE_ARDREAM, ZONE_RONARK_LAND_BASE, ZONE_RONARK_LAND, ZONE_BIFROST, ZONE_KROWAZ_DOMINION];
+        let kickout_zones = [
+            ZONE_ARDREAM,
+            ZONE_RONARK_LAND_BASE,
+            ZONE_RONARK_LAND,
+            ZONE_BIFROST,
+            ZONE_KROWAZ_DOMINION,
+        ];
         for &z in &kickout_zones {
             assert!(is_war_zone_kickout(z), "zone {} should be war-kickout", z);
         }
@@ -4198,7 +4498,7 @@ mod tests {
     /// NATION_KARUS=1 and NATION_ELMORAD=2 match ishome relocation checks.
     #[test]
     fn test_nation_constants_for_ishome() {
-        use crate::world::types::{NATION_KARUS, NATION_ELMORAD};
+        use crate::world::types::{NATION_ELMORAD, NATION_KARUS};
         assert_eq!(NATION_KARUS, 1);
         assert_eq!(NATION_ELMORAD, 2);
         // Karus player in Elmorad zone → check uses nation==1
