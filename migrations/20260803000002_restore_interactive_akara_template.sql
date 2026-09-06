@@ -1,4 +1,4 @@
-﻿-- Restore the v2615 interactive Goddess Akara Statue in Moradon.
+-- Restore the v2615 interactive Goddess Akara Statue in Moradon.
 --
 -- The reconstructed 31774/type174 row has picture 30001, but type 174 does
 -- not generate WIZ_CLIENT_EVENT/WIZ_NPC_EVENT when this client right-clicks
