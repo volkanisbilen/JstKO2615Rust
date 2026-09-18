@@ -1827,6 +1827,23 @@ impl WorldState {
         }
         tracing::info!(count = helper_rows.len(), "quest_helper table loaded");
 
+        // Read collection requirements, never exchange rewards. Zone 19 is
+        // the shared Eslant quest catalogue (Beldan/Agata), not a live map.
+        let collection_items: Vec<i32> = sqlx::query_scalar(
+            "SELECT DISTINCT x.item FROM quest_helper q \
+             JOIN item_exchange e ON e.n_index=q.n_exchange_index \
+             CROSS JOIN LATERAL (VALUES \
+             (e.origin_item_num1,e.origin_item_count1), \
+             (e.origin_item_num2,e.origin_item_count2), \
+             (e.origin_item_num3,e.origin_item_count3), \
+             (e.origin_item_num4,e.origin_item_count4), \
+             (e.origin_item_num5,e.origin_item_count5)) x(item,qty) \
+             WHERE q.b_zone IN (1,11,12,19) AND x.item>=100000000 AND x.qty>0"
+        ).fetch_all(pool).await?;
+        self.collection_drop_items.clear();
+        for item in collection_items { self.collection_drop_items.insert(item as u32, ()); }
+        tracing::info!(count = self.collection_drop_items.len(), "Collection drop policy loaded: Luferson/Eslant x1.60; other monster items x1.15");
+
         let monster_rows = quest_repo.load_quest_monsters().await?;
         for row in &monster_rows {
             self.quest_monsters

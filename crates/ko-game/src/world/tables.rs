@@ -1001,6 +1001,10 @@ impl WorldState {
     pub fn get_quest_helper(&self, n_index: u32) -> Option<QuestHelperRow> {
         self.quest_helpers.get(&n_index).map(|r| r.clone())
     }
+
+    pub fn is_boosted_collection_drop(&self, zone: u16, item: u32) -> bool {
+        matches!(zone, 1 | 11 | 12) && self.collection_drop_items.contains_key(&item)
+    }
     /// Look up a quest monster definition by quest num (sEventDataIndex).
     ///
     pub fn get_quest_monster(&self, quest_num: u16) -> Option<QuestMonsterRow> {

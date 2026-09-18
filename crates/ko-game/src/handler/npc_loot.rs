@@ -31,6 +31,19 @@ use crate::zone::SessionId;
 /// Max items in a loot drop table (C++ LOOT_DROP_ITEMS = 12).
 const LOOT_DROP_ITEMS: usize = 12;
 
+fn boosted_drop_chance(base: i32, monster: bool, collection: bool) -> i32 {
+    let multiplier = if !monster { 100 } else if collection { 160 } else { 115 };
+    ((base.max(0) * multiplier + 50) / 100).min(10_000)
+}
+
+fn resolve_drop_item(world: &WorldState, code: i32, level: i32, nation: u8, rng: &mut impl Rng) -> u32 {
+    if code >= 100_000_000 { code as u32 }
+    else if code < 100 { super::item_production::item_production(world, code, level, nation) }
+    else if let Some(group) = world.get_make_item_group(code) {
+        if group.items.is_empty() { 0 } else { group.items[rng.gen_range(0..group.items.len())] as u32 }
+    } else { 0 }
+}
+
 /// Arrow stack count for arrow drops.
 const _ARROW_STACK: u16 = 20;
 
@@ -231,7 +244,12 @@ pub fn simulate_npc_drops(
             if item_code == 0 || percent <= 0 {
                 continue;
             }
-            let mut chance = percent as i32;
+            // Resolve first so a quest item in a mixed group gets its own
+            // multiplier without boosting every other member of that group.
+            let resolved = resolve_drop_item(world, item_code, tmpl.level as i32, nation, &mut rng);
+            if resolved == 0 { continue; }
+            let mut chance = boosted_drop_chance(percent as i32, tmpl.is_monster,
+                world.is_boosted_collection_drop(npc.zone_id, resolved));
             if premium > 0 {
                 chance += chance * premium / 100;
             }
@@ -255,22 +273,6 @@ pub fn simulate_npc_drops(
                 continue;
             }
 
-            let resolved = if item_code >= 100_000_000 {
-                item_code as u32
-            } else if item_code < 100 {
-                super::item_production::item_production(world, item_code, tmpl.level as i32, nation)
-            } else if let Some(group) = world.get_make_item_group(item_code) {
-                if group.items.is_empty() {
-                    0
-                } else {
-                    group.items[rng.gen_range(0..group.items.len())] as u32
-                }
-            } else {
-                0
-            };
-            if resolved == 0 {
-                continue;
-            }
             let amount = if (391_010_000..=392_010_000).contains(&resolved) {
                 20
             } else {
@@ -364,6 +366,7 @@ pub fn generate_npc_loot(
     // Keep these drops scoped to that room; the same monster prototypes can
     // be used elsewhere and must not inherit quest-certificate drops.
     if let Some((item_id, chance_per_10k)) = monster_stone_family_71_drop(world, npc) {
+        let chance_per_10k = boosted_drop_chance(chance_per_10k, true, false);
         if chance_per_10k == 10_000 || rng.gen_range(0..10_000) < chance_per_10k {
             items[item_count as usize] = LootItem {
                 item_id,
@@ -406,7 +409,10 @@ pub fn generate_npc_loot(
             //   3) clan premium (additive)
             //   4) flame level bonus (additive)
             //   5) drop event (multiplicative)
-            let mut adjusted_percent = percent as i32;
+            let resolved_id = resolve_drop_item(world, item_id, tmpl.level as i32, killer_nation, &mut rng);
+            if resolved_id == 0 { continue; }
+            let mut adjusted_percent = boosted_drop_chance(percent as i32, tmpl.is_monster,
+                world.is_boosted_collection_drop(npc.zone_id, resolved_id));
 
             // 1) Premium drop (additive): iPer += iPer * pers1 / 100
             let prem_drop = world.get_premium_property(killer_sid, PremiumProperty::DropPercent);
@@ -469,43 +475,7 @@ pub fn generate_npc_loot(
                 continue;
             }
 
-            let (resolved_id, count) = if item_id >= 100_000_000 {
-                // Direct item ID
-                (item_id as u32, 1u16)
-            } else if item_id < 100 {
-                // Grade code -- resolve via item_production
-                let produced = super::item_production::item_production(
-                    world,
-                    item_id,
-                    tmpl.level as i32,
-                    killer_nation,
-                );
-                if produced == 0 {
-                    continue;
-                }
-                (produced, 1u16)
-            } else {
-                // MakeItemGroup (100 <= id < 100_000_000)
-                if let Some(group) = world.get_make_item_group(item_id) {
-                    if group.items.is_empty() {
-                        continue;
-                    }
-                    // C++ myrand(1, size) - 1 → uniform [0, size-1]
-                    let idx = rng.gen_range(0..group.items.len());
-                    let resolved = group.items[idx];
-                    if resolved == 0 {
-                        continue;
-                    }
-                    (resolved as u32, 1u16)
-                } else {
-                    tracing::trace!(
-                        "MakeItemGroup: group {} not found for NPC {}",
-                        item_id,
-                        npc.proto_id
-                    );
-                    continue;
-                }
-            };
+            let count = 1u16;
 
             items[item_count as usize] = LootItem {
                 item_id: resolved_id,
@@ -618,6 +588,7 @@ fn generate_manes_survival_loot(
         _ => return None,
     };
 
+    let chance_per_10k = boosted_drop_chance(chance_per_10k, true, false);
     if chance_per_10k == 0 || rand::thread_rng().gen_range(0..10_000) >= chance_per_10k {
         return None;
     }
@@ -1054,6 +1025,16 @@ fn try_auto_loot(world: &WorldState, killer_sid: SessionId, bundle_id: u32, npc:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_drop_boosts_are_relative_and_not_stacked() {
+        assert_eq!(boosted_drop_chance(2000, true, false), 2300);
+        assert_eq!(boosted_drop_chance(2000, true, true), 3200);
+        assert_eq!(boosted_drop_chance(8000, true, true), 10000);
+        assert_eq!(boosted_drop_chance(10000, true, false), 10000);
+        assert_eq!(boosted_drop_chance(0, true, true), 0);
+        assert_eq!(boosted_drop_chance(2000, false, false), 2000);
+    }
 
     #[test]
     fn test_captain_fargo_family_71_drop_contract() {

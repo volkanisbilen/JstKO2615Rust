@@ -183,6 +183,7 @@ pub struct WorldState {
     /// Quest helper definitions keyed by nIndex.
     ///
     quest_helpers: DashMap<u32, QuestHelperRow>,
+    collection_drop_items: DashMap<u32, ()>,
     /// Quest monster kill requirements keyed by sQuestNum (sEventDataIndex).
     ///
     quest_monsters: DashMap<u16, QuestMonsterRow>,
@@ -963,6 +964,7 @@ impl WorldState {
             next_bundle_id: AtomicU32::new(1),
             next_item_serial: std::sync::atomic::AtomicU64::new(initial_item_serial()),
             quest_helpers: DashMap::new(),
+            collection_drop_items: DashMap::new(),
             quest_monsters: DashMap::new(),
             quest_npc_list: DashMap::new(),
             quest_menus: DashMap::new(),
@@ -1202,6 +1204,7 @@ impl WorldState {
             next_bundle_id: AtomicU32::new(1),
             next_item_serial: std::sync::atomic::AtomicU64::new(initial_item_serial()),
             quest_helpers: DashMap::new(),
+            collection_drop_items: DashMap::new(),
             quest_monsters: DashMap::new(),
             quest_npc_list: DashMap::new(),
             quest_menus: DashMap::new(),

@@ -97,16 +97,30 @@ const GENIE_ACTIVATED: u8 = 7;
 /// Status: genie active.
 const GENIE_STATUS_ACTIVE: u8 = 1;
 
-/// Default Genie options blob length used when no saved settings exist.
-///
-/// The v2615 client uses a variable-length payload: the current runtime log
-/// contains both 48-byte and 64-byte WIZ_GENIE packets (2 command bytes plus
-/// 46/62 option bytes).  Do not truncate the 62-byte form to the older 46-byte
-/// layout.
-const GENIE_OPTIONS_DEFAULT_SIZE: usize = 62;
-/// Native C++ storage is `char m_GenieOptions[100]`; cap malformed packets at
-/// that proven upper bound while preserving every byte sent by v2615.
-const GENIE_OPTIONS_MAX_SIZE: usize = 100;
+/// No skills: two u16 fields and 42 option bytes (v2615 B19360/B1A4B0).
+const GENIE_OPTIONS_DEFAULT_SIZE: usize = 46;
+/// Full v2615 layout with all 32 skill slots populated.
+const GENIE_OPTIONS_MAX_SIZE: usize = 174;
+
+// v2615 B19360 writes, B1A4B0 reads: u16 count, count*u32 skills,
+// u16(42), 42 option bytes. Never truncate this variable-size structure.
+fn valid_options(data: &[u8]) -> bool {
+    if data.len() < 4 || data.len() > GENIE_OPTIONS_MAX_SIZE { return false; }
+    let count = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let offset = 2 + count * 4;
+    count <= 32 && data.len() == offset + 44
+        && data[offset..offset + 2] == [42, 0]
+}
+
+fn default_options() -> Vec<u8> {
+    let mut options = vec![0; GENIE_OPTIONS_DEFAULT_SIZE];
+    options[2] = 42;
+    // Defaults initialized by CUIGenie_Main at B18E1D and B1A4E6.
+    for (index, value) in [(2,30), (3,10), (4,30), (6,30), (8,80), (25,3), (27,2)] {
+        options[4 + index] = value;
+    }
+    options
+}
 
 /// Convert absolute genie timestamp to DB i32 for storage.
 /// C++ and in-memory both use absolute UNIX timestamp (`uint32`).
@@ -358,15 +372,15 @@ async fn handle_genie_use_spirit(
 
 /// Load and send genie options to the client.
 /// Sends a blob of saved genie configuration bytes.
-async fn handle_load_options(session: &mut ClientSession) -> anyhow::Result<()> {
+pub(crate) async fn handle_load_options(session: &mut ClientSession) -> anyhow::Result<()> {
     let sid = session.session_id();
     let world = session.world();
 
     // Get saved options from session data (or default zeros)
     let options = world
         .with_session(sid, |h| h.genie_options.clone())
-        .filter(|saved| !saved.is_empty())
-        .unwrap_or_else(|| vec![0u8; GENIE_OPTIONS_DEFAULT_SIZE]);
+        .filter(|saved| valid_options(saved))
+        .unwrap_or_else(default_options);
 
     let mut resp = Packet::new(Opcode::WizGenie as u8);
     resp.write_u8(GENIE_INFO_REQUEST);
@@ -374,7 +388,7 @@ async fn handle_load_options(session: &mut ClientSession) -> anyhow::Result<()> 
     resp.data.extend_from_slice(&options);
     session.send_packet(&resp).await?;
 
-    debug!(
+    tracing::info!(
         "[{}] WIZ_GENIE: LoadOptions sent ({} bytes)",
         session.addr(),
         options.len()
@@ -391,11 +405,13 @@ async fn handle_save_options(
     let sid = session.session_id();
     let world = session.world();
 
-    // v2615 sends a variable-length options block. Preserve the complete
-    // payload (up to the native C++ 100-byte array) instead of cutting it at
-    // the older 46-byte sniff length.
+    // Reject incomplete payloads without destroying the last complete settings.
     let payload = r.read_remaining();
-    let options = payload[..payload.len().min(GENIE_OPTIONS_MAX_SIZE)].to_vec();
+    if !valid_options(payload) {
+        warn!("WIZ_GENIE: rejected malformed options: sid={}, bytes={}", sid, payload.len());
+        return Ok(());
+    }
+    let options = payload.to_vec();
 
     world.update_session(sid, |h| {
         h.genie_options = options.clone();
@@ -406,18 +422,11 @@ async fn handle_save_options(
     // but the client expects a settings change to survive a relog right away.
     if let Some(char_name) = world.get_character_info(sid).map(|c| c.name.clone()) {
         let pool = session.pool().clone();
-        let genie_abs = world.with_session(sid, |h| h.genie_time_abs).unwrap_or(0);
-        let db_time = genie_abs_to_db(genie_abs);
-        let options_to_save = options.clone();
-        tokio::spawn(async move {
-            let repo = ko_db::repositories::user_data::UserDataRepository::new(&pool);
-            if let Err(e) = repo.save_genie_data(&char_name, db_time, &options_to_save, 0).await {
-                tracing::error!("WIZ_GENIE: failed to persist options for {}: {}", char_name, e);
-            }
-        });
+        let repo = ko_db::repositories::user_data::UserDataRepository::new(&pool);
+        repo.save_genie_options(&char_name, &options).await?;
     }
 
-    debug!(
+    tracing::info!(
         "[{}] WIZ_GENIE: SaveOptions ({} bytes)",
         session.addr(),
         options.len()
@@ -673,8 +682,8 @@ mod tests {
         assert_eq!(GENIE_REMAINING_TIME, 6);
         assert_eq!(GENIE_ACTIVATED, 7);
         assert_eq!(GENIE_STATUS_ACTIVE, 1); // C++ GenieStatusActive = 1
-        assert_eq!(GENIE_OPTIONS_DEFAULT_SIZE, 62); // v2615 64-byte packet minus commands
-        assert_eq!(GENIE_OPTIONS_MAX_SIZE, 100); // native C++ m_GenieOptions
+        assert_eq!(GENIE_OPTIONS_DEFAULT_SIZE, 46);
+        assert_eq!(GENIE_OPTIONS_MAX_SIZE, 174);
     }
 
     #[test]
@@ -849,11 +858,20 @@ mod tests {
         assert_eq!(GENIE_HOURS_PER_POTION * 3600, 1_296_000); // in seconds
     }
 
-    /// Genie options blob size is 256 bytes.
+    /// Every legal v2615 skill count survives without truncation.
     #[test]
     fn test_genie_options_size() {
-        assert_eq!(GENIE_OPTIONS_DEFAULT_SIZE, 62);
-        assert_eq!(GENIE_OPTIONS_MAX_SIZE, 100);
+        assert_eq!(GENIE_OPTIONS_DEFAULT_SIZE, 46);
+        assert_eq!(GENIE_OPTIONS_MAX_SIZE, 174);
+        assert!(valid_options(&default_options()));
+        for count in 0u16..=32 {
+            let mut blob = count.to_le_bytes().to_vec();
+            for slot in 0..count { blob.extend_from_slice(&(100001u32 + u32::from(slot)*1000000).to_le_bytes()); }
+            blob.extend_from_slice(&default_options()[2..]);
+            assert!(valid_options(&blob));
+            assert!(!valid_options(&blob[..blob.len()-1]));
+        }
+        assert!(!valid_options(&[0; 62]));
     }
 
     /// get_genie_hours: 0→0, <3600→1, 3600→1, 7200→2.

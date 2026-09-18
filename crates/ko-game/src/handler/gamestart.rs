@@ -2119,6 +2119,10 @@ async fn handle_phase2(session: &mut ClientSession) -> anyhow::Result<()> {
         zone_id as i16,
     );
 
+    // Restore the actual Genie UI, not just the server-side SessionHandle.
+    // v2615 B1A4B0 consumes this response; login does not request it itself.
+    super::genie::handle_load_options(session).await?;
+
     // 26. GM entity level range overlay (F7B flag) — sent LAST to ensure client is fully initialized.
     // Client WIZ_STATE_CHANGE handler: type==2 + entity_id==self + state==2 → set F7B=1
     // F7B enables NPC/monster level range display on entity nameplates when targeting.
