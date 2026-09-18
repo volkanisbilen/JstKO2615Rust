@@ -2200,9 +2200,11 @@ async fn handle_npc_attack(
     }
 
     // Notify NPC AI about damage (reactive aggro — C++ ChangeTarget)
-    if new_hp > 0 {
-        world.notify_npc_damaged(npc_id, attacker_sid);
-    }
+    // A transformed player is still a valid attacker. Always notify the NPC
+    // after a non-lethal hit so passive/tender mobs acquire a deterministic
+    // return target; the old conditional left them standing intermittently
+    // when the transformation damage path reported zero/late HP state.
+    world.notify_npc_damaged(npc_id, attacker_sid);
 
     let b_result = if new_hp <= 0 {
         // NPC died

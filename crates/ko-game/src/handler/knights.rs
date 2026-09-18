@@ -3678,8 +3678,8 @@ async fn handle_mark_register(
     }
 
     // Read the symbol data from packet
-    let mut mark_data = vec![0u8; symbol_size as usize];
-    for byte in &mut mark_data {
+    let mut mark_data = vec![0u8; MAXKNIGHTS_MARK as usize];
+    for byte in mark_data.iter_mut().take(symbol_size as usize) {
         *byte = reader.read_u8().unwrap_or(0);
     }
 

@@ -241,7 +241,7 @@ async fn handle_info_request(
     match sub_command {
         GENIE_USE_SPIRING_POTION => handle_genie_use_spirit(session, r).await,
         GENIE_LOAD_OPTIONS => handle_load_options(session).await,
-        GENIE_SAVE_OPTIONS => handle_save_options(session, r),
+        GENIE_SAVE_OPTIONS => handle_save_options(session, r).await,
         GENIE_START_HANDLE => handle_genie_start(session).await,
         GENIE_STOP_HANDLE => handle_genie_stop(session).await,
         _ => {
@@ -384,7 +384,7 @@ async fn handle_load_options(session: &mut ClientSession) -> anyhow::Result<()> 
 
 /// Save genie options from the client.
 /// Reads the options blob from the packet and stores it in the session.
-fn handle_save_options(
+async fn handle_save_options(
     session: &mut ClientSession,
     r: &mut PacketReader<'_>,
 ) -> anyhow::Result<()> {
@@ -394,11 +394,28 @@ fn handle_save_options(
     // v2615 sends a variable-length options block. Preserve the complete
     // payload (up to the native C++ 100-byte array) instead of cutting it at
     // the older 46-byte sniff length.
-    let options = r.read_remaining()[..r.remaining().min(GENIE_OPTIONS_MAX_SIZE)].to_vec();
+    let payload = r.read_remaining();
+    let options = payload[..payload.len().min(GENIE_OPTIONS_MAX_SIZE)].to_vec();
 
     world.update_session(sid, |h| {
         h.genie_options = options.clone();
+        h.genie_loaded = true;
     });
+
+    // Persist immediately. Disconnect/periodic saves remain as a safeguard,
+    // but the client expects a settings change to survive a relog right away.
+    if let Some(char_name) = world.get_character_info(sid).map(|c| c.name.clone()) {
+        let pool = session.pool().clone();
+        let genie_abs = world.with_session(sid, |h| h.genie_time_abs).unwrap_or(0);
+        let db_time = genie_abs_to_db(genie_abs);
+        let options_to_save = options.clone();
+        tokio::spawn(async move {
+            let repo = ko_db::repositories::user_data::UserDataRepository::new(&pool);
+            if let Err(e) = repo.save_genie_data(&char_name, db_time, &options_to_save, 0).await {
+                tracing::error!("WIZ_GENIE: failed to persist options for {}: {}", char_name, e);
+            }
+        });
+    }
 
     debug!(
         "[{}] WIZ_GENIE: SaveOptions ({} bytes)",
