@@ -13,8 +13,8 @@
 //! | u8    | Echo flag          |
 //! | u32le | Max HP             |
 //! | u32le | Current HP         |
-//! | u32le | Source/attacker ID |
 //! | i32le | HP change/damage   |
+//! | i32le | Score delta        |
 //! | u8    | Reserved (must be 0)|
 
 use ko_protocol::{Opcode, Packet, PacketReader};
@@ -23,14 +23,14 @@ use crate::npc::NPC_BAND;
 use crate::session::{ClientSession, SessionState};
 use crate::zone::SessionId;
 
-/// Build the v2615 `WIZ_TARGET_HP` response.
+/// Build the v2625 `WIZ_TARGET_HP` response.
 ///
-/// `KnightOnLine_unpacked.exe` `0x817F60` reads the two trailing dwords as
-/// source ID followed by signed HP change. Its Ronark high-score path at
-/// `0x818103` passes the second dword to the score accumulator. Keeping this
-/// order in one builder prevents combat paths from silently sending score 0.
+/// The supplied v2625 executable's `sub_81DF70` reads the first trailing
+/// dword into the damage-message path (multiplied by ten at `0x0081E537`) and
+/// passes the second trailing dword to the score accumulator via
+/// `sub_74A200`. Negative HP change means damage; positive means healing.
 ///
-/// The final byte is reserved in the v2615 client. A non-zero value here was
+/// The final byte remains reserved in the v2625 client. A non-zero value here was
 /// confirmed in `ko-server_20260821_195135.log` to make the client disconnect
 /// immediately after selecting a Ronark Land monster.
 pub(crate) fn build_target_hp_packet(
@@ -38,16 +38,16 @@ pub(crate) fn build_target_hp_packet(
     echo: u8,
     max_hp: u32,
     current_hp: u32,
-    source_id: u32,
     hp_change: i32,
+    score_delta: i32,
 ) -> Packet {
     let mut response = Packet::new(Opcode::WizTargetHp as u8);
     response.write_u32(target_id);
     response.write_u8(echo);
     response.write_u32(max_hp);
     response.write_u32(current_hp);
-    response.write_u32(source_id);
     response.write_i32(hp_change);
+    response.write_i32(score_delta);
     response.write_u8(0);
     response
 }
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_s2c_target_hp_response_format() {
-        let pkt = build_target_hp_packet(10042, 1, 5000, 3500, 77, -123);
+        let pkt = build_target_hp_packet(10042, 1, 5000, 3500, -123, -45);
 
         assert_eq!(pkt.data.len(), 22); // 4+1+4+4+4+4+1
 
@@ -238,8 +238,8 @@ mod tests {
         assert_eq!(r.read_u8(), Some(1));
         assert_eq!(r.read_u32(), Some(5000));
         assert_eq!(r.read_u32(), Some(3500));
-        assert_eq!(r.read_u32(), Some(77));
         assert_eq!(r.read_i32(), Some(-123));
+        assert_eq!(r.read_i32(), Some(-45));
         assert_eq!(r.read_u8(), Some(0));
         assert_eq!(r.remaining(), 0);
     }

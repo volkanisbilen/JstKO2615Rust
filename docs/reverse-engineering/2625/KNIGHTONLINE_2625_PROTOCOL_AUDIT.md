@@ -79,6 +79,28 @@ The save routine still enumerates 32 skill slots. Existing Rust Genie option
 serialization therefore remains enabled for v2625; it is not replaced with a
 guessed fixed structure.
 
+## WIZ_TARGET_HP field change
+
+The v2625 target HP parser moved from the v2615 address `0x00817F60` to
+`sub_81DF70` at `0x0081DF70`. Its six fixed fields are:
+
+```text
+u32 target_id
+u8  echo
+u32 max_hp
+u32 current_hp
+i32 hp_change
+i32 score_delta
+u8  reserved
+```
+
+At `0x0081E537` the client multiplies the first trailing dword (`hp_change`)
+by ten for its damage/heal message path. The second trailing dword is passed to
+the Ronark score accumulator through `sub_74A200`. Sending an attacker ID in
+the first dword, as the old server did, prevents v2625 from showing the actual
+damage number. All Rust combat paths now send the signed HP change in the first
+dword and retain the score delta in the second.
+
 ## Server changes
 
 - Normal GameServer version mode now reads `server_settings.game_version`.

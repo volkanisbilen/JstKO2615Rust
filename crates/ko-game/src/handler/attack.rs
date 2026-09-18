@@ -1784,7 +1784,7 @@ async fn handle_npc_attack(
             0,
             bot.max_hp as u32,
             new_hp as u32,
-            attacker_sid as u32,
+            -(damage as i32),
             -(damage as i32),
         );
         world.send_to_session_owned(attacker_sid, target_hp_pkt);
@@ -4012,7 +4012,7 @@ fn send_npc_target_hp_update(
         0,
         max_hp.max(0) as u32,
         current_hp.max(0) as u32,
-        attacker_sid as u32,
+        -damage,
         -damage,
     );
 
@@ -4072,7 +4072,7 @@ fn send_target_hp_update(
         0,
         ch.max_hp as u32,
         ch.hp.max(0) as u32,
-        attacker_sid as u32,
+        -damage,
         -damage,
     );
 

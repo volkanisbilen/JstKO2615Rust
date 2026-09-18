@@ -10,7 +10,6 @@
 //!   - HP: `level * (1 + level/30) + 3`
 //!   - MP: `((maxMp * 5) / ((level - 1) + 30)) + 3`
 //!   - Mages under 30% MP get 120% MP regen
-//! - **Sitting (GM, authority == 0)**: instant full heal
 //! - **Dead**: no regen
 
 use std::sync::Arc;
@@ -122,30 +121,21 @@ fn process_session_regen(world: &WorldState, rd: &RegenData) {
             }
         }
         USER_SITDOWN => {
-            // GM sitting: instant full heal
-            if rd.authority == 0 {
-                if rd.hp < rd.max_hp {
-                    hp_change = rd.max_hp as i32;
-                }
-                if rd.mp < rd.max_mp {
-                    mp_change = rd.max_mp as i32;
-                }
-            } else {
-                // Normal player sitting: HP + MP regen
-                if rd.hp < rd.max_hp {
-                    hp_change = (level * (1.0 + level / 30.0)) as i32 + 3;
-                }
-                //   if (GetZoneID() == ZONE_PRISON && GetLevel() > 1)
-                //       MSpChange(+(m_MaxMp * 5 / 100));
-                //   else normal formula
-                if rd.mp < rd.max_mp {
-                    if rd.zone_id == ZONE_PRISON && rd.level > 1 {
-                        mp_change = (rd.max_mp as i32) * 5 / 100;
-                    } else {
-                        let divisor = (rd.level as i32 - 1).max(0) + 30;
-                        let base = ((rd.max_mp as i32) * 5 / divisor) + 3;
-                        mp_change = base * mp_pct / 100;
-                    }
+            // Sitting players, including GMs, use the normal gradual regen
+            // formula. Authority must not change combat-resource timing.
+            if rd.hp < rd.max_hp {
+                hp_change = (level * (1.0 + level / 30.0)) as i32 + 3;
+            }
+            //   if (GetZoneID() == ZONE_PRISON && GetLevel() > 1)
+            //       MSpChange(+(m_MaxMp * 5 / 100));
+            //   else normal formula
+            if rd.mp < rd.max_mp {
+                if rd.zone_id == ZONE_PRISON && rd.level > 1 {
+                    mp_change = (rd.max_mp as i32) * 5 / 100;
+                } else {
+                    let divisor = (rd.level as i32 - 1).max(0) + 30;
+                    let base = ((rd.max_mp as i32) * 5 / divisor) + 3;
+                    mp_change = base * mp_pct / 100;
                 }
             }
         }

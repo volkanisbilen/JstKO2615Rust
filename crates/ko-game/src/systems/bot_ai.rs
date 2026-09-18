@@ -1871,7 +1871,7 @@ fn bot_perform_attack(
                     0,
                     ch.max_hp as u32,
                     target_hp.max(0) as u32,
-                    bot.id,
+                    -(damage as i32),
                     -(damage as i32),
                 );
                 broadcast_to_bot_region(
@@ -2216,7 +2216,7 @@ fn broadcast_target_hp_update(
                     0,
                     ch.max_hp as u32,
                     target_hp.max(0) as u32,
-                    bot.id,
+                    -damage,
                     -damage,
                 );
                 broadcast_to_bot_region(

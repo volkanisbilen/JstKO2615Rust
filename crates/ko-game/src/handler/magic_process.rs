@@ -1989,7 +1989,7 @@ async fn execute_type1_aoe(
                 0,
                 tmpl.max_hp,
                 new_hp.max(0) as u32,
-                caster_sid as u32,
+                -(damage as i32),
                 -(damage as i32),
             );
             world.send_to_session_owned(caster_sid, hp_pkt);
@@ -3424,7 +3424,7 @@ async fn execute_type3(
                         0,
                         tmpl.max_hp,
                         new_hp.max(0) as u32,
-                        caster_sid as u32,
+                        -(npc_damage as i32),
                         -(npc_damage as i32),
                     );
                     world.send_to_session_owned(caster_sid, hp_pkt);
@@ -6167,7 +6167,7 @@ fn send_target_hp_update(
         0,
         ch.max_hp as u32,
         ch.hp.max(0) as u32,
-        caster_sid as u32,
+        -damage,
         -damage,
     );
 
@@ -6204,7 +6204,7 @@ async fn apply_skill_damage_to_npc(
             b.last_attacker_id = caster_sid as i32;
         });
 
-        // v2615 reads the Ronark Land score delta from the *second* trailing
+        // v2625 reads the Ronark Land score delta from the *second* trailing
         // dword of WIZ_TARGET_HP. Keep every damage path on the centralized
         // builder so magic attacks against bots cannot silently bypass it.
         let target_hp_pkt = super::target_hp::build_target_hp_packet(
@@ -6212,7 +6212,7 @@ async fn apply_skill_damage_to_npc(
             0,
             bot.max_hp as u32,
             new_hp as u32,
-            caster_sid as u32,
+            -(damage as i32),
             -(damage as i32),
         );
         world.send_to_session_owned(caster_sid, target_hp_pkt);
@@ -6411,7 +6411,7 @@ async fn apply_skill_damage_to_npc(
         0,
         tmpl.max_hp,
         new_hp.max(0) as u32,
-        caster_sid as u32,
+        -(damage as i32),
         -(damage as i32),
     );
     world.send_to_session_owned(caster_sid, hp_pkt);

@@ -229,7 +229,7 @@ fn process_dot_tick(world: &WorldState) {
                 0,
                 bot.max_hp as u32,
                 new_hp as u32,
-                caster_sid as u32,
+                total_damage,
                 total_damage,
             );
             world.send_to_session_owned(caster_sid, hp_pkt);
@@ -313,7 +313,7 @@ fn process_dot_tick(world: &WorldState) {
                         0,
                         tmpl.max_hp,
                         new_hp as u32,
-                        caster_sid as u32,
+                        total_damage,
                         total_damage,
                     );
                     world.send_to_session_owned(caster_sid, hp_pkt);

@@ -208,7 +208,7 @@ async fn process_single_pet_attack(world: &WorldState, pd: &crate::world::PetAtt
         0,
         max_hp as u32,
         new_hp.max(0) as u32,
-        pd.session_id as u32,
+        -(damage as i32),
         -(damage as i32),
     );
     world.send_to_session_owned(pd.session_id, hp_pkt);
