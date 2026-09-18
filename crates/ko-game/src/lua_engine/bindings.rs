@@ -3576,9 +3576,9 @@ fn lua_zone_change_clan(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
 /// PromoteKnight(uid, flag) -> void
 /// C++ alias: `PromoteKnight` = `PromoteClan` (lua_bindings.cpp:427)
 /// Promote the player's clan to the given grade (flag).
-/// The reference `CKnightsManager::UpdateKnightsGrade()` sets Training to
-/// cape=-1 and the first Promoted state to cape=0.  Keep that value intact:
-/// the client resolves the base promoted cape from `Cloak.tbl`.
+/// The v2615 client does not render or list mantle catalogue entries when a
+/// promoted clan is left on cape 0.  Use the visible JstKO reference cloak for
+/// the first promoted state, while preserving already purchased capes.
 fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
     let mut iter = args.into_iter();
     let uid: i32 = iter.next().and_then(|v| lua.unpack(v).ok()).unwrap_or(0);
@@ -3597,7 +3597,8 @@ fn lua_promote_knight(lua: &Lua, args: LuaMultiValue) -> LuaResult<()> {
         .unwrap_or(-1);
     let cape: i16 = match flag {
         1 => -1,
-        2 => 0,
+        2 if current_cape <= 0 => 201,
+        2 => current_cape,
         _ => current_cape,
     };
 
@@ -7270,11 +7271,18 @@ mod tests {
         lua.load("PromoteKnight(1)").exec().unwrap();
         let k = world.get_knights(102).unwrap();
         assert_eq!(k.flag, 2); // ClanTypePromoted
-        assert_eq!(k.cape, 0);
+        assert_eq!(k.cape, 201);
+
+        // Re-running the promoted state preserves an already visible/purchased
+        // cloak instead of resetting it to the first reference cloak.
+        world.update_knights(102, |k| k.cape = 42);
+        lua.load("PromoteKnight(1)").exec().unwrap();
+        let k = world.get_knights(102).unwrap();
+        assert_eq!(k.flag, 2);
+        assert_eq!(k.cape, 42);
 
         // Explicit flag=3 (Accredited) preserves a cape purchased after the
         // initial promotion, matching UpdateKnightsGrade in the C++ server.
-        world.update_knights(102, |k| k.cape = 42);
         lua.load("PromoteKnight(1, 3)").exec().unwrap();
         let k = world.get_knights(102).unwrap();
         assert_eq!(k.flag, 3);

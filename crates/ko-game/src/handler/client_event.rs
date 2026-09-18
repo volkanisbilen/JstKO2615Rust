@@ -12,9 +12,11 @@
 //! or special NPC effects (damage, items, etc.).
 
 use ko_protocol::{Opcode, Packet, PacketReader};
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::session::{ClientSession, SessionState};
+
+use super::knights;
 
 use crate::npc_type_constants::{
     MAX_NPC_RANGE, NPC_LOYALTY_MERCHANT, NPC_MERCHANT, NPC_OBJECT_WOOD, NPC_ROLLINGSTONE,
@@ -43,6 +45,15 @@ const NPC_CHAOTIC_GENERATOR2: u8 = 162;
 
 /// WIZ_ITEM_UPGRADE sub-opcode for Chaotic Generator dialog.
 const ITEM_BIFROST_REQ: u8 = 4;
+
+fn packet_hex(opcode: u8, data: &[u8]) -> String {
+    let mut out = format!("{opcode:02X}");
+    for byte in data {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, " {byte:02X}");
+    }
+    out
+}
 
 /// Build the Inn Hostess menu request. This packet must not contain warehouse
 /// page data; normal/VIP storage is opened by the client's next request.
@@ -395,23 +406,51 @@ async fn handle_npc_by_nid(session: &mut ClientSession, npc_nid: u32) -> anyhow:
             }
             NPC_MARK => {
                 // Cape mark NPC — open clan cape customization UI
-                let clan_state = session
+                let clan_id = session
                     .world()
                     .get_character_info(session.session_id())
-                    .and_then(|ch| session.world().get_knights(ch.knights_id))
-                    .map(|k| (k.id, k.flag, k.grade, k.cape, k.ranking));
-                // v2615 NPCHandler sends only this sub-opcode. The client
-                // already owns the clan/cape state from MyInfo; injecting a
-                // KNIGHTS_UPDATE before this packet leaves the mantle palette
-                // without its locally-filtered Cloak.tbl entries.
+                    .map(|ch| ch.knights_id)
+                    .unwrap_or(0);
+                let clan_state = if clan_id > 0 {
+                    let state = session
+                        .world()
+                        .get_knights(clan_id)
+                        .map(|k| (k.id, k.flag, k.grade, k.cape, k.ranking));
+                    // Refresh this client's clan/cape cache synchronously
+                    // before opening the v2615 mantle UI.  The UI filters
+                    // Cloak.tbl locally from this state; using only the
+                    // broadcast queue can let the window open before the
+                    // KNIGHTS_UPDATE packet is processed, leaving the
+                    // catalogue empty.
+                    if let Some(update_pkt) = knights::build_knights_update_packet(session, clan_id)
+                    {
+                        let update_packet =
+                            packet_hex(Opcode::WizKnightsProcess as u8, &update_pkt.data);
+                        session.send_packet(&update_pkt).await?;
+                        info!(
+                            addr = %session.addr(),
+                            npc_nid,
+                            clan_id,
+                            clan_state = ?state,
+                            packet = %update_packet,
+                            "MARK/CAPE direct update packet"
+                        );
+                    }
+                    state
+                } else {
+                    None
+                };
                 let mut pkt = Packet::new(Opcode::WizKnightsProcess as u8);
                 pkt.write_u8(KNIGHTS_CAPE_NPC);
+                let open_packet = packet_hex(Opcode::WizKnightsProcess as u8, &pkt.data);
                 session.send_packet(&pkt).await?;
-                debug!(
-                    "[{}] ClientEvent: NPC {} (MARK/CAPE), clan_state={:?}",
-                    session.addr(),
+                info!(
+                    addr = %session.addr(),
                     npc_nid,
-                    clan_state
+                    clan_id,
+                    clan_state = ?clan_state,
+                    packet = %open_packet,
+                    "MARK/CAPE open packet"
                 );
                 return Ok(());
             }

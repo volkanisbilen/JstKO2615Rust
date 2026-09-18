@@ -1733,6 +1733,18 @@ impl WorldState {
             .unwrap_or_default()
             .as_secs() as i64;
         for row in &knights_rows {
+            let valid_mark = row.s_mark_version > 0
+                && row.s_mark_len == 2400
+                && row.mark.len() == 2400;
+            if row.s_mark_version > 0 && !valid_mark {
+                tracing::warn!(
+                    clan_id = row.id_num,
+                    mark_version = row.s_mark_version,
+                    s_mark_len = row.s_mark_len,
+                    mark_bytes = row.mark.len(),
+                    "invalid clan mark ignored while loading knights"
+                );
+            }
             let info = KnightsInfo {
                 id: row.id_num as u16,
                 flag: row.flag as u8,
@@ -1759,8 +1771,12 @@ impl WorldState {
                 cape_r: row.b_cape_r as u8,
                 cape_g: row.b_cape_g as u8,
                 cape_b: row.b_cape_b as u8,
-                mark_version: row.s_mark_version as u16,
-                mark_data: if row.s_mark_len > 0 {
+                mark_version: if valid_mark {
+                    row.s_mark_version as u16
+                } else {
+                    0
+                },
+                mark_data: if valid_mark {
                     row.mark.clone()
                 } else {
                     Vec::new()

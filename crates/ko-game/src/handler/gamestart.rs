@@ -25,6 +25,14 @@ use super::{HAVE_MAX, INVENTORY_TOTAL, SLOT_MAX};
 
 use crate::clan_constants::{CHIEF, COMMAND_AUTHORITY, COMMAND_CAPTAIN};
 
+fn myinfo_cape_tail_flag(clan_flag: u8, clan_grade: u8) -> u8 {
+    if clan_flag > 1 && clan_grade < 3 {
+        1
+    } else {
+        0
+    }
+}
+
 /// Handle WIZ_GAMESTART from the client.
 pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
     if session.state() != SessionState::CharacterSelected {
@@ -387,19 +395,18 @@ async fn handle_phase1(session: &mut ClientSession) -> anyhow::Result<()> {
                     cape_r = ki.cape_r,
                     cape_g = ki.cape_g,
                     cape_b = ki.cape_b,
-                    cape_symbol = u8::from(ki.flag > 1 && ki.grade < 3),
+                    cape_flag = myinfo_cape_tail_flag(ki.flag, ki.grade),
                     "MyInfo cape state"
                 );
                 pkt.write_u16(cape_id);
                 pkt.write_u8(ki.cape_r);
                 pkt.write_u8(ki.cape_g);
                 pkt.write_u8(ki.cape_b);
-                // This is a cape-symbol visibility bit, not the clan type.
-                // The v2615 client accepts only 0/1 here.  A promoted clan
-                // (flag=2) is therefore sent as 1 when its grade may show a
-                // cape; writing the raw flag (2) makes its cloak model and
-                // the mantle catalogue disappear.
-                pkt.write_u8(u8::from(ki.flag > 1 && ki.grade < 3));
+                // The final byte belongs to the same u32 as RGB and is the
+                // client-side cape-symbol/render flag.  Unlike the clan type
+                // byte above, the v2615 client expects the compact 0/1 value
+                // used by the reference MyInfo flow here.
+                pkt.write_u8(myinfo_cape_tail_flag(ki.flag, ki.grade));
             }
             None => {
                 // Clan exists but not loaded — send empty clan data
@@ -2452,10 +2459,9 @@ pub(crate) async fn send_myinfo_refresh(session: &mut ClientSession) -> anyhow::
                 pkt.write_u8(ki.cape_r);
                 pkt.write_u8(ki.cape_g);
                 pkt.write_u8(ki.cape_b);
-                // MyInfo's trailing byte is the 0/1 cape-symbol visibility
-                // bit. It is deliberately different from USER_INOUT's clan
-                // type field: the v2615 cloak UI rejects raw clan flag 2.
-                pkt.write_u8(u8::from(ki.flag > 1 && ki.grade < 3));
+                // Same MyInfo RGB tail as the login packet: compact
+                // cape-symbol/render flag, not the raw clan type.
+                pkt.write_u8(myinfo_cape_tail_flag(ki.flag, ki.grade));
             }
             None => {
                 pkt.write_u64(0);
@@ -3196,6 +3202,15 @@ mod tests {
     fn test_pk_ranking_zone_karus_elmorad_not_pk() {
         assert!(!is_pk_ranking_zone(1)); // Karus
         assert!(!is_pk_ranking_zone(2)); // Elmorad
+    }
+
+    #[test]
+    fn test_myinfo_cape_tail_uses_reference_symbol_flag() {
+        assert_eq!(myinfo_cape_tail_flag(1, 5), 0);
+        assert_eq!(myinfo_cape_tail_flag(2, 3), 0);
+        assert_eq!(myinfo_cape_tail_flag(2, 2), 1);
+        assert_eq!(myinfo_cape_tail_flag(3, 1), 1);
+        assert_eq!(myinfo_cape_tail_flag(12, 1), 1);
     }
 
     // ── Skill Data Parse Tests ───────────────────────────────────────

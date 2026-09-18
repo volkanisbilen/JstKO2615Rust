@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Backend
+    [string]$Backend,
+    [string]$TargetLabel = 'LOCAL'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,7 +57,7 @@ function Set-GridData($grid, $rows) {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'JSTKO Letter Item Admin'
+$form.Text = "JSTKO Letter Item Admin — $TargetLabel"
 $form.StartPosition = 'CenterScreen'; $form.Size = New-Object Drawing.Size(1120, 790)
 $form.MinimumSize = New-Object Drawing.Size(1000, 700)
 $form.Font = New-Object Drawing.Font('Segoe UI', 9)

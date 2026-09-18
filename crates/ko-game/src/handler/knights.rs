@@ -7,7 +7,7 @@ use ko_db::repositories::character::CharacterRepository;
 use ko_db::repositories::knights::KnightsRepository;
 use ko_protocol::Packet;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::session::{ClientSession, SessionState};
 use crate::world::{KnightsAlliance, KnightsInfo, MAX_ID_SIZE};
@@ -71,6 +71,15 @@ const KNIGHTS_LADDER_POINTS: u8 = 100;
 const WIZKNIGHTS_PROCESS: u8 = 0x3C;
 /// Opcode for WIZ_NOTICE (used for clan notice display).
 const WIZ_NOTICE: u8 = 0x2E;
+
+fn packet_hex(opcode: u8, data: &[u8]) -> String {
+    let mut out = format!("{opcode:02X}");
+    for byte in data {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, " {byte:02X}");
+    }
+    out
+}
 
 /// Handle WIZKNIGHTS_PROCESS from the client.
 pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
@@ -529,16 +538,23 @@ async fn handle_join(
 
 // ── KNIGHTS_JOIN_REQ (17) ─────────────────────────────────────────────
 
+fn read_join_req_response(
+    reader: &mut ko_protocol::PacketReader<'_>,
+) -> Option<(u8, u16, u16)> {
+    let response = reader.read_u8()?;
+    // v2615 sub_8413E0 sends response:u8, inviter:u32, clan:u16.
+    // Reading clan immediately after response mistook the inviter SID for it.
+    let inviter_id = u16::try_from(reader.read_u32()?).ok()?;
+    let clan_id = reader.read_u16()?;
+    Some((response, inviter_id, clan_id))
+}
+
 /// Accept or decline a clan join invitation.
 async fn handle_join_req(
     session: &mut ClientSession,
     reader: &mut ko_protocol::PacketReader<'_>,
 ) -> anyhow::Result<()> {
-    let response = match reader.read_u8() {
-        Some(v) => v,
-        None => return Ok(()),
-    };
-    let clan_id = match reader.read_u16() {
+    let (response, inviter_id, clan_id) = match read_join_req_response(reader) {
         Some(v) => v,
         None => return Ok(()),
     };
@@ -564,6 +580,16 @@ async fn handle_join_req(
         .with_session(sid, |h| h.pending_knights_invite)
         .unwrap_or(0);
     if pending == 0 || pending != clan_id {
+        warn!(sid, clan_id, pending, inviter_id, "Clan invitation mismatch");
+        return Ok(());
+    }
+    let valid_inviter = session.world().get_character_info(inviter_id).is_some_and(|c| {
+        c.knights_id == clan_id
+            && c.nation == ch.nation
+            && (c.fame == CHIEF || c.fame == VICECHIEF)
+    });
+    if !valid_inviter {
+        session.send_packet(&knights_error(KNIGHTS_JOIN, 2)).await?;
         return Ok(());
     }
     // Clear the pending invite now that we're processing it
@@ -2954,15 +2980,15 @@ async fn handle_alliance_list(session: &mut ClientSession) -> anyhow::Result<()>
 
 // ── SendUpdate helper ────────────────────────────────────────────────
 
-/// Send a KNIGHTS_UPDATE packet for a clan to all its online members.
+/// Build a KNIGHTS_UPDATE packet for a clan.
 /// Alliance cape rules:
 /// - Main/sub alliance clans: show alliance leader's cape + their own RGB colors
 /// - Mercenary clans: show alliance leader's cape with no colors (u32(0))
 /// - Non-alliance clans: show their own cape + RGB colors
-pub(crate) fn send_knights_update(session: &ClientSession, clan_id: u16) {
+pub(crate) fn build_knights_update_packet(session: &ClientSession, clan_id: u16) -> Option<Packet> {
     let clan = match session.world().get_knights(clan_id) {
         Some(k) => k,
-        None => return,
+        None => return None,
     };
 
     let mut result = Packet::new(WIZKNIGHTS_PROCESS);
@@ -3025,6 +3051,32 @@ pub(crate) fn send_knights_update(session: &ClientSession, clan_id: u16) {
         result.write_u8(0);
     }
 
+    info!(
+        clan_id = clan.id,
+        flag = clan.flag,
+        grade = clan.grade,
+        cape = clan.cape,
+        cape_r = clan.cape_r,
+        cape_g = clan.cape_g,
+        cape_b = clan.cape_b,
+        castellan_cape = clan.castellan_cape,
+        cast_cape = clan.cast_cape_id,
+        cast_cape_r = clan.cast_cape_r,
+        cast_cape_g = clan.cast_cape_g,
+        cast_cape_b = clan.cast_cape_b,
+        alliance = clan.alliance,
+        packet = %packet_hex(WIZKNIGHTS_PROCESS, &result.data),
+        "KNIGHTS_UPDATE cape payload"
+    );
+
+    Some(result)
+}
+
+/// Send a KNIGHTS_UPDATE packet for a clan to all its online members.
+pub(crate) fn send_knights_update(session: &ClientSession, clan_id: u16) {
+    let Some(result) = build_knights_update_packet(session, clan_id) else {
+        return;
+    };
     session
         .world()
         .send_to_knights_members(clan_id, Arc::new(result), None);
@@ -3719,7 +3771,18 @@ async fn handle_mark_req(
 
     let nation = knights.nation;
     let version = knights.mark_version;
-    let mark_len = knights.mark_data.len() as u16;
+    let raw_mark_len = knights.mark_data.len();
+    if raw_mark_len != MAXKNIGHTS_MARK as usize {
+        tracing::warn!(
+            clan_id,
+            version,
+            mark_len = raw_mark_len,
+            expected_len = MAXKNIGHTS_MARK,
+            "KNIGHTS_MARK_REQ skipped invalid clan mark length"
+        );
+        return Ok(());
+    }
+    let mark_len = raw_mark_len as u16;
     let mark_data = knights.mark_data.clone();
     drop(knights);
 
@@ -3774,6 +3837,28 @@ mod tests {
         assert_eq!(header, "Clan Notice");
         let notice = reader.read_string().unwrap();
         assert_eq!(notice, "Welcome to the clan!");
+    }
+
+    #[test]
+    fn test_join_req_accept_reads_v2615_inviter_before_clan() {
+        let mut pkt = Packet::new(WIZKNIGHTS_PROCESS);
+        pkt.write_u8(1); // accepted
+        pkt.write_u32(0x1234); // inviter socket id
+        pkt.write_u16(0x5678); // clan id
+
+        let mut reader = ko_protocol::PacketReader::new(&pkt.data);
+        assert_eq!(read_join_req_response(&mut reader), Some((1, 0x1234, 0x5678)));
+    }
+
+    #[test]
+    fn test_join_req_reject_uses_same_v2615_layout() {
+        let mut pkt = Packet::new(WIZKNIGHTS_PROCESS);
+        pkt.write_u8(0); // declined
+        pkt.write_u32(9); // inviter socket id
+        pkt.write_u16(77); // clan id
+
+        let mut reader = ko_protocol::PacketReader::new(&pkt.data);
+        assert_eq!(read_join_req_response(&mut reader), Some((0, 9, 77)));
     }
 
     #[test]
