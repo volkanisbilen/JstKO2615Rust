@@ -8,8 +8,8 @@
 //! Client -> Server:
 //! opcode=0x2B, data=[FF FF]
 //!
-//! We keep multiple response modes behind KO_VERSION_MODE so we can test
-//! client compatibility without changing code every time.
+//! We keep the historical response modes behind KO_VERSION_MODE for protocol
+//! diagnostics. Normal operation uses mode 99 and the DB-backed version.
 //!
 //! Test modes:
 //! 0 -> [00][2599][10][key][00]
@@ -27,9 +27,9 @@ use crate::session::{ClientSession, SessionState};
 
 /// Fallback version if server_settings is not loaded yet.
 ///
-/// For the current 26xx client test, we use 2602.
-/// LoginServer version should also come from server_settings.game_version.
-pub const DEFAULT_SERVER_VERSION: u16 = 2602;
+/// v2625 `sub_7AE420` returns 2625 and `sub_7B5420` rejects any other
+/// GameServer wire version.
+pub const DEFAULT_SERVER_VERSION: u16 = 2625;
 
 /// Resolve the game version from DB: server_settings.game_version.
 fn resolve_version(session: &ClientSession) -> u16 {
@@ -42,13 +42,13 @@ fn resolve_version(session: &ClientSession) -> u16 {
 
 /// Read KO_VERSION_MODE from environment.
 ///
-/// Default mode is 3:
-/// [00][2602][10][key][00]
+/// Default mode is 99:
+/// [00][server_settings.game_version][10][key][00]
 fn get_version_mode() -> u8 {
     std::env::var("KO_VERSION_MODE")
         .ok()
         .and_then(|v| v.trim().parse::<u8>().ok())
-        .unwrap_or(3)
+        .unwrap_or(99)
 }
 
 /// Return the wire version used by the selected test mode.
@@ -77,7 +77,7 @@ fn mode_description(mode: u8) -> &'static str {
 
 /// Build 0x2B version response payload according to KO_VERSION_MODE.
 /// The leading byte selects the cloak catalog, NOT a success status.
-/// v2615 sub_7AF730: zero loads Cloak.tbl; nonzero loads Cloak_PVP.tbl.
+/// v2625 sub_7B5420: zero loads Cloak.tbl; nonzero loads Cloak_PVP.tbl.
 /// The shipped PVP table has a legacy 7-column layout rejected by sub_52A840.
 fn build_version_response_payload(mode: u8, db_version: u16, key: &[u8; 16]) -> Packet {
     let mut response = Packet::new(Opcode::WizVersionCheck as u8);
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_default_server_version() {
-        assert_eq!(DEFAULT_SERVER_VERSION, 2602);
+        assert_eq!(DEFAULT_SERVER_VERSION, 2625);
     }
 
     #[test]
@@ -235,7 +235,19 @@ mod tests {
         assert_eq!(mode_wire_version(2, 2599), 2602);
         assert_eq!(mode_wire_version(3, 2599), 2602);
         assert_eq!(mode_wire_version(7, 2599), 2602);
-        assert_eq!(mode_wire_version(99, 2602), 2602);
+        assert_eq!(mode_wire_version(99, 2625), 2625);
+    }
+
+    #[test]
+    fn test_v2625_db_response_with_aes_key() {
+        let key = [0x41u8; 16];
+        let pkt = build_version_response_payload(99, 2625, &key);
+
+        assert_eq!(pkt.opcode, Opcode::WizVersionCheck as u8);
+        assert_eq!(pkt.data.len(), 21);
+        assert_eq!(&pkt.data[..4], &[0x00, 0x41, 0x0A, 0x10]);
+        assert_eq!(&pkt.data[4..20], &key);
+        assert_eq!(pkt.data[20], 0x00);
     }
 
     #[test]

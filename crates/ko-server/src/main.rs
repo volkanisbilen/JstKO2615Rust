@@ -165,8 +165,8 @@ async fn load_server_settings(pool: &ko_db::DbPool) -> (u16, u16, String, String
         Err(e) => {
             warn!("[3/6] Failed to read server_settings: {}", e);
             (
-                2598u16,
-                2598u16,
+                2625u16,
+                2625u16,
                 "http://127.0.0.1:8080".to_string(),
                 "/patches/".to_string(),
             )
