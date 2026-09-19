@@ -13,7 +13,7 @@ use std::time::Duration;
 use ko_protocol::{Opcode, Packet};
 
 use crate::handler::dead;
-use crate::magic_constants::{USER_STATUS_CURE, USER_STATUS_DOT};
+use crate::magic_constants::{USER_STATUS_CURE, USER_STATUS_DOT, USER_STATUS_POISON};
 use crate::systems::buff_tick::{build_buff_expired_packet, send_user_status_update_packet};
 use crate::systems::event_room;
 use crate::world::{WorldState, USER_DEAD, ZONE_CHAOS_DUNGEON, ZONE_KNIGHT_ROYALE};
@@ -192,6 +192,7 @@ fn process_dot_tick(world: &WorldState) {
     for sid in sessions_with_expired_dots {
         if !world.has_active_harmful_dot(sid) {
             send_user_status_update_packet(world, sid, USER_STATUS_DOT, USER_STATUS_CURE);
+            send_user_status_update_packet(world, sid, USER_STATUS_POISON, USER_STATUS_CURE);
         }
     }
 

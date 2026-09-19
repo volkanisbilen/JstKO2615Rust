@@ -47,6 +47,7 @@ use crate::magic_constants::{
     MAGIC_TYPE4_EXTEND, MORAL_ALL, MORAL_AREA_ALL, MORAL_AREA_ENEMY, MORAL_AREA_FRIEND,
     MORAL_ENEMY, MORAL_FRIEND_EXCEPTME, MORAL_FRIEND_WITHME, MORAL_PARTY, MORAL_PARTY_ALL,
     MORAL_SELF, MORAL_SELF_AREA, SKILLMAGIC_FAIL_ATTACKZERO, SKILLMAGIC_FAIL_NOEFFECT,
+    USER_STATUS_DOT, USER_STATUS_POISON,
 };
 use crate::npc_type_constants::{
     NPC_BIFROST_MONUMENT, NPC_BORDER_MONUMENT, NPC_CLAN_WAR_MONUMENT, NPC_DESTROYED_ARTIFACT,
@@ -104,7 +105,22 @@ impl MagicInstance {
     }
 }
 
-fn gm_fixed_skill_damage(world: &WorldState, caster_sid: SessionId, damage: i16) -> i16 {
+fn gm_fixed_skill_damage(
+    world: &WorldState,
+    caster_sid: SessionId,
+    skill_id: u32,
+    damage: i16,
+) -> i16 {
+    // Type 3 is the authoritative damage path for mage spells.  Keeping the
+    // historical GM 30k override here made every mage spell ignore the TBL
+    // damage and resistance data, which also made live balancing impossible.
+    // Physical/legacy GM test skills retain their existing override.
+    let is_type3 = world
+        .get_magic(skill_id as i32)
+        .is_some_and(|skill| skill.type1 == Some(3) || skill.type2 == Some(3));
+    if is_type3 {
+        return damage;
+    }
     if world
         .get_character_info(caster_sid)
         .is_some_and(|ch| ch.authority == 0)
@@ -1790,7 +1806,7 @@ async fn execute_type1_aoe(
                 100
             };
         }
-        damage = gm_fixed_skill_damage(world, caster_sid, damage);
+        damage = gm_fixed_skill_damage(world, caster_sid, instance.skill_id, damage);
         if damage <= 0 {
             continue;
         }
@@ -1956,7 +1972,7 @@ async fn execute_type1_aoe(
             };
         }
         damage = super::attack::scale_manes_magic_damage(world, caster_sid, &npc, damage);
-        damage = gm_fixed_skill_damage(world, caster_sid, damage);
+        damage = gm_fixed_skill_damage(world, caster_sid, instance.skill_id, damage);
 
         if damage <= 0 {
             continue;
@@ -2831,13 +2847,24 @@ async fn execute_type3(
                 (-time_damage).max(0) as i16
             };
             let hp_per_tick = -(duration_damage.unsigned_abs() as i16 / tick_count as i16).max(1);
-            world.add_durational_skill(
+            if world.add_durational_skill(
                 target_sid,
                 instance.skill_id,
                 hp_per_tick,
                 tick_count,
                 caster_sid,
-            );
+            ) {
+                send_type3_inflict_status(world, target_sid, dot_attr);
+                tracing::debug!(
+                    caster_sid,
+                    target_sid,
+                    skill_id = instance.skill_id,
+                    hp_per_tick,
+                    tick_count,
+                    attribute = dot_attr,
+                    "mage Type3 DOT registered"
+                );
+            }
         }
         return true;
     }
@@ -3089,7 +3116,7 @@ async fn execute_type3(
                 } else {
                     (-first_damage).max(0) as i16
                 };
-                let damage = gm_fixed_skill_damage(world, caster_sid, damage);
+                let damage = gm_fixed_skill_damage(world, caster_sid, instance.skill_id, damage);
                 aoe_target_damage = damage as i32;
                 let new_hp = (target.hp - damage).max(0);
                 world.update_character_hp(target_sid, new_hp);
@@ -3197,13 +3224,15 @@ async fn execute_type3(
                     };
                     let hp_per_tick =
                         -(duration_damage.unsigned_abs() as i16 / tick_count as i16).max(1);
-                    world.add_durational_skill(
+                    if world.add_durational_skill(
                         target_sid,
                         instance.skill_id,
                         hp_per_tick,
                         tick_count,
                         caster_sid,
-                    );
+                    ) {
+                        send_type3_inflict_status(world, target_sid, aoe_attr);
+                    }
                 }
             }
 
@@ -3389,7 +3418,8 @@ async fn execute_type3(
                 };
                 let npc_damage =
                     super::attack::scale_manes_magic_damage(world, caster_sid, &npc, npc_damage);
-                let npc_damage = gm_fixed_skill_damage(world, caster_sid, npc_damage);
+                let npc_damage =
+                    gm_fixed_skill_damage(world, caster_sid, instance.skill_id, npc_damage);
 
                 // Apply damage to NPC
                 let new_hp = (npc_hp - npc_damage as i32).max(0);
@@ -3467,6 +3497,18 @@ async fn execute_type3(
     let pkt = instance.build_packet(MAGIC_EFFECTING);
     broadcast_to_caster_region(world, caster_sid, &pkt);
     true
+}
+
+/// Tell the 2625 client (and party UI) that a harmful Type3 effect started.
+/// Attribute 6 is poison resistance; all other harmful duration attributes
+/// use the generic DOT state, matching `SendUserStatusUpdate()` in GameServer.
+fn send_type3_inflict_status(world: &WorldState, target_sid: SessionId, attribute: u8) {
+    let status = if attribute == 6 {
+        USER_STATUS_POISON
+    } else {
+        USER_STATUS_DOT
+    };
+    crate::systems::buff_tick::send_user_status_update_packet(world, target_sid, status, 1);
 }
 
 /// Target type for magic damage formula differentiation.
@@ -3612,15 +3654,14 @@ fn build_npc_ctx(
 /// Compute magic damage from the `sFirstDamage`/`sTimeDamage` value.
 /// Formula steps (matching C++ order):
 /// 1. CHA scaling for mages (line 6305)
-/// 2. sMagicAmount multiplier (line 6306)
-/// 3. Resistance formula: 485×total_hit/(total_r+510) vs players, 555×total_hit/(total_r+515) vs NPCs
-/// 4. DamageSettings class multiplier (PvP) or montakedamage (PvE)
-/// 5. Randomization: rand(0,damage)×0.3 + damage×0.85 − sMagicAmount
+/// 2. sMagicAmount multiplier (mage base +170)
+/// 3. Resistance formula: 485×total_hit/(total_r+510)
+/// 4. Class coefficient multiplier (PvP only)
+/// 5. Randomization: rand(0,damage/2)×0.1 + damage×0.85 − sMagicAmount
 /// 6. Warrior magic vs NPC zeroing (int32(0.50f) = 0)
 ///    - 6a: Weapon damage reduction (line 6616-6619) — subtracts weapon-based damage
 /// 7. Warrior no-weapon halving + AC boost
-/// 8. Mage magic damage multiplier
-/// 9. War zone /3 vs non-war /2
+/// 8. Player targets /3 (NPC damage is not divided)
 /// 10. MAX_DAMAGE cap (32000)
 fn compute_magic_damage(
     caster: &CharacterInfo,
@@ -3656,7 +3697,9 @@ fn compute_magic_damage(
 
     // ── Step 2: sMagicAmount multiplier ───────────────────────────────
     // C++ line 6304-6306
-    let s_magic_amount = magic_attack_amount + 100;
+    // Current GameServer reference uses +170 for mage spell damage.  The old
+    // +100 baseline under-scaled every fire/ice/lightning and DOT spell.
+    let s_magic_amount = magic_attack_amount + if is_mage { 170 } else { 100 };
     total_hit = total_hit * s_magic_amount / 100;
 
     if total_hit == 0 {
@@ -3664,40 +3707,31 @@ fn compute_magic_damage(
     }
 
     // ── Step 3: Core resistance formula ───────────────────────────────
-    // C++ line 6498 (vs player): damage = 485 * total_hit / (total_r + 510)
-    // C++ line 6582 (vs NPC):    damage = 555 * total_hit / (total_r + 515)
-    let mut damage: i32 = match ctx.target_kind {
-        MagicTargetKind::Player => 485 * total_hit / (ctx.target_total_r + 510),
-        MagicTargetKind::Npc => 555 * total_hit / (ctx.target_total_r + 515),
-    };
+    let mut damage: i32 = 485 * total_hit / (ctx.target_total_r + 510);
 
     // ── Step 4: DamageSettings class multiplier ───────────────────────
-    // C++ line 6503-6515 (PvP): dm *= mageTOxxx
-    // C++ line 6585 (PvE):     dm *= montakedamage
-    if let Some(ref ds) = ctx.damage_settings {
-        match ctx.target_kind {
-            MagicTargetKind::Player => {
-                let mult = get_mage_class_multiplier(ds, ctx.target_class);
-                damage = (damage as f64 * mult) as i32;
-            }
-            MagicTargetKind::Npc => {
-                damage = (damage as f64 * ds.mon_take_damage as f64) as i32;
-            }
+    // The class coefficient applies only to player targets.  The previous PvE
+    // `mon_take_damage` multiplier is not part of the mage Type3 formula.
+    if ctx.target_kind == MagicTargetKind::Player {
+        if let Some(ref ds) = ctx.damage_settings {
+            let mult = get_mage_class_multiplier(ds, ctx.target_class);
+            damage = (damage as f64 * mult) as i32;
         }
     }
 
     // ── Step 5: Randomization ─────────────────────────────────────────
     // C++ line 6597-6598:
-    //   random = myrand(0, damage);
-    //   damage = int32(random * 0.3f + damage * 0.85f) - sMagicAmount;
+    //   random = myrand(0, damage / 2);
+    //   damage = int32(random * 0.1f + damage * 0.85f) - sMagicAmount;
     // C++ myrand(0, negative) swaps: myrand(negative, 0)
     let random = if damage != 0 {
-        let (lo, hi) = if damage > 0 { (0, damage) } else { (damage, 0) };
+        let half = damage / 2;
+        let (lo, hi) = if half > 0 { (0, half) } else { (half, 0) };
         rng.gen_range(lo..=hi)
     } else {
         0
     };
-    damage = (random as f32 * 0.3 + damage as f32 * 0.85) as i32 - s_magic_amount;
+    damage = (random as f32 * 0.1 + damage as f32 * 0.85) as i32 - s_magic_amount;
 
     // ── Step 6: Warrior magic vs NPC zeroing ──────────────────────────
     // C++ line 6603-6604: damage *= int32(0.50f) → int32(0.50f) = 0 → damage = 0
@@ -3720,14 +3754,8 @@ fn compute_magic_damage(
         damage -= (rh_part + attr_part) as i32;
     }
 
-    // ── Step 7+8: Warrior/Mage mods with C++ baa ordering ─────────────
-    // C++ line 6624: `double baa = damage;` captures BEFORE warrior mods.
-    // Warrior halving modifies `damage`, mage multiplier modifies `baa`.
-    // C++ line 6683: `damage = (int32)baa;` overwrites — warrior halving is dead code in C++.
-    // We replicate the C++ behavior exactly: baa captures pre-warrior value.
-    let mut baa = damage as f64;
-
-    // C++ line 6628-6637: warrior halving (modifies `damage`, not `baa` — dead code in C++)
+    // Current reference path applies warrior adjustments directly.  Its old
+    // optional mage multiplier block is disabled.
     if is_warrior {
         damage /= 2;
         if ctx.target_kind == MagicTargetKind::Player && ctx.target_ac_amount < 100 {
@@ -3735,23 +3763,9 @@ fn compute_magic_damage(
         }
     }
 
-    // C++ line 6645-6651: mage multiplier (modifies `baa`, not `damage`)
-    if is_mage && damage != 0 {
-        if let Some(ref ds) = ctx.damage_settings {
-            baa *= ds.mage_magic_damage as f64;
-        }
-        baa *= ctx.plus_damage;
-    }
-
-    // C++ line 6683: `damage = (int32)baa;` — overwrites damage with baa
-    damage = baa as i32;
-
-    // ── Step 9: War zone halving ──────────────────────────────────────
-    // C++ line 6685-6688
-    if ctx.is_war_zone {
+    // Player targets are divided by three; NPC targets retain full PvE damage.
+    if ctx.target_kind == MagicTargetKind::Player {
         damage /= 3;
-    } else {
-        damage /= 2;
     }
 
     // ── Step 10: Convert from negative domain to positive return ─────
@@ -5740,7 +5754,7 @@ async fn apply_skill_damage(
         None => return,
     };
 
-    let damage = gm_fixed_skill_damage(world, caster_sid, damage);
+    let damage = gm_fixed_skill_damage(world, caster_sid, instance.skill_id, damage);
     if damage <= 0 {
         // Broadcast effect with 0 damage
         let pkt = instance.build_packet(MAGIC_EFFECTING);
@@ -5848,7 +5862,8 @@ async fn apply_skill_damage(
         }
     }
 
-    effective_damage = gm_fixed_skill_damage(world, caster_sid, effective_damage);
+    effective_damage =
+        gm_fixed_skill_damage(world, caster_sid, instance.skill_id, effective_damage);
     let new_hp = (target.hp - effective_damage).max(0);
     world.update_character_hp(target_sid, new_hp);
 
@@ -6195,7 +6210,7 @@ async fn apply_skill_damage_to_npc(
             return;
         }
 
-        let damage = gm_fixed_skill_damage(world, caster_sid, damage);
+        let damage = gm_fixed_skill_damage(world, caster_sid, instance.skill_id, damage);
 
         // Apply damage — clamp to [0, max_hp]
         let new_hp = (bot.hp - damage).max(0);
@@ -6352,7 +6367,7 @@ async fn apply_skill_damage_to_npc(
         _ => return,
     };
 
-    let damage = gm_fixed_skill_damage(world, caster_sid, damage);
+    let damage = gm_fixed_skill_damage(world, caster_sid, instance.skill_id, damage);
     if damage <= 0 {
         let pkt = instance.build_packet(MAGIC_EFFECTING);
         broadcast_to_caster_region(world, caster_sid, &pkt);
@@ -7201,6 +7216,55 @@ fn execute_type8(
     };
 
     let warp_type = type8_data.warp_type;
+
+    // v2625 Skill_Magic_8 uses warp type 26 for Blink (older DB snapshots
+    // used 20).  The client sends the already-resolved destination in
+    // sData[0]/sData[2], in tenths of a world unit.  Previously this path
+    // fell through to the knockback branch and only played the animation.
+    if warp_type == 20 || warp_type == 26 {
+        let pos = match world.get_position(caster_sid) {
+            Some(pos) => pos,
+            None => {
+                send_skill_failed(world, caster_sid, instance);
+                return false;
+            }
+        };
+        let blink_allowed = world
+            .get_zone(pos.zone_id)
+            .and_then(|zone| zone.zone_info.clone())
+            .is_some_and(|info| info.abilities.blink_zone);
+        let dest_x = instance.data[0] as f32 / 10.0;
+        let dest_z = instance.data[2] as f32 / 10.0;
+        let destination_valid = world
+            .get_zone(pos.zone_id)
+            .is_some_and(|zone| zone.is_valid_position(dest_x, dest_z));
+        if !blink_allowed || !destination_valid {
+            send_skill_failed(world, caster_sid, instance);
+            return false;
+        }
+
+        instance.data[1] = 1;
+        let effect = instance.build_packet(MAGIC_EFFECTING);
+        broadcast_to_caster_region(world, caster_sid, &effect);
+        world.update_position(caster_sid, pos.zone_id, dest_x, pos.y, dest_z);
+
+        let mut warp = Packet::new(Opcode::WizWarp as u8);
+        warp.write_u16(instance.data[0].clamp(0, u16::MAX as i32) as u16);
+        warp.write_u16(instance.data[2].clamp(0, u16::MAX as i32) as u16);
+        warp.write_i16(-1);
+        world.send_to_session_owned(caster_sid, warp);
+
+        tracing::info!(
+            caster_sid,
+            skill_id = instance.skill_id,
+            warp_type,
+            zone_id = pos.zone_id,
+            dest_x,
+            dest_z,
+            "mage Blink applied"
+        );
+        return true;
+    }
 
     // WARP_RESURRECTION (1): teleport to bind point
     if warp_type == 1 {
@@ -8061,7 +8125,7 @@ mod tests {
         );
     }
 
-    /// Test war zone divides by 3 instead of 2.
+    /// Mage Type3 uses the same player-target divisor in every zone.
     #[test]
     fn test_compute_magic_damage_war_zone_halving() {
         let ch = make_test_character(103, 20, 20, 20, 20, 80); // mage
@@ -8072,16 +8136,10 @@ mod tests {
         let dmg_normal = compute_magic_damage(&ch, -500, 0, &ctx_normal, &mut rng1);
         let mut rng2 = rand::rngs::StdRng::seed_from_u64(42);
         let dmg_war = compute_magic_damage(&ch, -500, 0, &ctx_war, &mut rng2);
-        // War zone /3 vs non-war /2, so war < normal
-        assert!(
-            dmg_war < dmg_normal,
-            "War zone damage should be less: war={}, normal={}",
-            dmg_war,
-            dmg_normal
-        );
+        assert_eq!(dmg_war, dmg_normal);
     }
 
-    /// Test NPC target formula uses 555/515 constants.
+    /// Test NPC targets retain full PvE damage while players are divided by 3.
     #[test]
     fn test_compute_magic_damage_npc_target_formula() {
         let ch = make_test_character(103, 20, 20, 20, 20, 80); // mage
@@ -8262,7 +8320,7 @@ mod tests {
         // Expected contribution for rh=100, attr=0, level=60:
         //   rh_part = 100 * 0.8 + (100 * 60 / 60) = 80 + 100 = 180
         //   attr_part = 0
-        //   total = 180, after /2 = ~90
+        //   total = 180, player target /3 = ~60
         let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
         let dmg_rh100 = compute_magic_damage(&ch, -500, 0, &ctx, &mut rng1);
 
@@ -8273,8 +8331,8 @@ mod tests {
         // C++ negative domain: weapon makes damage more negative → more positive after negate
         let diff = dmg_rh100 - dmg_rh0;
         assert!(
-            (85..=95).contains(&diff),
-            "Weapon contribution for rh=100 should be ~90 after /2: diff={}",
+            (55..=65).contains(&diff),
+            "Weapon contribution for rh=100 should be ~60 after player /3: diff={}",
             diff
         );
     }
