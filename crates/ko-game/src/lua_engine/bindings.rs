@@ -3323,16 +3323,21 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
 
     // Look up skill in magic table to apply actual effects
     let magic = w.get_magic(skill_id as i32);
+    if magic.is_none() {
+        return Ok(false);
+    }
     let skill_type = magic.as_ref().and_then(|m| m.type1).unwrap_or(0) as i32;
 
     // Apply type 3 (heal/damage) effect if applicable
     let mut heal_amount: i32 = 0;
+    let mut effect_duration = 0;
+    let mut effect_speed = 0;
     if skill_type == 3 {
         if let Some(t3) = w.get_magic_type3(skill_id as i32) {
             let first_damage = t3.first_damage.unwrap_or(0);
-            if first_damage < 0 {
-                // Negative first_damage = heal in KO convention
-                heal_amount = first_damage.abs();
+            if first_damage > 0 {
+                // Positive Type3 damage is healing; negative values are damage.
+                heal_amount = first_damage;
                 let (old_hp, max_hp) = w
                     .with_session(sid, |h| h.character.as_ref().map(|ch| (ch.hp, ch.max_hp)))
                     .flatten()
@@ -3347,6 +3352,8 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
     // MagicInstance dispatches to ApplyType4 which registers ActiveBuff
     if skill_type == 4 {
         if let Some(t4) = w.get_magic_type4(skill_id as i32) {
+            effect_duration = t4.duration.unwrap_or(0).max(0) as u32;
+            effect_speed = t4.speed.unwrap_or(100).max(0) as u32;
             let s_skill = magic.as_ref().and_then(|m| m.skill).unwrap_or(0);
             let buff = crate::handler::magic_process::create_active_buff(
                 skill_id,
@@ -3362,7 +3369,13 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
                 s_skill,
                 skill_id,
             );
+            w.set_user_ability(sid);
+            w.send_item_move_refresh(sid);
+        } else {
+            return Ok(false);
         }
+    } else if skill_type != 3 || heal_amount == 0 {
+        return Ok(false);
     }
 
     // Broadcast MAGIC_EFFECTING from the NPC to the player
@@ -3373,11 +3386,11 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
     pkt.write_u32(npc_id);
     pkt.write_u32(sid as u32);
     pkt.write_u32(0); // sData[0]
-    pkt.write_u32(if heal_amount != 0 { 1 } else { 0 }); // sData[1] = success flag
+    pkt.write_u32(1); // sData[1] = effect successfully applied
     pkt.write_u32(0); // sData[2]
-    pkt.write_u32(heal_amount as u32); // sData[3] = heal/damage amount
+    pkt.write_u32(if skill_type == 4 { effect_duration } else { heal_amount as u32 });
     pkt.write_u32(0); // sData[4]
-    pkt.write_u32(0); // sData[5]
+    pkt.write_u32(effect_speed); // sData[5]: Type4 movement speed
     pkt.write_u32(0); // sData[6]
 
     // Use tokio::task::block_in_place to call async from sync context
@@ -6920,6 +6933,32 @@ mod tests {
         // NpcCastSkill is a stub — should not error
         assert!(lua.load("NpcCastSkill(1, 100)").exec().is_ok());
         assert!(lua.load("NpcCastSkill(1, 200, 3)").exec().is_ok());
+    }
+
+    #[test]
+    fn test_enchanter_level_cost_and_skill_selection() {
+        for (level, event, gold, expected_skill, expected_cost) in [
+            (35, 211, 0, 302344, 0),
+            (36, 211, 30000, 302344, 30000),
+            (61, 212, 50000, 302333, 50000),
+            (40, 223, 30000, 490223, 30000),
+            (40, 211, 29999, 0, 0),
+        ] {
+            let lua = Lua::new();
+            lua.load(format!(r#"
+                UID=1; EVENT={event}; level={level}; gold={gold}; skill=0; cost=0; casts=0;
+                function CheckLevel() return level end
+                function HowmuchItem(_, id) if id==900000000 then return gold else return 0 end end
+                function CastSkill(_, id) skill=id; casts=casts+1; return true end
+                function GoldLose(_, amount) cost=cost+amount end
+                function NpcMsg() end
+                function SelectMsg() end
+            "#)).exec().unwrap();
+            lua.load(include_str!("../../../../Quests/31508_NEnchant.lua")).exec().unwrap();
+            assert_eq!(lua.globals().get::<i32>("skill").unwrap(), expected_skill);
+            assert_eq!(lua.globals().get::<i32>("cost").unwrap(), expected_cost);
+            assert_eq!(lua.globals().get::<i32>("casts").unwrap(), i32::from(expected_skill != 0));
+        }
     }
 
     #[test]

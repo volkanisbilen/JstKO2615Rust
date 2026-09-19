@@ -1043,15 +1043,7 @@ async fn item_upgrade(
     }
 
     // ── Build response packet ──
-    let mut result = Packet::new(Opcode::WizItemUpgrade as u8);
-    result.write_u8(upgrade_type);
-    if b_result == UpgradeResult::Failed {
-        // C++ fail_return places the logos flag before bType/result. Keeping
-        // this order prevents the client from rolling failed upgrades back.
-        result.write_u8(if has_logos { 1 } else { 0 });
-    }
-    result.write_u8(b_type);
-    result.write_u8(b_result as u8);
+    let mut result = upgrade_response_header(upgrade_type, b_type, b_result, has_logos);
 
     let response_items = build_upgrade_response_items(&raw_items, &raw_slots, &result_items);
     for item in &response_items {
@@ -1062,6 +1054,23 @@ async fn item_upgrade(
 
     // FerihaLog: UpgradeInsertLog
     if b_type != UPGRADE_TYPE_PREVIEW {
+        // Send authoritative slot counts after the anvil animation response.
+        // This also clears destroyed items without reopening the inventory.
+        for source in &items {
+            if let Some(slot) = world.get_inventory_slot(sid, SLOT_MAX + source.slot as usize) {
+                let mut update = Packet::new(Opcode::WizItemCountChange as u8);
+                update.write_u16(1);
+                update.write_u8(1);
+                update.write_u8(source.slot as u8);
+                update.write_u32(if slot.item_id == 0 { source.item_id } else { slot.item_id });
+                update.write_u32(slot.count as u32);
+                update.write_u8(0);
+                update.write_u16(slot.durability as u16);
+                update.write_u32(0);
+                update.write_u32(slot.expire_time);
+                session.send_packet(&update).await?;
+            }
+        }
         let upgrade_type_str = if upgrade_type == ITEM_ACCESSORIES {
             "accessories"
         } else {
@@ -1082,14 +1091,18 @@ async fn item_upgrade(
     //   if (pItem.isnull() || isGM() || !pServerSetting.UpgradeNotice) return;
     //   if (!pItem.m_isUpgradeNotice) return;
     //   Packet(WIZ_LOGOSSHOUT, 0x02) << 0x05 << UpgradeResult << name << item_num << rank
-    if b_type != UPGRADE_TYPE_PREVIEW && !world.is_gm(sid) {
+    if b_type != UPGRADE_TYPE_PREVIEW {
         let notice_item_id = if b_result == UpgradeResult::Succeeded {
             new_item_id
         } else {
             origin_item_id
         };
         let notice_proto = world.get_item(notice_item_id);
-        let has_upgrade_notice = notice_proto
+        let high_class_success = b_result == UpgradeResult::Succeeded
+            && proto.item_class == Some(3)
+            && matches!(item_type, 4 | 5)
+            && (7..=9).contains(&(new_item_id % 10));
+        let has_upgrade_notice = high_class_success || notice_proto
             .as_ref()
             .and_then(|p| p.upgrade_notice)
             .unwrap_or(0)
@@ -1099,7 +1112,7 @@ async fn item_upgrade(
                 .get_server_settings()
                 .map(|s| s.upgrade_notice != 0)
                 .unwrap_or(false);
-            if upgrade_notice_enabled {
+            if upgrade_notice_enabled || high_class_success {
                 let player_name = world.get_session_name(sid).unwrap_or_default();
                 let rank = world.with_session(sid, |h| h.personal_rank).unwrap_or(0);
                 let notice = super::logosshout::build_upgrade_notice(
@@ -1197,6 +1210,19 @@ fn is_scroll_compatible(item_class: ScrollType, user_scroll: ScrollType) -> bool
 }
 
 /// Send a failure response packet.
+fn upgrade_response_header(upgrade_type: u8, mode: u8, result: UpgradeResult, logos: bool) -> Packet {
+    // 2625 sub_B99EB0 reads mode/result; sub_B95810 then reads the logos flag
+    // on a failed normal upgrade (subtype 2), before reading item slots.
+    let mut packet = Packet::new(Opcode::WizItemUpgrade as u8);
+    packet.write_u8(upgrade_type);
+    packet.write_u8(mode);
+    packet.write_u8(result as u8);
+    if upgrade_type == ITEM_UPGRADE && result == UpgradeResult::Failed {
+        packet.write_u8(u8::from(logos));
+    }
+    packet
+}
+
 async fn send_fail(
     session: &mut ClientSession,
     upgrade_type: u8,
@@ -1205,16 +1231,7 @@ async fn send_fail(
     logos: bool,
     items: &[UpgradeItem],
 ) -> anyhow::Result<()> {
-    let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-    pkt.write_u8(upgrade_type);
-
-    // C++ fail_return: logos flag comes before bType+bResult when result is Failed
-    if result == UpgradeResult::Failed {
-        pkt.write_u8(if logos { 1 } else { 0 });
-    }
-
-    pkt.write_u8(b_type);
-    pkt.write_u8(result as u8);
+    let mut pkt = upgrade_response_header(upgrade_type, b_type, result, logos);
 
     for item in items {
         pkt.write_i32(item.item_id as i32);
@@ -4176,17 +4193,13 @@ mod tests {
     }
 
     #[test]
-    fn test_upgrade_failure_packet_has_logos_before_result() {
-        let mut pkt = Packet::new(Opcode::WizItemUpgrade as u8);
-        pkt.write_u8(ITEM_UPGRADE);
-        pkt.write_u8(0); // logos flag
-        pkt.write_u8(UPGRADE_TYPE_NORMAL);
-        pkt.write_u8(UpgradeResult::Failed as u8);
-
-        assert_eq!(pkt.data[0], ITEM_UPGRADE);
-        assert_eq!(pkt.data[1], 0);
-        assert_eq!(pkt.data[2], UPGRADE_TYPE_NORMAL);
-        assert_eq!(pkt.data[3], UpgradeResult::Failed as u8);
+    fn test_upgrade_failure_matches_2625_parser() {
+        let pkt = upgrade_response_header(ITEM_UPGRADE, UPGRADE_TYPE_NORMAL, UpgradeResult::Failed, false);
+        assert_eq!(pkt.data, vec![ITEM_UPGRADE, UPGRADE_TYPE_NORMAL, 0, 0]);
+        let protected = upgrade_response_header(ITEM_UPGRADE, UPGRADE_TYPE_NORMAL, UpgradeResult::Failed, true);
+        assert_eq!(protected.data, vec![ITEM_UPGRADE, UPGRADE_TYPE_NORMAL, 0, 1]);
+        let accessory = upgrade_response_header(ITEM_ACCESSORIES, UPGRADE_TYPE_NORMAL, UpgradeResult::Failed, false);
+        assert_eq!(accessory.data, vec![ITEM_ACCESSORIES, UPGRADE_TYPE_NORMAL, 0]);
     }
 
     #[test]
