@@ -3316,10 +3316,8 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
     };
 
     let npc_id = event_npc.nid;
-    let npc_ai = match w.get_npc_ai(npc_id) {
-        Some(a) => a,
-        None => return Ok(false),
-    };
+    // Stationary service NPCs have no combat AI entry. Their instance already
+    // contains the zone/region needed to cast and broadcast support skills.
 
     // Look up skill in magic table to apply actual effects
     let magic = w.get_magic(skill_id as i32);
@@ -3354,9 +3352,9 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
             npc_id,
             sid,
             skill_id,
-            npc_ai.zone_id,
-            npc_ai.region_x,
-            npc_ai.region_z,
+            event_npc.zone_id,
+            event_npc.region_x,
+            event_npc.region_z,
             event_npc.event_room,
         ) {
             return Ok(false);
@@ -3388,9 +3386,9 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
             w.broadcast_to_3x3(
-                npc_ai.zone_id,
-                npc_ai.region_x,
-                npc_ai.region_z,
+                event_npc.zone_id,
+                event_npc.region_x,
+                event_npc.region_z,
                 Arc::new(pkt),
                 None,
                 npc_event_room,
@@ -6922,6 +6920,46 @@ mod tests {
         // NpcCastSkill is a stub — should not error
         assert!(lua.load("NpcCastSkill(1, 100)").exec().is_ok());
         assert!(lua.load("NpcCastSkill(1, 200, 3)").exec().is_ok());
+    }
+
+    #[test]
+    fn test_stationary_npc_casts_support_without_combat_ai() {
+        use ko_db::models::{MagicRow, MagicType4Row};
+        let (lua, world) = setup_lua_world();
+        setup_npc_for_lua(&world);
+        assert!(world.get_npc_ai(10001).is_none());
+        for (id, kind, attack, ac, speed) in [
+            (302344, 4, 110, 0, 100),
+            (302331, 2, 100, 100, 100),
+            (490223, 6, 100, 0, 150),
+            (500034, 4, 120, 0, 100),
+        ] {
+            world.insert_magic(MagicRow {
+                magic_num: id, en_name: None, kr_name: None, description: None,
+                t_1: None, before_action: None, target_action: None, self_effect: None,
+                flying_effect: None, target_effect: None, moral: Some(1), skill_level: None,
+                skill: None, msp: None, hp: None, s_sp: None, item_group: None,
+                use_item: None, cast_time: None, recast_time: None, success_rate: None,
+                type1: Some(4), type2: None, range: None, etc: None,
+                use_standing: None, skill_check: None, icelightrate: None,
+            });
+            world.insert_magic_type4(MagicType4Row {
+                i_num: id, buff_type: Some(kind), radius: None, duration: Some(600),
+                attack_speed: Some(100), speed: Some(speed), ac: Some(ac), ac_pct: Some(100),
+                attack: Some(attack), magic_attack: Some(100), max_hp: None,
+                max_hp_pct: None, max_mp: None, max_mp_pct: None,
+                str: None, sta: None, dex: None, intel: None, cha: None,
+                fire_r: None, cold_r: None, lightning_r: None, magic_r: None,
+                disease_r: None, poison_r: None, exp_pct: None, special_amount: None,
+                hit_rate: None, avoid_rate: None,
+            });
+            assert!(lua.load(format!("return CastSkill(1, {id})")).eval::<bool>().unwrap());
+            let buffs = world.get_active_buffs(1);
+            let applied = buffs.iter().find(|b| b.skill_id == id as u32).unwrap();
+            assert_eq!((applied.attack, applied.ac, applied.speed), (attack, ac, speed));
+        }
+        assert_eq!(world.get_buff_attack_amount(1), 120);
+        assert_eq!(world.get_buff_ac_amount(1), 100);
     }
 
     #[test]
