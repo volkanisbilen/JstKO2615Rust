@@ -13,15 +13,44 @@
 //! | u8    | Echo flag          |
 //! | u32le | Max HP             |
 //! | u32le | Current HP         |
-//! | u32le | Damage (0)         |
-//! | u32le | Reserved (0)       |
-//! | u8    | Reserved (0)       |
+//! | u32le | Source/attacker ID |
+//! | i32le | HP change/damage   |
+//! | u8    | Reserved (must be 0)|
 
 use ko_protocol::{Opcode, Packet, PacketReader};
 
 use crate::npc::NPC_BAND;
 use crate::session::{ClientSession, SessionState};
 use crate::zone::SessionId;
+
+/// Build the v2615 `WIZ_TARGET_HP` response.
+///
+/// `KnightOnLine_unpacked.exe` `0x817F60` reads the two trailing dwords as
+/// source ID followed by signed HP change. Its Ronark high-score path at
+/// `0x818103` passes the second dword to the score accumulator. Keeping this
+/// order in one builder prevents combat paths from silently sending score 0.
+///
+/// The final byte is reserved in the v2615 client. A non-zero value here was
+/// confirmed in `ko-server_20260821_195135.log` to make the client disconnect
+/// immediately after selecting a Ronark Land monster.
+pub(crate) fn build_target_hp_packet(
+    target_id: u32,
+    echo: u8,
+    max_hp: u32,
+    current_hp: u32,
+    source_id: u32,
+    hp_change: i32,
+) -> Packet {
+    let mut response = Packet::new(Opcode::WizTargetHp as u8);
+    response.write_u32(target_id);
+    response.write_u8(echo);
+    response.write_u32(max_hp);
+    response.write_u32(current_hp);
+    response.write_u32(source_id);
+    response.write_i32(hp_change);
+    response.write_u8(0);
+    response
+}
 
 /// Handle WIZ_TARGET_HP from the client.
 pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<()> {
@@ -39,26 +68,25 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
     let world = session.world().clone();
 
-    let (max_hp, current_hp) = if target_id >= NPC_BAND {
-        // Check bot first — bots use IDs >= BOT_ID_BASE (which is >= NPC_BAND)
-        if let Some(bot) = world.get_bot(target_id) {
-            (bot.max_hp as u32, bot.hp.max(0) as u32)
-        } else {
-            // NPC/Monster target
-            let instance = match world.get_npc_instance(target_id) {
-                Some(n) => n,
-                None => return Ok(()),
-            };
-            let template = match world.get_npc_template(instance.proto_id, instance.is_monster) {
-                Some(t) => t,
-                None => return Ok(()),
-            };
-            // Use actual NPC HP from world state (updated by combat)
-            let current = world
-                .get_npc_hp(target_id)
-                .unwrap_or(template.max_hp as i32);
-            (template.max_hp, current.max(0) as u32)
-        }
+    let (max_hp, current_hp) = if let Some(bot) = world.get_bot(target_id) {
+        // Resolve runtime bots before numeric bands. This remains correct if a
+        // future shard changes its bot ID allocation.
+        (bot.max_hp as u32, bot.hp.max(0) as u32)
+    } else if target_id >= NPC_BAND {
+        // NPC/Monster target
+        let instance = match world.get_npc_instance(target_id) {
+            Some(n) => n,
+            None => return Ok(()),
+        };
+        let template = match world.get_npc_template(instance.proto_id, instance.is_monster) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+        // Use actual NPC HP from world state (updated by combat)
+        let current = world
+            .get_npc_hp(target_id)
+            .unwrap_or(template.max_hp as i32);
+        (template.max_hp, current.max(0) as u32)
     } else {
         // Player target
         let other_sid = target_id as SessionId;
@@ -74,7 +102,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     world.update_session(sid, |h| h.target_id = target_id);
 
     // ── GM debug: show target info (NPC/monster ID, level, name) ────
-    if target_id >= NPC_BAND {
+    if world.get_bot(target_id).is_some() || target_id >= NPC_BAND {
         let is_gm = world
             .get_character_info(sid)
             .map(|c| c.authority == 0 || c.authority == 2)
@@ -105,14 +133,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         }
     }
 
-    let mut response = Packet::new(Opcode::WizTargetHp as u8);
-    response.write_u32(target_id);
-    response.write_u8(echo);
-    response.write_u32(max_hp);
-    response.write_u32(current_hp);
-    response.write_u32(0); // damage
-    response.write_u32(0); // reserved
-    response.write_u8(0); // reserved
+    let response = build_target_hp_packet(target_id, echo, max_hp, current_hp, 0, 0);
 
     session.send_packet(&response).await?;
 
@@ -208,15 +229,7 @@ mod tests {
 
     #[test]
     fn test_s2c_target_hp_response_format() {
-        // S2C: [u32 target_id] [u8 echo] [u32 max_hp] [u32 cur_hp] [u32 damage=0] [u32 reserved=0] [u8 reserved=0]
-        let mut pkt = Packet::new(Opcode::WizTargetHp as u8);
-        pkt.write_u32(10042); // target_id
-        pkt.write_u8(1); // echo
-        pkt.write_u32(5000); // max_hp
-        pkt.write_u32(3500); // current_hp
-        pkt.write_u32(0); // damage
-        pkt.write_u32(0); // reserved
-        pkt.write_u8(0); // reserved
+        let pkt = build_target_hp_packet(10042, 1, 5000, 3500, 77, -123);
 
         assert_eq!(pkt.data.len(), 22); // 4+1+4+4+4+4+1
 
@@ -225,8 +238,8 @@ mod tests {
         assert_eq!(r.read_u8(), Some(1));
         assert_eq!(r.read_u32(), Some(5000));
         assert_eq!(r.read_u32(), Some(3500));
-        assert_eq!(r.read_u32(), Some(0));
-        assert_eq!(r.read_u32(), Some(0));
+        assert_eq!(r.read_u32(), Some(77));
+        assert_eq!(r.read_i32(), Some(-123));
         assert_eq!(r.read_u8(), Some(0));
         assert_eq!(r.remaining(), 0);
     }
@@ -372,7 +385,10 @@ mod tests {
         pkt.write_u8(0); // reserved u8
 
         let mut r = PacketReader::new(&pkt.data);
-        r.read_u32(); r.read_u8(); r.read_u32(); r.read_u32();
+        r.read_u32();
+        r.read_u8();
+        r.read_u32();
+        r.read_u32();
         assert_eq!(r.read_u32(), Some(0), "damage always 0");
         assert_eq!(r.read_u32(), Some(0), "reserved u32 always 0");
         assert_eq!(r.read_u8(), Some(0), "reserved u8 always 0");

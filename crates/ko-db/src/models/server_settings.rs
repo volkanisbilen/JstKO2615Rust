@@ -44,6 +44,7 @@ pub struct ServerSettingsRow {
     pub max_blessing_up_reb: i16,
     pub give_genie_hour: i16,
     pub game_version: i16,
+    pub launcher_version: i16,
     pub patch_url: String,
     pub patch_path: String,
 }

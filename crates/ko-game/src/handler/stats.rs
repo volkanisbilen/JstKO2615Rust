@@ -26,8 +26,6 @@ use crate::world::CharacterInfo;
 
 /// Maximum stat value (`STAT_MAX` from `globals.h:747`).
 const STAT_MAX: u8 = 255;
-/// WIZ_POINT_CHANGE sub-opcode for stat increase response (v2600 sniff verified).
-const STAT_INCREASE: u8 = 3;
 
 /// Skill point category range — valid types for SkillPointChange.
 const SKILLPT_CAT1: u8 = 5;
@@ -92,10 +90,10 @@ pub async fn handle_point_change(session: &mut ClientSession, pkt: Packet) -> an
     };
 
     // Build response — v2600 sniff verified format:
-    // [u8 sub=0x03] [u16 new_stat] [u16 max_hp] [u16 hp] [u16 max_mp] [u32 max_weight]
+    // [u8 stat_type] [u16 new_stat] [u16 max_hp] [u16 hp] [u16 max_mp] [u32 max_weight]
     // Note: v2600 omits total_hit and current_mp vs older C++ format
     let mut resp = Packet::new(Opcode::WizPointChange as u8);
-    resp.write_u8(STAT_INCREASE); // sub-opcode echo (0x03), not stat_type
+    resp.write_u8(stat_type);
     resp.write_u16(new_stat_value as u16);
     resp.write_u16(final_max_hp as u16);
     resp.write_u16(final_hp as u16);
@@ -434,9 +432,9 @@ mod tests {
     #[test]
     fn test_point_change_response_format() {
         // v2600 sniff verified format:
-        // [u8 sub=0x03] [u16 new_stat] [u16 max_hp] [u16 hp] [u16 max_mp] [u32 max_weight]
+        // [u8 stat_type] [u16 new_stat] [u16 max_hp] [u16 hp] [u16 max_mp] [u32 max_weight]
         let mut pkt = Packet::new(Opcode::WizPointChange as u8);
-        pkt.write_u8(3); // sub = STAT_INCREASE
+        pkt.write_u8(3); // stat_type
         pkt.write_u16(66); // new stat value
         pkt.write_u16(500); // max_hp
         pkt.write_u16(480); // hp

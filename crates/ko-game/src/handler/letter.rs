@@ -143,7 +143,7 @@ async fn handle_list(
 
     for letter in &letters {
         response.write_u32(letter.letter_id as u32);
-        response.write_u8(u8::from(letter.b_status));
+        response.write_u8(letter.b_status as u8);
         // SByte strings for subject and sender (C++ uses SByte mode)
         response.write_sbyte_string(&letter.subject);
         response.write_sbyte_string(&letter.sender_name);

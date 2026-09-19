@@ -53,9 +53,12 @@ fn process_dot_tick(world: &WorldState) {
         let hp_change = *hp_change;
         let expired = *expired;
 
-        let (ch, pos) = match world.with_session(sid, |h| {
-            h.character.as_ref().map(|c| (c.clone(), h.position))
-        }).flatten() {
+        let (ch, pos) = match world
+            .with_session(sid, |h| {
+                h.character.as_ref().map(|c| (c.clone(), h.position))
+            })
+            .flatten()
+        {
             Some(v) => v,
             None => continue,
         };
@@ -72,7 +75,8 @@ fn process_dot_tick(world: &WorldState) {
         // Skip DOT damage in temple event zones when combat is not allowed.
         // The DOT still ticks (tick_count advances, DOT expires normally) but
         // no HP change is applied during non-combat event phases.
-        if !is_event_attackable && hp_change < 0 && event_room::is_in_temple_event_zone(pos.zone_id) {
+        if !is_event_attackable && hp_change < 0 && event_room::is_in_temple_event_zone(pos.zone_id)
+        {
             // Even if skipping HP application, still send expiry packets
             if expired {
                 send_dot_expired_packet(world, sid, hp_change);
@@ -195,6 +199,60 @@ fn process_dot_tick(world: &WorldState) {
     let npc_ticks = world.process_npc_dot_tick();
 
     for (npc_id, total_damage, caster_sid) in npc_ticks {
+        // Runtime bots intentionally reuse the NPC DOT registry because their
+        // protocol IDs are in NPC_BAND. They are not present in npc_instances,
+        // so process them before the ordinary NPC lookup below.
+        if let Some(bot) = world.get_bot(npc_id) {
+            if !bot.is_alive() {
+                world.clear_npc_dots(npc_id);
+                continue;
+            }
+
+            if !is_event_attackable
+                && total_damage < 0
+                && event_room::is_in_temple_event_zone(bot.zone_id)
+            {
+                continue;
+            }
+
+            let new_hp = (bot.hp as i32 + total_damage).clamp(0, bot.max_hp as i32) as i16;
+            world.update_bot(npc_id, |target| {
+                target.hp = new_hp;
+                if total_damage < 0 {
+                    target.last_attacker_id = caster_sid as i32;
+                }
+            });
+            crate::systems::bot_ai::broadcast_bot_party_hp(world, npc_id);
+
+            let hp_pkt = crate::handler::target_hp::build_target_hp_packet(
+                npc_id,
+                0,
+                bot.max_hp as u32,
+                new_hp as u32,
+                caster_sid as u32,
+                total_damage,
+            );
+            world.send_to_session_owned(caster_sid, hp_pkt);
+
+            if new_hp <= 0 {
+                crate::systems::bot_ai::bot_on_death(
+                    world,
+                    npc_id,
+                    crate::systems::bot_ai::tick_ms(),
+                );
+            }
+
+            tracing::debug!(
+                bot_id = npc_id,
+                caster_sid,
+                damage = -total_damage,
+                hp = new_hp,
+                max_hp = bot.max_hp,
+                "runtime bot DOT tick"
+            );
+            continue;
+        }
+
         let npc_hp = match world.get_npc_hp(npc_id) {
             Some(hp) if hp > 0 => hp,
             _ => {
@@ -250,14 +308,14 @@ fn process_dot_tick(world: &WorldState) {
             // Send HP bar update to caster
             if let Some(npc) = world.get_npc_instance(npc_id) {
                 if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-                    let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-                    hp_pkt.write_u32(npc_id);
-                    hp_pkt.write_u8(0);
-                    hp_pkt.write_u32(tmpl.max_hp);
-                    hp_pkt.write_u32(new_hp as u32);
-                    hp_pkt.write_u32(0);
-                    hp_pkt.write_u32(0);
-                    hp_pkt.write_u8(0);
+                    let hp_pkt = crate::handler::target_hp::build_target_hp_packet(
+                        npc_id,
+                        0,
+                        tmpl.max_hp,
+                        new_hp as u32,
+                        caster_sid as u32,
+                        total_damage,
+                    );
                     world.send_to_session_owned(caster_sid, hp_pkt);
                 }
             }
@@ -294,6 +352,8 @@ fn send_dot_expired_packet(world: &WorldState, sid: u16, hp_amount: i16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::systems::bot_ai::{spawn_gm_bot, SpawnGmBotParams};
+    use crate::world::BotAiState;
     use crate::world::NpcDotSlot;
 
     #[test]
@@ -315,6 +375,42 @@ mod tests {
         assert_eq!(slot.tick_count, 0);
         assert_eq!(slot.tick_limit, 5);
         assert_eq!(slot.caster_sid, 1);
+    }
+
+    #[test]
+    fn test_runtime_bot_poison_tick_updates_hp() {
+        let world = WorldState::new();
+        let bot_id = spawn_gm_bot(
+            &world,
+            SpawnGmBotParams {
+                zone_id: 71,
+                x: 1054.0,
+                y: 60.0,
+                z: 1082.0,
+                class: 1,
+                level: 83,
+                nation: 2,
+                ai_state: BotAiState::Pk,
+            },
+        );
+        world.update_bot(bot_id, |bot| {
+            bot.hp = 100;
+            bot.max_hp = 100;
+        });
+        world.add_npc_dot(
+            bot_id,
+            NpcDotSlot {
+                skill_id: 109518,
+                hp_amount: -10,
+                tick_count: 0,
+                tick_limit: 3,
+                caster_sid: 1,
+            },
+        );
+
+        process_dot_tick(&world);
+
+        assert_eq!(world.get_bot(bot_id).unwrap().hp, 90);
     }
 
     #[test]

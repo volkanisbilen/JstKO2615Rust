@@ -873,7 +873,10 @@ mod tests {
         assert_eq!(ZoneAbilityType::from_i16(0), ZoneAbilityType::Neutral);
         assert_eq!(ZoneAbilityType::from_i16(1), ZoneAbilityType::PvP);
         assert_eq!(ZoneAbilityType::from_i16(2), ZoneAbilityType::Spectator);
-        assert_eq!(ZoneAbilityType::from_i16(7), ZoneAbilityType::CaitharosArena);
+        assert_eq!(
+            ZoneAbilityType::from_i16(7),
+            ZoneAbilityType::CaitharosArena
+        );
         assert_eq!(ZoneAbilityType::from_i16(99), ZoneAbilityType::Neutral); // unknown defaults
     }
 

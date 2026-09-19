@@ -27,10 +27,25 @@ use tracing::{debug, warn};
 use crate::handler::zone_change;
 use crate::session::{ClientSession, SessionState};
 use crate::systems::war::{NATION_BATTLE, SIEGE_BATTLE};
-use crate::world::types::{ZONE_ARDREAM, ZONE_RONARK_LAND, ZONE_RONARK_LAND_BASE};
+use crate::world::types::{
+    ZONE_ARDREAM, ZONE_ELMORAD_ESLANT, ZONE_KARUS_ESLANT, ZONE_RONARK_LAND, ZONE_RONARK_LAND_BASE,
+};
 
 /// Default max users per zone (`m_sMaxUser`, not yet stored in our zone model).
 const DEFAULT_MAX_USERS: u16 = 150;
+
+/// Resolve the two legacy Eslant destinations stored in the active v2615 SMDs.
+fn effective_warp_destination(warp_id: i16, raw_zone: i16, nation: u8) -> u16 {
+    match (warp_id, raw_zone) {
+        (153, 19) => ZONE_KARUS_ESLANT,
+        (253, 19) => ZONE_ELMORAD_ESLANT,
+        (_, 11 | 13 | 14) => ZONE_KARUS_ESLANT,
+        (_, 12 | 15 | 16) => ZONE_ELMORAD_ESLANT,
+        (_, 19) if nation == 1 => ZONE_KARUS_ESLANT,
+        (_, 19) if nation == 2 => ZONE_ELMORAD_ESLANT,
+        _ => raw_zone.max(0) as u16,
+    }
+}
 
 use crate::npc_type_constants::MAX_OBJECT_RANGE;
 use crate::object_event_constants::OBJECT_WARP_GATE;
@@ -70,9 +85,12 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let sid = session.session_id();
 
     // Basic validation: player must be alive and in-game
-    let (pos, char_info) = match world.with_session(sid, |h| {
-        h.character.as_ref().map(|c| (h.position, c.clone()))
-    }).flatten() {
+    let (pos, char_info) = match world
+        .with_session(sid, |h| {
+            h.character.as_ref().map(|c| (h.position, c.clone()))
+        })
+        .flatten()
+    {
         Some(v) => v,
         None => {
             send_select_fail(session).await?;
@@ -159,8 +177,11 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         return Ok(());
     }
 
-    // Verify destination zone exists and is active
-    match world.get_zone(warp.dest_zone as u16) {
+    let effective_dest_zone =
+        effective_warp_destination(warp.warp_id, warp.dest_zone, char_info.nation);
+
+    // Validate after resolving v2615's legacy zone-19 Eslant destination.
+    match world.get_zone(effective_dest_zone) {
         Some(z) => {
             let status = z.zone_info.as_ref().map(|i| i.status).unwrap_or(1);
             if status == 0 {
@@ -173,15 +194,6 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             return Ok(());
         }
     }
-
-    // Eslant zone redirect — all Eslant variants redirect to ZONE_KARUS_ESLANT (11).
-    //   if (isInKarusEslant(zoneid) || isInElmoradEslant(zoneid))
-    //       zoneid = ZONE_KARUS_ESLANT;
-    // Karus Eslant: 11, 13, 14 — Elmorad Eslant: 12, 15, 16
-    let effective_dest_zone = match warp.dest_zone {
-        11..=16 => 11u16, // All Eslant variants → zone 11
-        z => z as u16,
-    };
 
     // Add random offset within warp radius
     let (dest_x, dest_z, dest_zone) = {
@@ -244,9 +256,12 @@ pub async fn send_warp_list(session: &mut ClientSession, warp_group: i32) -> any
     let world = session.world().clone();
     let sid = session.session_id();
 
-    let (pos, char_info) = match world.with_session(sid, |h| {
-        h.character.as_ref().map(|c| (h.position, c.clone()))
-    }).flatten() {
+    let (pos, char_info) = match world
+        .with_session(sid, |h| {
+            h.character.as_ref().map(|c| (h.position, c.clone()))
+        })
+        .flatten()
+    {
         Some(v) => v,
         None => return Ok(false),
     };
@@ -270,8 +285,11 @@ pub async fn send_warp_list(session: &mut ClientSession, warp_group: i32) -> any
             continue;
         }
 
-        // Destination zone must exist and be active
-        match world.get_zone(warp.dest_zone as u16) {
+        let effective_dest_zone =
+            effective_warp_destination(warp.warp_id, warp.dest_zone, char_info.nation);
+
+        // Destination zone must exist and be active after legacy resolution.
+        match world.get_zone(effective_dest_zone) {
             Some(z) => {
                 let status = z.zone_info.as_ref().map(|i| i.status).unwrap_or(1);
                 if status == 0 {
@@ -282,7 +300,7 @@ pub async fn send_warp_list(session: &mut ClientSession, warp_group: i32) -> any
         }
 
         // Battle zone filter: hide Ardream/Ronark warps based on active battle type
-        let dz = warp.dest_zone as u16;
+        let dz = effective_dest_zone;
         if battle.battle_open == NATION_BATTLE || battle.battle_open == SIEGE_BATTLE {
             let is_battle_zone =
                 dz == ZONE_ARDREAM || dz == ZONE_RONARK_LAND_BASE || dz == ZONE_RONARK_LAND;
@@ -298,7 +316,7 @@ pub async fn send_warp_list(session: &mut ClientSession, warp_group: i32) -> any
     }
 
     // Sort by zone ID (C++ sorts by sZone)
-    entries.sort_by_key(|w| w.dest_zone);
+    entries.sort_by_key(|w| effective_warp_destination(w.warp_id, w.dest_zone, char_info.nation));
 
     // Build the response packet
     let mut result = Packet::new(Opcode::WizWarpList as u8);
@@ -309,7 +327,11 @@ pub async fn send_warp_list(session: &mut ClientSession, warp_group: i32) -> any
         result.write_u16(warp.warp_id as u16);
         result.write_string(&warp.name);
         result.write_string(&warp.announce);
-        result.write_u16(warp.dest_zone as u16);
+        result.write_u16(effective_warp_destination(
+            warp.warp_id,
+            warp.dest_zone,
+            char_info.nation,
+        ));
         result.write_u16(DEFAULT_MAX_USERS);
         result.write_u32(warp.pay);
     }
@@ -338,6 +360,14 @@ async fn send_select_fail(session: &mut ClientSession) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use ko_protocol::{Opcode, Packet, PacketReader};
+
+    #[test]
+    fn v2615_legacy_eslant_warps_resolve_by_nation() {
+        assert_eq!(effective_warp_destination(153, 19, 1), ZONE_KARUS_ESLANT);
+        assert_eq!(effective_warp_destination(253, 19, 2), ZONE_ELMORAD_ESLANT);
+        assert_eq!(effective_warp_destination(999, 14, 1), ZONE_KARUS_ESLANT);
+        assert_eq!(effective_warp_destination(999, 16, 2), ZONE_ELMORAD_ESLANT);
+    }
 
     #[test]
     fn test_get_warp_list_packet_format() {

@@ -71,6 +71,15 @@ impl GameServer {
             warn!("Failed to reset concurrent user count: {}", e);
         }
 
+        // Native v2615 panels are always available after a server restart.
+        // GM open/close commands remain effective for the current runtime.
+        let native_repo =
+            ko_db::repositories::native_events::NativeEventsRepository::new(&self.pool);
+        match native_repo.activate_all().await {
+            Ok(count) => info!("Native client events activated at startup: {} rows", count),
+            Err(e) => warn!("Failed to activate native client events at startup: {}", e),
+        }
+
         let listener = TcpListener::bind(&self.config.bind_addr).await?;
         info!("Listening on {}", self.config.bind_addr);
 
@@ -79,6 +88,12 @@ impl GameServer {
 
         // Spawn random boss monsters at startup.
         self.world.random_boss_system_load();
+
+        // Chaos Stone table loading only creates event state. Materialise the
+        // enabled stones now so Ronark Land/Ardream contain their rank-1 NPCs.
+        let chaos_stone_count =
+            crate::systems::chaos_stone_tick::spawn_initial_chaos_stones(&self.world);
+        info!("Initial Chaos Stones spawned: {}", chaos_stone_count);
 
         // Start background tick systems — collect handles for clean shutdown.
         let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -149,6 +164,14 @@ impl GameServer {
         ));
         info!("Timed notice system started");
 
+        bg_tasks.push(
+            crate::systems::letter_admin_notify::start_letter_admin_notify_task(
+                self.world.clone(),
+                self.pool.clone(),
+            ),
+        );
+        info!("Letter admin realtime notification started (500ms interval)");
+
         bg_tasks.push(crate::systems::pet_tick::start_pet_tick_task(
             self.world.clone(),
         ));
@@ -198,6 +221,15 @@ impl GameServer {
         ));
         info!("Zone online reward tick started (10s interval)");
 
+        // DB bot definitions are loaded above, but are materialised only by an
+        // explicit GM command. Starting thousands of bots automatically makes
+        // a development client unusable and differs from the reference flow.
+        info!(
+            templates = self.world.get_all_bot_templates().len(),
+            merchant_stalls = self.world.get_all_bot_merchant_data().len(),
+            active = self.world.bot_count(),
+            "DB bot definitions ready — manual GM spawn only"
+        );
         bg_tasks.push(crate::systems::bot_ai::start_bot_ai_task(
             self.world.clone(),
         ));

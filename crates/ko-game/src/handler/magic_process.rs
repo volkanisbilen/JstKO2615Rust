@@ -43,10 +43,10 @@ use crate::inventory_constants::{LEFTHAND, RIGHTHAND};
 use crate::magic_constants::{
     ABNORMAL_BLINKING, ABNORMAL_DWARF, ABNORMAL_GIANT, ABNORMAL_GIANT_TARGET, ABNORMAL_NORMAL,
     MAGIC_CANCEL, MAGIC_CANCEL2, MAGIC_CANCEL_TRANSFORMATION, MAGIC_CASTING,
-    MAGIC_DURATION_EXPIRED, MAGIC_EFFECTING, MAGIC_FAIL, MAGIC_FLYING, MAGIC_TYPE4_EXTEND,
-    MORAL_ALL, MORAL_AREA_ALL, MORAL_AREA_ENEMY, MORAL_AREA_FRIEND, MORAL_ENEMY,
-    MORAL_FRIEND_EXCEPTME, MORAL_FRIEND_WITHME, MORAL_PARTY, MORAL_PARTY_ALL, MORAL_SELF,
-    MORAL_SELF_AREA, SKILLMAGIC_FAIL_ATTACKZERO, SKILLMAGIC_FAIL_NOEFFECT,
+    MAGIC_DURATION_EXPIRED, MAGIC_EFFECTING, MAGIC_FAIL, MAGIC_FLYING, MAGIC_TRANSFORM_LIST,
+    MAGIC_TYPE4_EXTEND, MORAL_ALL, MORAL_AREA_ALL, MORAL_AREA_ENEMY, MORAL_AREA_FRIEND,
+    MORAL_ENEMY, MORAL_FRIEND_EXCEPTME, MORAL_FRIEND_WITHME, MORAL_PARTY, MORAL_PARTY_ALL,
+    MORAL_SELF, MORAL_SELF_AREA, SKILLMAGIC_FAIL_ATTACKZERO, SKILLMAGIC_FAIL_NOEFFECT,
 };
 use crate::npc_type_constants::{
     NPC_BIFROST_MONUMENT, NPC_BORDER_MONUMENT, NPC_CLAN_WAR_MONUMENT, NPC_DESTROYED_ARTIFACT,
@@ -54,10 +54,15 @@ use crate::npc_type_constants::{
     NPC_OBJECT_FLAG, NPC_PARTNER_TYPE, NPC_PHOENIX_GATE, NPC_PRISON, NPC_PVP_MONUMENT, NPC_REFUGEE,
     NPC_SOCCER_BAAL, NPC_SPECIAL_GATE, NPC_TREE, NPC_VICTORY_GATE,
 };
-use crate::state_change_constants::{STATE_CHANGE_ABNORMAL, STATE_CHANGE_WEAPONS_DISABLED};
+use crate::state_change_constants::{
+    STATE_CHANGE_ABNORMAL, STATE_CHANGE_TRANSFORMATION, STATE_CHANGE_WEAPONS_DISABLED,
+};
 
 /// Snow Battle event snowball skill — only this skill is allowed during Snow Battle.
 const SNOW_EVENT_SKILL: u32 = 490077;
+
+/// GM test damage override for direct skill hits.
+const GM_FIXED_DAMAGE: i16 = 30000;
 
 use crate::npc::NPC_BAND;
 
@@ -68,6 +73,7 @@ use crate::magic_constants::{TRANSFORMATION_MONSTER, TRANSFORMATION_NPC, TRANSFO
 /// Parsed WIZ_MAGIC_PROCESS packet — mirrors `MagicInstance`.
 /// C++ stores caster/target as `int32` — we must preserve the full 32-bit values
 /// to avoid truncation when broadcasting back to clients.
+#[derive(Clone, Copy)]
 struct MagicInstance {
     #[allow(dead_code)]
     opcode: u8,
@@ -98,6 +104,17 @@ impl MagicInstance {
     }
 }
 
+fn gm_fixed_skill_damage(world: &WorldState, caster_sid: SessionId, damage: i16) -> i16 {
+    if world
+        .get_character_info(caster_sid)
+        .is_some_and(|ch| ch.authority == 0)
+    {
+        GM_FIXED_DAMAGE
+    } else {
+        damage
+    }
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────
 
 /// Handle WIZ_MAGIC_PROCESS (0x31) from the client.
@@ -124,6 +141,29 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         *d = reader.read_u32().unwrap_or(0) as i32;
     }
 
+    // v2615 sends transformation cancellation as a one-byte sub-packet.
+    // Handle it before skill/caster validation because those fields are absent.
+    if b_opcode == MAGIC_CANCEL_TRANSFORMATION {
+        cancel_transformation(&world, sid);
+        return Ok(());
+    }
+
+    // Pet summon skill: Type 9 state_change=8 is not stealth.
+    // Route it to the runtime pet NPC spawn path.
+    if skill_id == 500117 && b_opcode == MAGIC_EFFECTING {
+        let empty_data: [u8; 0] = [];
+        let mut pet_reader = PacketReader::new(&empty_data);
+
+        crate::handler::pet::handle_normal_mode(
+            session,
+            2, // MODE_SUMMON
+            &mut pet_reader,
+        )
+        .await?;
+
+        return Ok(());
+    }
+
     // ── Basic validation ────────────────────────────────────────────
 
     // Skill ID 0 = invalid
@@ -146,7 +186,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     // v2600: target_id is u32 (NOT truncated to i16 like old C++ server).
     // PCAP verified: NPC target IDs like 49886 exceed i16 range.
     // -1 (no target) is sent as 0xFFFFFFFF which maps to -1 as i32.
-    let target_id = target_id_raw;
+    let mut target_id = target_id_raw;
 
     // ── Special skill target validation ──────────────────────────────
     // Skills 109035/110035/209035/210035 must have target=-1 (no target).
@@ -170,6 +210,26 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             return Ok(());
         }
     };
+    let is_unlocked_manes_magic = world
+        .manes_survival_manager
+        .has_unlocked_magic(sid, skill_id);
+    let is_manes_offensive_magic = is_unlocked_manes_magic
+        && matches!(
+            skill.moral.unwrap_or(0),
+            MORAL_ENEMY | MORAL_AREA_ENEMY | MORAL_ALL | MORAL_AREA_ALL
+        );
+
+    // Ground-target AOE packets from v2615 may encode "no entity target" as
+    // 0 instead of -1.  Entity validation below would otherwise interpret 0
+    // as a player session and reject Inferno/Nova before Type3 execution.
+    if target_id == 0
+        && matches!(
+            skill.moral.unwrap_or(0),
+            MORAL_AREA_ENEMY | MORAL_AREA_FRIEND | MORAL_AREA_ALL
+        )
+    {
+        target_id = -1;
+    }
 
     let mut instance = MagicInstance {
         opcode: b_opcode,
@@ -386,7 +446,12 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     //   if (pCaster && (pCaster->isInEnemySafetyArea() && nSkillID < 400000))
     //       return SkillUseFail;
     if skill_id < 400000
-        && crate::handler::attack::is_in_enemy_safety_area(caster_pos.zone_id, caster_pos.x, caster_pos.z, caster.nation)
+        && crate::handler::attack::is_in_enemy_safety_area(
+            caster_pos.zone_id,
+            caster_pos.x,
+            caster_pos.z,
+            caster.nation,
+        )
     {
         let fail_pkt = build_skill_failed_packet(skill_id, caster_id, target_id, &s_data);
         world.send_to_session_owned(sid, fail_pkt);
@@ -399,7 +464,8 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     let skill_type = skill.type1.unwrap_or(0) as u8;
     let (has_instant_cast, on_cooldown) = world
         .with_session(sid, |h| {
-            let cd = h.skill_cooldowns
+            let cd = h
+                .skill_cooldowns
                 .get(&skill_id)
                 .map(|expiry| std::time::Instant::now() < *expiry)
                 .unwrap_or(false);
@@ -407,7 +473,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         })
         .unwrap_or((false, false));
     if skill_type != 9
-        && !has_instant_cast
+        && (!has_instant_cast || is_manes_offensive_magic)
         && b_opcode != MAGIC_TYPE4_EXTEND
         && b_opcode != MAGIC_CANCEL
         && b_opcode != MAGIC_CANCEL2
@@ -430,7 +496,11 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         let type2 = skill.type2.unwrap_or(0) as u8;
         let item_group = skill.item_group.unwrap_or(0) as u8;
         let valid_type = matches!(type1, 1 | 3 | 4 | 5 | 6 | 7);
-        if valid_type && skill_id < 400000 && item_group != 255 && b_opcode != MAGIC_FAIL {
+        if valid_type
+            && (skill_id < 400000 || is_unlocked_manes_magic)
+            && item_group != 255
+            && b_opcode != MAGIC_FAIL
+        {
             // C++ MagicInstance.cpp:1744-1747,1980 — existspeed bypass for bType[0] only
             // pType4 is only set when bType[0]==4 && bType[1]==0; otherwise nullptr.
             let existspeed = b_opcode == MAGIC_TYPE4_EXTEND
@@ -465,6 +535,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         && b_opcode != MAGIC_CANCEL_TRANSFORMATION
         && skill_id < 300000
         && caster.nation != (skill_id / 100000) as u8
+        && !is_unlocked_manes_magic
     {
         let fail_pkt = instance.build_fail_packet();
         world.send_to_session_owned(sid, fail_pkt);
@@ -497,7 +568,11 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     {
         let s_skill = skill.skill.unwrap_or(0);
         let iclass = s_skill / 10;
-        if s_skill != 0 && iclass != 0 && !check_skill_class(iclass, caster.class) {
+        if s_skill != 0
+            && iclass != 0
+            && !check_skill_class(iclass, caster.class)
+            && !is_unlocked_manes_magic
+        {
             let fail_pkt = instance.build_fail_packet();
             world.send_to_session_owned(sid, fail_pkt);
             return Ok(());
@@ -513,7 +588,14 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     if instance.target_id != -1 {
         if (instance.target_id as u32) >= NPC_BAND {
             let npc_id = instance.target_id as u32;
-            if world.is_npc_dead(npc_id) {
+            // Runtime bots are visible as user models but deliberately take
+            // the NPC combat path. They have no entry in `npc_hp`, where a
+            // missing entry means dead; resolve their own live state first.
+            let target_is_dead = world
+                .get_bot(npc_id)
+                .map(|bot| bot.hp <= 0 || bot.presence == crate::world::BotPresence::Dead)
+                .unwrap_or_else(|| world.is_npc_dead(npc_id));
+            if target_is_dead {
                 return Ok(());
             }
         } else {
@@ -536,7 +618,10 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             let npc_id = instance.target_id as u32;
             if let Some(npc) = world.get_npc_instance(npc_id) {
                 if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-                    if tmpl.group == 3 {
+                    // Runtime event NPCs may override their template nation.
+                    // Monster Stone support NPCs are sent as neutral nation 3
+                    // without mutating their global map templates.
+                    if tmpl.group == 3 || npc.nation == 3 {
                         let fail_pkt = instance.build_fail_packet();
                         world.send_to_session_owned(sid, fail_pkt);
                         return Ok(());
@@ -664,7 +749,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             // Type2 skills consume arrows (bNeedArrow count, or 1 for throwing knives).
             // If the skill has a use_item (arrow/knife), check inventory and consume.
             let use_item = skill.use_item.unwrap_or(0) as u32;
-            if use_item != 0 {
+            if use_item != 0 && !is_unlocked_manes_magic {
                 if let Some(type2) = world.get_magic_type2(skill_id as i32) {
                     let mut count = type2.need_arrow.unwrap_or(0) as u16;
                     // Throwing knives: NeedArrow=0 means consume 1
@@ -704,6 +789,31 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
         MAGIC_EFFECTING => {
             // Phase 3: Execute the actual skill effect
 
+            // v2615 transformation-selection items first request the client list.
+            // These rows use type1=0, type2!=0 and a non-zero item ID.
+            if skill.type1.unwrap_or(0) == 0
+                && skill.type2.unwrap_or(0) != 0
+                && skill.use_item.unwrap_or(0) != 0
+                && !matches!(caster_pos.zone_id, 71..=73)
+            {
+                let required_item = skill.use_item.unwrap_or(0) as u32;
+                if world.check_exist_item(sid, required_item, 1) {
+                    let mut list_pkt = Packet::new(Opcode::WizMagicProcess as u8);
+                    list_pkt.write_u8(MAGIC_TRANSFORM_LIST);
+                    list_pkt.write_u32(skill_id);
+                    world.send_to_session_owned(sid, list_pkt);
+                    tracing::info!(
+                        "[sid={}] MagicProcess: opened transformation list skill={} item={}",
+                        sid,
+                        skill_id,
+                        required_item,
+                    );
+                } else {
+                    world.send_to_session_owned(sid, instance.build_fail_packet());
+                }
+                return Ok(());
+            }
+
             // ── Cast position validation ──────────────────────────────
             // If the skill has NO flying effect, validate position on EFFECTING phase.
             if skill.flying_effect.unwrap_or(0) == 0 {
@@ -715,6 +825,29 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
                             return Ok(());
                         }
                     }
+                }
+            }
+
+            // MANES_MAGIC contains several offensive rows with zero/very short
+            // recast values because the original Survival runtime supplies its
+            // own gate. Enforce that gate server-side and retain a real miss
+            // chance instead of allowing guaranteed 150ms damage spam.
+            if is_manes_offensive_magic {
+                const MANES_MIN_RECAST_MS: u64 = 900;
+                let success_rate = skill.success_rate.unwrap_or(100).clamp(1, 85) as u32;
+                let landed = rand::thread_rng().gen_range(1..=100) <= success_rate;
+                if !landed {
+                    let now = std::time::Instant::now();
+                    world.update_session(sid, |h| {
+                        h.skill_cooldowns.insert(
+                            skill_id,
+                            now + std::time::Duration::from_millis(MANES_MIN_RECAST_MS),
+                        );
+                    });
+                    instance.data[3] = SKILLMAGIC_FAIL_ATTACKZERO;
+                    world.send_to_session_owned(sid, instance.build_fail_packet());
+                    tracing::debug!(sid, skill_id, success_rate, "Manes offensive skill missed");
+                    return Ok(());
                 }
             }
 
@@ -752,7 +885,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             // Before executing the skill, verify the player has the required
             // consumable item. Type 2 (archer) and type 6 skills skip this.
             // Arrow items (391010000) are already consumed in MAGIC_FLYING.
-            if skill_type != 2 && skill_type != 6 {
+            if skill_type != 2 && skill_type != 6 && !is_unlocked_manes_magic {
                 let use_item_pre = skill.use_item.unwrap_or(0) as u32;
                 if use_item_pre != 0 && use_item_pre != 391010000 {
                     let consume_id = resolve_consume_item(&skill);
@@ -774,16 +907,22 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
             // ── Consume item after successful cast ──────────────────
             // Called for all non-type2 skills (type2 = heal/buff, no item consumed)
-            if skill_type != 2 {
+            if skill_type != 2 && !is_unlocked_manes_magic {
                 consume_item(&world, sid, &skill);
             }
 
             // ── Set cooldown after successful cast ──────────────────
             // Formula: expiry = UNIXTIME2 + (sReCastTime * 90)ms
             let recast_time = skill.recast_time.unwrap_or(0);
-            if recast_time > 0 && !has_instant_cast {
+            let configured_recast_ms = recast_time.max(0) as u64 * 90;
+            let recast_ms = if is_manes_offensive_magic {
+                configured_recast_ms.max(900)
+            } else {
+                configured_recast_ms
+            };
+            if recast_ms > 0 && (!has_instant_cast || is_manes_offensive_magic) {
                 let now = std::time::Instant::now();
-                let expiry = now + std::time::Duration::from_millis(recast_time as u64 * 90);
+                let expiry = now + std::time::Duration::from_millis(recast_ms);
                 world.update_session(sid, |h| {
                     h.skill_cooldowns.insert(skill_id, expiry);
                     // Periodic cleanup: remove expired entries to prevent unbounded growth
@@ -897,15 +1036,7 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
 
             // Type6Cancel — cancel transformation
             if world.is_transformed(sid) && world.get_magic_type6(skill.magic_num).is_some() {
-                world.clear_transformation(sid);
-                // Send MAGIC_CANCEL_TRANSFORMATION to caster
-                let mut cancel_pkt = Packet::new(Opcode::WizMagicProcess as u8);
-                cancel_pkt.write_u8(MAGIC_CANCEL_TRANSFORMATION);
-                world.send_to_session_owned(sid, cancel_pkt);
-                world.set_user_ability(sid);
-                world.send_item_move_refresh(sid);
-                // Remove saved magic for the transform skill
-                world.remove_saved_magic(sid, skill_id);
+                cancel_transformation(&world, sid);
             }
 
             // Type9Cancel — cancel stealth/lupine
@@ -1002,6 +1133,46 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
     }
 
     Ok(())
+}
+
+/// Cancel the active Type 6 transformation and fully restore the character.
+/// v2615 can request this without a skill ID in a one-byte packet.
+fn cancel_transformation(world: &WorldState, sid: SessionId) {
+    let transform_skill_id = world
+        .with_session(sid, |h| {
+            (h.transformation_type != 0).then_some(h.transform_skill_id)
+        })
+        .flatten();
+    let Some(transform_skill_id) = transform_skill_id else {
+        return;
+    };
+
+    world.clear_transformation(sid);
+
+    world.update_session(sid, |h| {
+        h.old_abnormal_type = h.abnormal_type;
+        h.abnormal_type = ABNORMAL_NORMAL;
+    });
+
+    let mut cancel_pkt = Packet::new(Opcode::WizMagicProcess as u8);
+    cancel_pkt.write_u8(MAGIC_CANCEL_TRANSFORMATION);
+    world.send_to_session_owned(sid, cancel_pkt);
+
+    let mut state_pkt = Packet::new(Opcode::WizStateChange as u8);
+    state_pkt.write_u32(sid as u32);
+    state_pkt.write_u8(STATE_CHANGE_TRANSFORMATION);
+    state_pkt.write_u32(0);
+    broadcast_to_caster_region(world, sid, &state_pkt);
+
+    world.set_user_ability(sid);
+    world.send_item_move_refresh(sid);
+    world.remove_saved_magic(sid, transform_skill_id);
+
+    tracing::info!(
+        "[sid={}] MagicProcess: transformation cancelled skill={}",
+        sid,
+        transform_skill_id,
+    );
 }
 
 // ── Pre-instance skill failed packet ──────────────────────────────────────
@@ -1619,7 +1790,7 @@ async fn execute_type1_aoe(
                 100
             };
         }
-
+        damage = gm_fixed_skill_damage(world, caster_sid, damage);
         if damage <= 0 {
             continue;
         }
@@ -1713,6 +1884,11 @@ async fn execute_type1_aoe(
     }
 
     // ── AOE NPC targets (event_room filtered) ────────────────────────
+    // Defer Manes level/vitals packets until the single AOE MAGIC_EFFECTING
+    // result has completed. Sending them inside the per-target loop interleaves
+    // WIZ_LEVEL_CHANGE/HP/MP with one unfinished area-skill transaction.
+    let mut manes_progress_changed = false;
+    let mut manes_dead_npcs = Vec::new();
     let nearby_npcs = world.get_nearby_npc_ids(
         caster_pos.zone_id,
         caster_pos.region_x,
@@ -1725,6 +1901,15 @@ async fn execute_type1_aoe(
             Some(n) => n,
             None => continue,
         };
+
+        if npc.zone_id == crate::systems::juraid::ZONE_JURAID
+            && crate::systems::juraid::is_juraid_monument(npc.proto_id)
+            && world
+                .get_character_info(caster_sid)
+                .is_none_or(|ch| ch.nation == crate::systems::juraid::monument_nation(npc.proto_id))
+        {
+            continue;
+        }
 
         if !npc.is_monster {
             continue;
@@ -1770,6 +1955,8 @@ async fn execute_type1_aoe(
                 100
             };
         }
+        damage = super::attack::scale_manes_magic_damage(world, caster_sid, &npc, damage);
+        damage = gm_fixed_skill_damage(world, caster_sid, damage);
 
         if damage <= 0 {
             continue;
@@ -1781,25 +1968,43 @@ async fn execute_type1_aoe(
         world.record_npc_damage(npc_id, caster_sid, damage as i32);
 
         // Durability loss
-        world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, damage as i32);
+        if !super::attack::is_manes_survival_npc(&npc) {
+            world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, damage as i32);
+        }
 
         if new_hp > 0 {
             world.notify_npc_damaged(npc_id, caster_sid);
         } else if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-            super::attack::handle_npc_death(world, caster_sid, npc_id, &npc, &tmpl).await;
+            let is_manes = super::attack::is_manes_survival_npc(&npc);
+            super::attack::handle_npc_death(world, caster_sid, npc_id, &npc, &tmpl, is_manes).await;
+            if is_manes {
+                manes_dead_npcs.push(npc_id);
+            }
         }
 
         // Send HP bar update
         if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-            let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-            hp_pkt.write_u32(npc_id);
-            hp_pkt.write_u8(0);
-            hp_pkt.write_u32(tmpl.max_hp);
-            hp_pkt.write_u32(new_hp.max(0) as u32);
-            hp_pkt.write_u32(-(damage as i32) as u32); // negative = damage dealt
-            hp_pkt.write_u32(0);
-            hp_pkt.write_u8(0);
+            let hp_pkt = super::target_hp::build_target_hp_packet(
+                npc_id,
+                0,
+                tmpl.max_hp,
+                new_hp.max(0) as u32,
+                caster_sid as u32,
+                -(damage as i32),
+            );
             world.send_to_session_owned(caster_sid, hp_pkt);
+            if tmpl.s_sid == crate::systems::manes_survival::DARK_DRAGON_SID as u16 {
+                world.manes_survival_manager.broadcast_dark_dragon_status(
+                    world,
+                    npc.zone_id,
+                    crate::systems::manes_survival::DARK_DRAGON_UI_NAME,
+                    tmpl.max_hp,
+                    new_hp.max(0) as u32,
+                );
+            }
+            if new_hp <= 0 && super::attack::is_manes_survival_npc(&npc) {
+                manes_progress_changed = true;
+            }
         }
     }
 
@@ -1810,9 +2015,18 @@ async fn execute_type1_aoe(
         0
     };
 
-    // Broadcast effect packet once for the AOE
+    // Broadcast the one effect packet that completes the AOE transaction.
     let pkt = instance.build_packet(MAGIC_EFFECTING);
     broadcast_to_caster_region(world, caster_sid, &pkt);
+    for npc_id in manes_dead_npcs {
+        super::attack::broadcast_npc_death(world, caster_sid, npc_id);
+    }
+
+    // All killed targets have already contributed to the authoritative Manes
+    // progress. Synchronize the resulting level/vitals once, after 0x31.
+    if manes_progress_changed {
+        super::attack::flush_manes_progress(world, caster_sid);
+    }
 
     true
 }
@@ -2018,6 +2232,44 @@ async fn execute_type2(
 
 // ── Type 3: Magic attack / heal / DOT ─────────────────────────────────────
 
+/// Resolve ground-target coordinates across the v2603 and v2615 layouts.
+///
+/// Older packets encode X/Z in tenths of a world unit.  The v2615 client can
+/// send the same fields as direct world units.  Both representations are
+/// unambiguous in normal play because the valid cast point is the candidate
+/// nearest to the caster.
+fn resolve_aoe_center(raw_x: i32, raw_z: i32, caster_x: f32, caster_z: f32) -> (f32, f32) {
+    if raw_x == 0 && raw_z == 0 {
+        return (caster_x, caster_z);
+    }
+
+    let direct = (
+        if raw_x == 0 { caster_x } else { raw_x as f32 },
+        if raw_z == 0 { caster_z } else { raw_z as f32 },
+    );
+    let tenths = (
+        if raw_x == 0 {
+            caster_x
+        } else {
+            raw_x as f32 / 10.0
+        },
+        if raw_z == 0 {
+            caster_z
+        } else {
+            raw_z as f32 / 10.0
+        },
+    );
+
+    let direct_dist = (direct.0 - caster_x).powi(2) + (direct.1 - caster_z).powi(2);
+    let tenths_dist = (tenths.0 - caster_x).powi(2) + (tenths.1 - caster_z).powi(2);
+
+    if direct_dist < tenths_dist {
+        direct
+    } else {
+        tenths
+    }
+}
+
 /// Execute Type 3 skill — magical damage, healing, or DOT/HOT.
 /// Handles direct damage, healing, and durational (DOT/HOT) effects.
 /// DOT effects are registered via `world.add_durational_skill()` and
@@ -2173,7 +2425,8 @@ async fn execute_type3(
         // Register HOT if time_damage > 0 and duration > 0 (undead: HOT becomes DOT)
         if time_damage > 0 && duration > 0 {
             let tick_count = (duration / 2).max(1) as u8;
-            let raw_per_tick = (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let raw_per_tick =
+                (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             let hp_per_tick = if world.is_undead(caster_sid) {
                 -raw_per_tick
             } else {
@@ -2284,7 +2537,8 @@ async fn execute_type3(
         // Register HOT if time_damage > 0 and duration > 0 (undead: HOT becomes DOT)
         if time_damage > 0 && duration > 0 {
             let tick_count = (duration / 2).max(1) as u8;
-            let raw_per_tick = (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let raw_per_tick =
+                (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
             let hp_per_tick = if world.is_undead(target_sid) {
                 -raw_per_tick
             } else {
@@ -2503,8 +2757,14 @@ async fn execute_type3(
                     && instance.skill_id < 400000;
                 if use_magic_formula {
                     let pvp_attr = type3_data.attribute.unwrap_or(0) as u8;
-                    let pvp_ctx =
-                        build_player_ctx(world, target_sid, &target_snap, &target, pvp_attr, caster_sid);
+                    let pvp_ctx = build_player_ctx(
+                        world,
+                        target_sid,
+                        &target_snap,
+                        &target,
+                        pvp_attr,
+                        caster_sid,
+                    );
                     let mut pvp_rng = rand::rngs::StdRng::from_entropy();
                     let mut damage = compute_magic_damage(
                         &caster,
@@ -2549,7 +2809,14 @@ async fn execute_type3(
             };
             let dot_attr = type3_data.attribute.unwrap_or(0) as u8;
             let duration_damage = if time_damage < 0 && dot_attr != 4 {
-                let dot_ctx = build_player_ctx(world, target_sid, &target_snap, &target, dot_attr, caster_sid);
+                let dot_ctx = build_player_ctx(
+                    world,
+                    target_sid,
+                    &target_snap,
+                    &target,
+                    dot_attr,
+                    caster_sid,
+                );
                 let mut dot_rng = rand::rngs::StdRng::from_entropy();
                 let raw = compute_magic_damage(
                     &caster_for_dot,
@@ -2621,17 +2888,16 @@ async fn execute_type3(
             && (direct_type == 1 || direct_type == 8)
             && instance.skill_id < 400000;
 
-        // AOE center: use sData[0]/sData[2] as X/Z if provided, else caster position
-        let aoe_x = if instance.data[0] != 0 {
-            instance.data[0] as f32 / 10.0
-        } else {
-            caster_pos.x
-        };
-        let aoe_z = if instance.data[2] != 0 {
-            instance.data[2] as f32 / 10.0
-        } else {
-            caster_pos.z
-        };
+        // v2603 packets use tenths of a world unit while v2615 ground-target
+        // packets can carry world units directly.  Select the representation
+        // that resolves closest to the caster, instead of always dividing by
+        // ten and moving the damage area to an unrelated map coordinate.
+        let (aoe_x, aoe_z) = resolve_aoe_center(
+            instance.data[0],
+            instance.data[2],
+            caster_pos.x,
+            caster_pos.z,
+        );
 
         let radius_sq = radius * radius;
 
@@ -2778,7 +3044,9 @@ async fn execute_type3(
 
                 if time_damage > 0 && duration > 0 {
                     let tick_count = (duration / 2).max(1) as u8;
-                    let raw_per_tick = (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                    let raw_per_tick = (time_damage / tick_count as i32)
+                        .clamp(i16::MIN as i32, i16::MAX as i32)
+                        as i16;
                     let hp_per_tick = if world.is_undead(target_sid) {
                         -raw_per_tick
                     } else {
@@ -2801,8 +3069,14 @@ async fn execute_type3(
                 };
                 // for direct_type 1/8, negative first_damage, skill < 400000
                 let damage = if aoe_use_magic_formula {
-                    let aoe_player_ctx =
-                        build_player_ctx(world, target_sid, &aoe_target_snap, &target, aoe_attr, caster_sid);
+                    let aoe_player_ctx = build_player_ctx(
+                        world,
+                        target_sid,
+                        &aoe_target_snap,
+                        &target,
+                        aoe_attr,
+                        caster_sid,
+                    );
                     let mut d = compute_magic_damage(
                         &caster,
                         first_damage,
@@ -2815,6 +3089,7 @@ async fn execute_type3(
                 } else {
                     (-first_damage).max(0) as i16
                 };
+                let damage = gm_fixed_skill_damage(world, caster_sid, damage);
                 aoe_target_damage = damage as i32;
                 let new_hp = (target.hp - damage).max(0);
                 world.update_character_hp(target_sid, new_hp);
@@ -2901,8 +3176,14 @@ async fn execute_type3(
                         tick_count = (tick_count as u16 * 2).min(255) as u8;
                     }
                     let duration_damage = if time_damage < 0 && aoe_attr != 4 {
-                        let aoe_dot_ctx =
-                            build_player_ctx(world, target_sid, &aoe_target_snap, &target, aoe_attr, caster_sid);
+                        let aoe_dot_ctx = build_player_ctx(
+                            world,
+                            target_sid,
+                            &aoe_target_snap,
+                            &target,
+                            aoe_attr,
+                            caster_sid,
+                        );
                         let raw = compute_magic_damage(
                             &caster,
                             time_damage,
@@ -2929,6 +3210,76 @@ async fn execute_type3(
             send_target_hp_update(world, caster_sid, target_sid, aoe_target_damage);
         }
 
+        // Runtime PK bots live in `world.bots`, not in the player session or
+        // NPC instance indexes traversed by the loops above/below. Include
+        // them explicitly so Nova/Inferno and other hostile Type3 areas use
+        // the same direct-damage and DOT paths as ordinary NPC targets.
+        if moral == MORAL_AREA_ENEMY && !caster_in_genie_aoe {
+            let nearby_bots = world.get_bots_in_zone_live(caster_pos.zone_id);
+            for bot in nearby_bots {
+                if !bot.is_alive() || bot.nation == caster.nation {
+                    continue;
+                }
+
+                let dx = aoe_x - bot.x;
+                let dz = aoe_z - bot.z;
+                if radius_sq > 0.0 && dx * dx + dz * dz > radius_sq {
+                    continue;
+                }
+
+                let bot_ctx = build_npc_ctx(world, bot.id, aoe_attr, caster_sid);
+                let mut bot_damage = if aoe_use_magic_formula {
+                    compute_magic_damage(&caster, first_damage, mag_atk_aoe, &bot_ctx, &mut aoe_rng)
+                } else {
+                    (-first_damage).max(0) as i16
+                };
+                let adp_npc = type3_data.add_dmg_perc_to_npc.unwrap_or(0);
+                if adp_npc != 0 {
+                    bot_damage = ((bot_damage as i32 * adp_npc as i32) / 100) as i16;
+                }
+
+                apply_skill_damage_to_npc(
+                    world, caster_sid, bot.id, instance, bot_damage, skill, aoe_attr,
+                )
+                .await;
+
+                if time_damage != 0
+                    && duration > 0
+                    && world
+                        .get_bot(bot.id)
+                        .is_some_and(|target| target.is_alive())
+                {
+                    let mut tick_count = (duration / 2).clamp(1, 255) as u8;
+                    if caster_pos.zone_id == ZONE_CHAOS_DUNGEON {
+                        tick_count = (tick_count as u16 * 2).min(255) as u8;
+                    }
+                    let duration_damage = if time_damage < 0 && aoe_attr != 4 {
+                        compute_magic_damage(
+                            &caster,
+                            time_damage,
+                            mag_atk_aoe,
+                            &bot_ctx,
+                            &mut aoe_rng,
+                        )
+                    } else {
+                        (-time_damage).max(0) as i16
+                    };
+                    let hp_per_tick =
+                        -(duration_damage.unsigned_abs() as i16 / tick_count as i16).max(1);
+                    world.add_npc_dot(
+                        bot.id,
+                        crate::world::NpcDotSlot {
+                            skill_id: instance.skill_id,
+                            hp_amount: hp_per_tick,
+                            tick_count: 0,
+                            tick_limit: tick_count,
+                            caster_sid,
+                        },
+                    );
+                }
+            }
+        }
+
         // get_nearby_session_ids excludes caster, so we heal caster separately here.
         if moral == MORAL_AREA_FRIEND {
             if let Some(caster_ch) = world.get_character_info(caster_sid) {
@@ -2953,7 +3304,9 @@ async fn execute_type3(
 
                     if time_damage > 0 && duration > 0 {
                         let tick_count = (duration / 2).max(1) as u8;
-                        let raw_per_tick = (time_damage / tick_count as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        let raw_per_tick = (time_damage / tick_count as i32)
+                            .clamp(i16::MIN as i32, i16::MAX as i32)
+                            as i16;
                         let hp_per_tick = if world.is_undead(caster_sid) {
                             -raw_per_tick
                         } else {
@@ -2976,6 +3329,10 @@ async fn execute_type3(
         // ── AOE NPC damage ──────────────────────────────────────────
         // includes NPCs in AOE targeting. We iterate nearby NPCs and apply damage.
         // (only player-to-player), so only MORAL_AREA_ENEMY hits NPCs.
+        // Manes progress is accumulated per kill but emitted only after the
+        // single area MAGIC_EFFECTING result below.
+        let mut manes_progress_changed = false;
+        let mut manes_dead_npcs = Vec::new();
         if moral == MORAL_AREA_ENEMY {
             let nearby_npcs = world.get_nearby_npc_ids(
                 caster_pos.zone_id,
@@ -2989,6 +3346,15 @@ async fn execute_type3(
                     Some(n) => n,
                     None => continue,
                 };
+
+                if npc.zone_id == crate::systems::juraid::ZONE_JURAID
+                    && crate::systems::juraid::is_juraid_monument(npc.proto_id)
+                    && world.get_character_info(caster_sid).is_none_or(|ch| {
+                        ch.nation == crate::systems::juraid::monument_nation(npc.proto_id)
+                    })
+                {
+                    continue;
+                }
 
                 // Must be a monster (not friendly NPC)
                 if !npc.is_monster {
@@ -3021,6 +3387,9 @@ async fn execute_type3(
                 } else {
                     (-first_damage).max(0) as i16
                 };
+                let npc_damage =
+                    super::attack::scale_manes_magic_damage(world, caster_sid, &npc, npc_damage);
+                let npc_damage = gm_fixed_skill_damage(world, caster_sid, npc_damage);
 
                 // Apply damage to NPC
                 let new_hp = (npc_hp - npc_damage as i32).max(0);
@@ -3028,36 +3397,63 @@ async fn execute_type3(
                 world.record_npc_damage(npc_id, caster_sid, npc_damage as i32);
 
                 // Durability loss
-                world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, npc_damage as i32);
+                if !super::attack::is_manes_survival_npc(&npc) {
+                    world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, npc_damage as i32);
+                }
 
                 if new_hp > 0 {
                     world.notify_npc_damaged(npc_id, caster_sid);
                 } else {
                     // NPC died
                     if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-                        super::attack::handle_npc_death(world, caster_sid, npc_id, &npc, &tmpl)
-                            .await;
+                        let is_manes = super::attack::is_manes_survival_npc(&npc);
+                        super::attack::handle_npc_death(
+                            world, caster_sid, npc_id, &npc, &tmpl, is_manes,
+                        )
+                        .await;
+                        if is_manes {
+                            manes_dead_npcs.push(npc_id);
+                        }
                     }
                 }
 
                 // Send HP bar update
                 if let Some(tmpl) = world.get_npc_template(npc.proto_id, npc.is_monster) {
-                    let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-                    hp_pkt.write_u32(npc_id);
-                    hp_pkt.write_u8(0);
-                    hp_pkt.write_u32(tmpl.max_hp);
-                    hp_pkt.write_u32(new_hp.max(0) as u32);
-                    hp_pkt.write_u32(-(npc_damage as i32) as u32); // negative = damage dealt
-                    hp_pkt.write_u32(0);
-                    hp_pkt.write_u8(0);
+                    let hp_pkt = super::target_hp::build_target_hp_packet(
+                        npc_id,
+                        0,
+                        tmpl.max_hp,
+                        new_hp.max(0) as u32,
+                        caster_sid as u32,
+                        -(npc_damage as i32),
+                    );
                     world.send_to_session_owned(caster_sid, hp_pkt);
+                    if tmpl.s_sid == crate::systems::manes_survival::DARK_DRAGON_SID as u16 {
+                        world.manes_survival_manager.broadcast_dark_dragon_status(
+                            world,
+                            npc.zone_id,
+                            crate::systems::manes_survival::DARK_DRAGON_UI_NAME,
+                            tmpl.max_hp,
+                            new_hp.max(0) as u32,
+                        );
+                    }
+                    if new_hp <= 0 && super::attack::is_manes_survival_npc(&npc) {
+                        manes_progress_changed = true;
+                    }
                 }
             }
         }
 
-        // Broadcast the effect to region
+        // Complete the AOE transaction before sending any Manes level/vitals
+        // packets. This keeps multi-target results contiguous for the v2615 client.
         let pkt = instance.build_packet(MAGIC_EFFECTING);
         broadcast_to_caster_region(world, caster_sid, &pkt);
+        for npc_id in manes_dead_npcs {
+            super::attack::broadcast_npc_death(world, caster_sid, npc_id);
+        }
+        if manes_progress_changed {
+            super::attack::flush_manes_progress(world, caster_sid);
+        }
         return true;
     }
 
@@ -3968,16 +4364,12 @@ fn execute_type4(
             }
         }
 
-        let aoe_x = if instance.data[0] != 0 {
-            instance.data[0] as f32 / 10.0
-        } else {
-            caster_pos.x
-        };
-        let aoe_z = if instance.data[2] != 0 {
-            instance.data[2] as f32 / 10.0
-        } else {
-            caster_pos.z
-        };
+        let (aoe_x, aoe_z) = resolve_aoe_center(
+            instance.data[0],
+            instance.data[2],
+            caster_pos.x,
+            caster_pos.z,
+        );
 
         for target_sid in nearby {
             let target = match world.get_character_info(target_sid) {
@@ -4260,6 +4652,70 @@ fn grant_type4_buff_to_target(
     if instance.skill_id > 500000 {
         world.insert_saved_magic(target_sid, instance.skill_id, duration);
     }
+}
+
+/// Apply a legitimate Type-4 support skill cast by a runtime bot.
+///
+/// Runtime bots are not backed by `ClientSession`, so they cannot enter the
+/// normal client-originated MagicInstance pipeline. This adapter still uses
+/// the loaded magic/type4 rows, normal ActiveBuff storage and stat refresh;
+/// it only supplies the bot as the packet caster.
+pub(crate) fn apply_bot_type4_support(
+    world: &WorldState,
+    bot_id: u32,
+    target_sid: SessionId,
+    skill_id: u32,
+) -> bool {
+    let Some(skill) = world.get_magic(skill_id as i32) else {
+        return false;
+    };
+    let Some(type4) = world.get_magic_type4(skill_id as i32) else {
+        return false;
+    };
+    let buff_type = type4.buff_type.unwrap_or(0);
+    if buff_type > 0 && world.has_buff(target_sid, buff_type) {
+        return false;
+    }
+    if world.is_player_dead(target_sid) {
+        return false;
+    }
+
+    let duration = type4.duration.unwrap_or(0).max(0) as u16;
+    let caster_sid = bot_id as SessionId;
+    let buff = create_active_buff(skill_id, caster_sid, &type4, true);
+    world.apply_buff(target_sid, buff);
+    apply_type4_stats(
+        world,
+        target_sid,
+        &type4,
+        skill.skill.unwrap_or(0),
+        skill_id,
+    );
+    world.set_user_ability(target_sid);
+    world.send_item_move_refresh(target_sid);
+
+    let mut pkt = Packet::new(Opcode::WizMagicProcess as u8);
+    pkt.write_u8(MAGIC_EFFECTING);
+    pkt.write_u32(skill_id);
+    pkt.write_u32(bot_id);
+    pkt.write_u32(target_sid as u32);
+    let data = [0, 1, 0, duration as i32, 0, type4.speed.unwrap_or(0), 0];
+    for value in data {
+        pkt.write_u32(value as u32);
+    }
+
+    if let Some((pos, event_room)) = world.with_session(target_sid, |h| (h.position, h.event_room))
+    {
+        world.broadcast_to_region_sync(
+            pos.zone_id,
+            pos.region_x,
+            pos.region_z,
+            Arc::new(pkt),
+            None,
+            event_room,
+        );
+    }
+    true
 }
 
 /// Create an `ActiveBuff` from a `MagicType4Row`.
@@ -5007,9 +5463,8 @@ fn compute_pvp_skill_target_ac(
     } else {
         snap.ac_amount
     };
-    let mut ac = ((snap.equipped_stats.total_ac as i32) * snap.ac_pct / 100 + buff_ac
-        - snap.ac_sour)
-        .max(0);
+    let mut ac =
+        ((snap.equipped_stats.total_ac as i32) * snap.ac_pct / 100 + buff_ac - snap.ac_sour).max(0);
 
     if let Some(idx) = crate::handler::attack::class_group_index(target.class) {
         let bonus = snap.equipped_stats.ac_class_bonus[idx] as i32;
@@ -5285,6 +5740,7 @@ async fn apply_skill_damage(
         None => return,
     };
 
+    let damage = gm_fixed_skill_damage(world, caster_sid, damage);
     if damage <= 0 {
         // Broadcast effect with 0 damage
         let pkt = instance.build_packet(MAGIC_EFFECTING);
@@ -5392,6 +5848,7 @@ async fn apply_skill_damage(
         }
     }
 
+    effective_damage = gm_fixed_skill_damage(world, caster_sid, effective_damage);
     let new_hp = (target.hp - effective_damage).max(0);
     world.update_character_hp(target_sid, new_hp);
 
@@ -5405,8 +5862,8 @@ async fn apply_skill_damage(
     crate::handler::party::broadcast_party_hp(world, target_sid);
 
     // ── Equipment durability loss ─────────────────────────────────────
-    world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, damage as i32);
-    world.item_wore_out(target_sid, WORE_TYPE_DEFENCE, damage as i32);
+    world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, effective_damage as i32);
+    world.item_wore_out(target_sid, WORE_TYPE_DEFENCE, effective_damage as i32);
 
     try_reflect_damage(world, caster_sid, target_sid, damage).await;
 
@@ -5565,14 +6022,14 @@ async fn apply_skill_damage(
     broadcast_to_caster_region(world, caster_sid, &pkt);
 
     // Send HP update
-    send_target_hp_update(world, caster_sid, target_sid, damage as i32);
+    send_target_hp_update(world, caster_sid, target_sid, effective_damage as i32);
 
     tracing::debug!(
         "[sid={}] MagicProcess: skill={} target={} damage={} new_hp={}",
         caster_sid,
         instance.skill_id,
         target_sid,
-        damage,
+        effective_damage,
         new_hp
     );
 }
@@ -5705,16 +6162,14 @@ fn send_target_hp_update(
         None => return,
     };
 
-    let mut response = Packet::new(Opcode::WizTargetHp as u8);
-    response.write_u32(target_sid as u32);
-    response.write_u8(0);
-    response.write_u32(ch.max_hp as u32);
-    response.write_u32(ch.hp.max(0) as u32);
-    // C++ sends negative amount for damage, positive for heal. Client uses sign for display:
-    // negative = "X damage dealt", positive = "X HP received", 0 = no display
-    response.write_u32((-damage) as u32);
-    response.write_u32(0);
-    response.write_u8(0);
+    let response = super::target_hp::build_target_hp_packet(
+        target_sid as u32,
+        0,
+        ch.max_hp as u32,
+        ch.hp.max(0) as u32,
+        caster_sid as u32,
+        -damage,
+    );
 
     world.send_to_session_owned(caster_sid, response);
 }
@@ -5728,7 +6183,7 @@ async fn apply_skill_damage_to_npc(
     npc_id: u32,
     instance: &MagicInstance,
     damage: i16,
-    _skill: &MagicRow,
+    skill: &MagicRow,
     attribute_type: u8,
 ) {
     // ── Bot target: apply damage, send HP update, handle death ─────
@@ -5740,6 +6195,8 @@ async fn apply_skill_damage_to_npc(
             return;
         }
 
+        let damage = gm_fixed_skill_damage(world, caster_sid, damage);
+
         // Apply damage — clamp to [0, max_hp]
         let new_hp = (bot.hp - damage).max(0);
         world.update_bot(npc_id, |b| {
@@ -5747,15 +6204,17 @@ async fn apply_skill_damage_to_npc(
             b.last_attacker_id = caster_sid as i32;
         });
 
-        // Send WIZ_TARGET_HP to caster
-        let mut target_hp_pkt = ko_protocol::Packet::new(ko_protocol::Opcode::WizTargetHp as u8);
-        target_hp_pkt.write_u32(npc_id);
-        target_hp_pkt.write_u8(0); // echo
-        target_hp_pkt.write_u32(bot.max_hp as u32);
-        target_hp_pkt.write_u32(new_hp as u32);
-        target_hp_pkt.write_u32((-damage) as u32); // negative = damage dealt
-        target_hp_pkt.write_u32(0);
-        target_hp_pkt.write_u8(0);
+        // v2615 reads the Ronark Land score delta from the *second* trailing
+        // dword of WIZ_TARGET_HP. Keep every damage path on the centralized
+        // builder so magic attacks against bots cannot silently bypass it.
+        let target_hp_pkt = super::target_hp::build_target_hp_packet(
+            npc_id,
+            0,
+            bot.max_hp as u32,
+            new_hp as u32,
+            caster_sid as u32,
+            -(damage as i32),
+        );
         world.send_to_session_owned(caster_sid, target_hp_pkt);
 
         // Handle death
@@ -5786,6 +6245,22 @@ async fn apply_skill_damage_to_npc(
         Some(t) => t,
         None => return,
     };
+
+    if npc.zone_id == crate::systems::juraid::ZONE_JURAID
+        && crate::systems::juraid::is_juraid_monument(npc.proto_id)
+        && world
+            .get_character_info(caster_sid)
+            .is_none_or(|ch| ch.nation == crate::systems::juraid::monument_nation(npc.proto_id))
+    {
+        tracing::debug!(
+            caster_sid,
+            monument_sid = npc.proto_id,
+            "Blocked magic attack against own Juraid monument"
+        );
+        return;
+    }
+
+    let damage = super::attack::scale_manes_magic_damage(world, caster_sid, &npc, damage);
 
     // NPC type validation — certain NPCs are immune to magic skills
     {
@@ -5866,7 +6341,7 @@ async fn apply_skill_damage_to_npc(
         }
 
         // Neutral peaceful NPCs (group/nation == 3) cannot be magic-attacked
-        if tmpl.group == 3 {
+        if tmpl.group == 3 || npc.nation == 3 {
             return;
         }
     }
@@ -5877,6 +6352,7 @@ async fn apply_skill_damage_to_npc(
         _ => return,
     };
 
+    let damage = gm_fixed_skill_damage(world, caster_sid, damage);
     if damage <= 0 {
         let pkt = instance.build_packet(MAGIC_EFFECTING);
         broadcast_to_caster_region(world, caster_sid, &pkt);
@@ -5889,7 +6365,9 @@ async fn apply_skill_damage_to_npc(
     world.record_npc_damage(npc_id, caster_sid, damage as i32);
 
     // ── Caster weapon durability loss ────────────────────────────────
-    world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, damage as i32);
+    if !super::attack::is_manes_survival_npc(&npc) {
+        world.item_wore_out(caster_sid, WORE_TYPE_ATTACK, damage as i32);
+    }
 
     // Notify NPC AI about damage (reactive aggro — C++ ChangeTarget)
     if new_hp > 0 {
@@ -5906,25 +6384,52 @@ async fn apply_skill_damage_to_npc(
     if new_hp <= 0 {
         // NPC died — delegate to shared death handler for consistent behavior
         // (death broadcast, party XP, loot, AI state cleanup)
-        super::attack::handle_npc_death(world, caster_sid, npc_id, &npc, &tmpl).await;
+        super::attack::handle_npc_death(
+            world,
+            caster_sid,
+            npc_id,
+            &npc,
+            &tmpl,
+            super::attack::is_manes_survival_npc(&npc),
+        )
+        .await;
     }
 
     // Broadcast skill effect
-    let pkt = instance.build_packet(MAGIC_EFFECTING);
+    let mut effect_instance = *instance;
+    if super::attack::is_manes_survival_npc(&npc) && skill.type1.unwrap_or(0) == 3 {
+        effect_instance.data[3] = -(damage as i32);
+    }
+    let pkt = effect_instance.build_packet(MAGIC_EFFECTING);
     broadcast_to_caster_region(world, caster_sid, &pkt);
 
     // Send HP bar update with actual damage for console display
     // C++ sends negative amount (damage dealt), client uses sign for display:
     // negative = "X damage dealt", positive = "X HP received"
-    let mut hp_pkt = Packet::new(Opcode::WizTargetHp as u8);
-    hp_pkt.write_u32(npc_id);
-    hp_pkt.write_u8(0);
-    hp_pkt.write_u32(tmpl.max_hp);
-    hp_pkt.write_u32(new_hp.max(0) as u32);
-    hp_pkt.write_u32((-(damage as i32)) as u32);
-    hp_pkt.write_u32(0);
-    hp_pkt.write_u8(0);
+    let hp_pkt = super::target_hp::build_target_hp_packet(
+        npc_id,
+        0,
+        tmpl.max_hp,
+        new_hp.max(0) as u32,
+        caster_sid as u32,
+        -(damage as i32),
+    );
     world.send_to_session_owned(caster_sid, hp_pkt);
+    if tmpl.s_sid == crate::systems::manes_survival::DARK_DRAGON_SID as u16 {
+        world.manes_survival_manager.broadcast_dark_dragon_status(
+            world,
+            npc.zone_id,
+            crate::systems::manes_survival::DARK_DRAGON_UI_NAME,
+            tmpl.max_hp,
+            new_hp.max(0) as u32,
+        );
+    }
+    if new_hp <= 0 {
+        if super::attack::is_manes_survival_npc(&npc) {
+            super::attack::broadcast_npc_death(world, caster_sid, npc_id);
+        }
+        super::attack::flush_manes_progress(world, caster_sid);
+    }
 
     tracing::debug!(
         "[sid={}] MagicProcess NPC target={}: damage={}, new_hp={}/{}",
@@ -6296,9 +6801,9 @@ async fn execute_type5(
 /// 4. Activate blink (10s invulnerability)
 fn post_resurrection_sequence(world: &WorldState, sid: SessionId, zone_id: u16) {
     // ── 1. Broadcast INOUT_RESPAWN to 3×3 region ─────────────────────
-    if let Some((pos, my_char, event_room)) = world.with_session(sid, |h| {
-        (h.position, h.character.clone(), h.event_room)
-    }) {
+    if let Some((pos, my_char, event_room)) =
+        world.with_session(sid, |h| (h.position, h.character.clone(), h.event_room))
+    {
         let my_clan = my_char.as_ref().and_then(|ch| {
             if ch.knights_id > 0 {
                 world.get_knights(ch.knights_id)
@@ -6313,6 +6818,9 @@ fn post_resurrection_sequence(world: &WorldState, sid: SessionId, zone_id: u16) 
         let ac = my_clan
             .as_ref()
             .and_then(|ki| crate::handler::region::resolve_alliance_cape(ki, world));
+        let is_king = my_char
+            .as_ref()
+            .is_some_and(|ch| world.is_king(ch.nation, &ch.name));
         let inout_pkt = crate::handler::region::build_user_inout_with_clan(
             crate::handler::region::INOUT_RESPAWN,
             sid,
@@ -6320,6 +6828,7 @@ fn post_resurrection_sequence(world: &WorldState, sid: SessionId, zone_id: u16) 
             &pos,
             my_clan.as_ref(),
             ac,
+            is_king,
             my_invis,
             my_abnormal,
             &my_bs,
@@ -6445,6 +6954,14 @@ fn execute_type6(
         .map(|p| p.zone_id)
         .unwrap_or(0);
 
+    // Type 6 is exempt from the generic item check, so direct v2615 scrolls
+    // must be validated here before applying their transformation.
+    let required_item = resolve_consume_item(skill);
+    if required_item != 0 && !world.check_exist_item(caster_sid, required_item, 1) {
+        send_skill_failed(world, caster_sid, instance);
+        return false;
+    }
+
     // ── Zone-specific transformation validation ──────────────────────
     // user_skill_use values follow the C++ TransformationSkillUse enum:
     //   0 = Siege, 1 = Monster, 3 = NPC, 4 = Special,
@@ -6506,19 +7023,18 @@ fn execute_type6(
         return false;
     }
 
-    let duration = type6_data.duration as u16;
+    let duration = type6_data.duration.clamp(0, u16::MAX as i32) as u16;
     let transform_id = type6_data.transform_id;
 
     // Determine transformation type from user_skill_use
-    let transformation_type = match type6_data.user_skill_use {
-        1 => TRANSFORMATION_MONSTER,       // TransformationSkillUseMonster
-        2 | 5 => TRANSFORMATION_NPC,       // TransformationSkillUseNPC / MamaPag
-        3 | 4 | 6 => TRANSFORMATION_SIEGE, // Siege / MovingTower / OreadsGuard
-        _ => {
-            send_skill_failed(world, caster_sid, instance);
-            return false;
-        }
-    };
+    let transformation_type =
+        match transformation_type_from_user_skill_use(type6_data.user_skill_use) {
+            Some(value) => value,
+            None => {
+                send_skill_failed(world, caster_sid, instance);
+                return false;
+            }
+        };
 
     // Store transformation state on the session
     let now_ms = std::time::SystemTime::now()
@@ -6535,10 +7051,22 @@ fn execute_type6(
         duration as u64 * 1000, // C++ stores in milliseconds
     );
 
-    // Store transformation state on the character
-    world.update_character_stats(caster_sid, |ch| {
-        ch.res_hp_type = 3; // Transformed state (C++ StateChangeServerDirect(3, nSkillID))
+    // A GM must first be made visible, otherwise its entity is absent from
+    // the region when the client rebuilds the transformation model.
+    if caster.authority == 0 {
+        let mut visible_pkt = Packet::new(Opcode::WizStateChange as u8);
+        visible_pkt.write_u32(caster_sid as u32);
+        visible_pkt.write_u8(5);
+        visible_pkt.write_u32(1);
+        broadcast_to_caster_region(world, caster_sid, &visible_pkt);
+    }
+
+    world.update_session(caster_sid, |h| {
+        h.old_abnormal_type = h.abnormal_type;
+        h.abnormal_type = skill.magic_num as u32;
     });
+
+    // res_hp_type must remain untouched: value 3 means USER_DEAD here.
 
     // C++ line 5192-5194: sData[1]=1, sData[3]=duration, SendSkill()
     instance.data[1] = 1;
@@ -6547,11 +7075,11 @@ fn execute_type6(
     let pkt = instance.build_packet(MAGIC_EFFECTING);
     broadcast_to_caster_region(world, caster_sid, &pkt);
 
-    // Broadcast state change (transformation) to region
-    // C++ line 5190: StateChangeServerDirect(3, nSkillID)
+    // v2615 client sub_8544D0: state 0x13 resolves this skill ID through
+    // sub_9173E0 and rebuilds the character as the Type6 transform model.
     let mut state_pkt = Packet::new(Opcode::WizStateChange as u8);
     state_pkt.write_u32(caster_sid as u32);
-    state_pkt.write_u8(3); // type 3 = transformation
+    state_pkt.write_u8(STATE_CHANGE_TRANSFORMATION);
     state_pkt.write_u32(skill.magic_num as u32);
     broadcast_to_caster_region(world, caster_sid, &state_pkt);
 
@@ -6572,6 +7100,18 @@ fn execute_type6(
 }
 
 // ── Type 7: Summon / CC ─────────────────────────────────────────────────
+
+/// Map the v2615 Skill_Magic_6 `user_skill_use` enum to runtime state.
+fn transformation_type_from_user_skill_use(user_skill_use: i32) -> Option<u8> {
+    Some(match user_skill_use {
+        1 => TRANSFORMATION_MONSTER,
+        // NPC, Special (event/snowman), and MamaPag.
+        3 | 4 | 7 => TRANSFORMATION_NPC,
+        // Siege, OreadsGuard, and MovingTower.
+        0 | 5 | 6 => TRANSFORMATION_SIEGE,
+        _ => return None,
+    })
+}
 
 /// Execute Type 7 skill -- summoning / crowd control / target change.
 /// Handles target-change effects, NPC sleep/stun, and NPC damage.
@@ -8059,12 +8599,36 @@ mod tests {
 
     #[test]
     fn test_transformation_type_from_user_skill_use() {
-        // user_skill_use=1 => TransformationMonster
-        assert_eq!(1u8, TRANSFORMATION_MONSTER);
-        // user_skill_use=2 => TransformationNPC
-        assert_eq!(2u8, TRANSFORMATION_NPC);
-        // user_skill_use=3 => TransformationSiege
-        assert_eq!(3u8, TRANSFORMATION_SIEGE);
+        assert_eq!(
+            transformation_type_from_user_skill_use(1),
+            Some(TRANSFORMATION_MONSTER)
+        );
+        for value in [3, 4, 7] {
+            assert_eq!(
+                transformation_type_from_user_skill_use(value),
+                Some(TRANSFORMATION_NPC)
+            );
+        }
+        for value in [0, 5, 6] {
+            assert_eq!(
+                transformation_type_from_user_skill_use(value),
+                Some(TRANSFORMATION_SIEGE)
+            );
+        }
+        assert_eq!(transformation_type_from_user_skill_use(2), None);
+        assert_eq!(transformation_type_from_user_skill_use(0xFF), None);
+    }
+
+    #[test]
+    fn test_transform_list_packet_format() {
+        let mut pkt = Packet::new(Opcode::WizMagicProcess as u8);
+        pkt.write_u8(MAGIC_TRANSFORM_LIST);
+        pkt.write_u32(472001);
+
+        let mut reader = PacketReader::new(&pkt.data);
+        assert_eq!(reader.read_u8(), Some(9));
+        assert_eq!(reader.read_u32(), Some(472001));
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]
@@ -8083,6 +8647,48 @@ mod tests {
         assert_eq!(r.read_u32(), Some(1)); // sid
         assert_eq!(r.read_u8(), Some(3)); // type
         assert_eq!(r.read_u32(), Some(450001)); // skill_id as abnormal
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_gm_transform_visibility_packet_format() {
+        let mut pkt = Packet::new(Opcode::WizStateChange as u8);
+        pkt.write_u32(1);
+        pkt.write_u8(5);
+        pkt.write_u32(1);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u32(), Some(1));
+        assert_eq!(r.read_u8(), Some(5));
+        assert_eq!(r.read_u32(), Some(1));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_v2615_transformation_state_packet_format() {
+        let mut pkt = Packet::new(Opcode::WizStateChange as u8);
+        pkt.write_u32(42);
+        pkt.write_u8(STATE_CHANGE_TRANSFORMATION);
+        pkt.write_u32(500564);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u32(), Some(42));
+        assert_eq!(r.read_u8(), Some(0x13));
+        assert_eq!(r.read_u32(), Some(500564));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn test_v2615_transformation_reset_packet_format() {
+        let mut pkt = Packet::new(Opcode::WizStateChange as u8);
+        pkt.write_u32(42);
+        pkt.write_u8(STATE_CHANGE_TRANSFORMATION);
+        pkt.write_u32(0);
+
+        let mut r = PacketReader::new(&pkt.data);
+        assert_eq!(r.read_u32(), Some(42));
+        assert_eq!(r.read_u8(), Some(0x13));
+        assert_eq!(r.read_u32(), Some(0));
         assert_eq!(r.remaining(), 0);
     }
 
@@ -10187,6 +10793,24 @@ mod tests {
         let dist_sq = dx * dx + dz * dz;
 
         assert!(dist_sq <= radius_sq); // 100 <= 225
+    }
+
+    #[test]
+    fn test_aoe_center_accepts_v2603_tenths() {
+        let center = resolve_aoe_center(1_050, 2_050, 100.0, 200.0);
+        assert_eq!(center, (105.0, 205.0));
+    }
+
+    #[test]
+    fn test_aoe_center_accepts_v2615_world_units() {
+        let center = resolve_aoe_center(105, 205, 100.0, 200.0);
+        assert_eq!(center, (105.0, 205.0));
+    }
+
+    #[test]
+    fn test_aoe_center_zero_data_falls_back_to_caster() {
+        let center = resolve_aoe_center(0, 0, 100.0, 200.0);
+        assert_eq!(center, (100.0, 200.0));
     }
 
     #[test]

@@ -65,19 +65,19 @@ async fn main() -> anyhow::Result<()> {
     info!("[3/6] Migrations applied");
 
     // ── Server settings from DB ──────────────────────────────────────────
-    let (version, patch_url, patch_path) = load_server_settings(&pool).await;
+    let (_game_version, launcher_version, patch_url, patch_path) =
+        load_server_settings(&pool).await;
 
     // ── Login server config ──────────────────────────────────────────────
     let login_config = LoginServerConfig {
         bind_ip: bind_ip.clone(),
         base_port: login_base_port,
-        game_server_ip: std::env::var("GAME_SERVER_IP")
-            .unwrap_or_else(|_| "127.0.0.1".to_string()),
+        game_server_ip: std::env::var("GAME_SERVER_IP").unwrap_or_else(|_| "127.0.0.1".to_string()),
         game_server_port: std::env::var("GAME_SERVER_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(15001),
-        version,
+        version: launcher_version,
         ftp_url: patch_url,
         ftp_path: patch_path,
         news_title: "Login Notice".to_string(),
@@ -99,7 +99,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("[6/6] All systems ready — accepting connections");
     info!("====================================");
-    info!("  Login:  {}:{}-{}", bind_ip, login_base_port, login_base_port + 9);
+    info!(
+        "  Login:  {}:{}-{}",
+        bind_ip,
+        login_base_port,
+        login_base_port + 9
+    );
     info!("  Game:   {}", game_server.bind_addr());
     info!("====================================");
 
@@ -142,16 +147,17 @@ fn init_tracing() {
 }
 
 /// Load server settings from the database (version, patch URL).
-async fn load_server_settings(pool: &ko_db::DbPool) -> (u16, String, String) {
+async fn load_server_settings(pool: &ko_db::DbPool) -> (u16, u16, String, String) {
     let repo = ServerSettingsRepository::new(pool);
     match repo.load_server_settings().await {
         Ok(s) => {
             info!(
-                "[3/6] DB: version={}, patch={}{}",
-                s.game_version, s.patch_url, s.patch_path
+                "[3/6] DB: game_version={}, launcher_version={}, patch={}{}",
+                s.game_version, s.launcher_version, s.patch_url, s.patch_path
             );
             (
                 s.game_version as u16,
+                s.launcher_version as u16,
                 s.patch_url,
                 s.patch_path,
             )
@@ -159,6 +165,7 @@ async fn load_server_settings(pool: &ko_db::DbPool) -> (u16, String, String) {
         Err(e) => {
             warn!("[3/6] Failed to read server_settings: {}", e);
             (
+                2598u16,
                 2598u16,
                 "http://127.0.0.1:8080".to_string(),
                 "/patches/".to_string(),

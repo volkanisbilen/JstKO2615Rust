@@ -131,15 +131,18 @@ pub async fn handle(session: &mut ClientSession, pkt: Packet) -> anyhow::Result<
             let mut eligible: Vec<SessionId> = Vec::with_capacity(8);
             for &member_sid in &party.active_members() {
                 // Single DashMap read: check alive + in-range (3 reads → 1)
-                let in_range = world.with_session(member_sid, |h| {
-                    let ch = h.character.as_ref()?;
-                    if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
-                        return None;
-                    }
-                    let dx = h.position.x - bundle.x;
-                    let dz = h.position.z - bundle.z;
-                    Some(dx * dx + dz * dz <= RANGE_50M)
-                }).flatten().unwrap_or(false);
+                let in_range = world
+                    .with_session(member_sid, |h| {
+                        let ch = h.character.as_ref()?;
+                        if ch.res_hp_type == crate::world::USER_DEAD || ch.hp <= 0 {
+                            return None;
+                        }
+                        let dx = h.position.x - bundle.x;
+                        let dz = h.position.z - bundle.z;
+                        Some(dx * dx + dz * dz <= RANGE_50M)
+                    })
+                    .flatten()
+                    .unwrap_or(false);
                 if in_range {
                     eligible.push(member_sid);
                 }
