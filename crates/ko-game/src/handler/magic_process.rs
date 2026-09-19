@@ -4732,6 +4732,74 @@ pub(crate) fn apply_bot_type4_support(
     true
 }
 
+/// Apply a Type-4 support skill cast by an interactive NPC (Lua `CastSkill`).
+///
+/// C++ routes Lua casts through `CNpc::CastSkill()`.  Keep the same observable
+/// result here: store the authoritative buff, refresh derived stats, emit all
+/// special Type-4 state packets and broadcast MAGIC_EFFECTING with the NPC as
+/// caster.  This deliberately shares the normal Type-4 application path
+/// instead of duplicating only the visual animation in the Lua binding.
+pub(crate) fn apply_npc_type4_support(
+    world: &WorldState,
+    npc_id: u32,
+    target_sid: SessionId,
+    skill_id: u32,
+    zone_id: u16,
+    region_x: u16,
+    region_z: u16,
+    event_room: u16,
+) -> bool {
+    let Some(skill) = world.get_magic(skill_id as i32) else {
+        return false;
+    };
+    let Some(type4) = world.get_magic_type4(skill_id as i32) else {
+        return false;
+    };
+    if world.is_player_dead(target_sid) {
+        return false;
+    }
+
+    let duration = type4.duration.unwrap_or(0).max(0) as u16;
+    let buff = create_active_buff(skill_id, npc_id as SessionId, &type4, true);
+    world.apply_buff(target_sid, buff);
+    apply_type4_stats(
+        world,
+        target_sid,
+        &type4,
+        skill.skill.unwrap_or(0),
+        skill_id,
+    );
+    world.set_user_ability(target_sid);
+    world.send_item_move_refresh(target_sid);
+    broadcast_size_state_change(world, target_sid, &type4, skill_id);
+    broadcast_kaul_state_change(world, target_sid, &type4, skill_id);
+    broadcast_buff_state_change_on_apply(world, target_sid, &type4, skill_id);
+
+    let mut pkt = Packet::new(Opcode::WizMagicProcess as u8);
+    pkt.write_u8(MAGIC_EFFECTING);
+    pkt.write_u32(skill_id);
+    pkt.write_u32(npc_id);
+    pkt.write_u32(target_sid as u32);
+    let data = [0, 1, 0, duration as i32, 0, type4.speed.unwrap_or(0), 0];
+    for value in data {
+        pkt.write_u32(value as u32);
+    }
+    world.broadcast_to_region_sync(zone_id, region_x, region_z, Arc::new(pkt), None, event_room);
+
+    tracing::info!(
+        target_sid,
+        npc_id,
+        skill_id,
+        buff_type = type4.buff_type.unwrap_or(0),
+        attack = type4.attack.unwrap_or(0),
+        ac = type4.ac.unwrap_or(0),
+        speed = type4.speed.unwrap_or(0),
+        duration,
+        "NPC Type-4 buff applied"
+    );
+    true
+}
+
 /// Create an `ActiveBuff` from a `MagicType4Row`.
 pub(crate) fn create_active_buff(
     skill_id: u32,

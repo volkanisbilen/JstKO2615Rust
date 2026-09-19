@@ -3330,8 +3330,6 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
 
     // Apply type 3 (heal/damage) effect if applicable
     let mut heal_amount: i32 = 0;
-    let mut effect_duration = 0;
-    let mut effect_speed = 0;
     if skill_type == 3 {
         if let Some(t3) = w.get_magic_type3(skill_id as i32) {
             let first_damage = t3.first_damage.unwrap_or(0);
@@ -3351,29 +3349,20 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
     // Apply type 4 (buff) effect — duration-based stat modifier
     // MagicInstance dispatches to ApplyType4 which registers ActiveBuff
     if skill_type == 4 {
-        if let Some(t4) = w.get_magic_type4(skill_id as i32) {
-            effect_duration = t4.duration.unwrap_or(0).max(0) as u32;
-            effect_speed = t4.speed.unwrap_or(100).max(0) as u32;
-            let s_skill = magic.as_ref().and_then(|m| m.skill).unwrap_or(0);
-            let buff = crate::handler::magic_process::create_active_buff(
-                skill_id,
-                npc_id as crate::zone::SessionId, // caster = NPC
-                &t4,
-                true, // NPC buffs are always beneficial
-            );
-            w.apply_buff(sid, buff);
-            crate::handler::magic_process::apply_type4_stats(
-                w.as_ref(),
-                sid,
-                &t4,
-                s_skill,
-                skill_id,
-            );
-            w.set_user_ability(sid);
-            w.send_item_move_refresh(sid);
-        } else {
+        if !crate::handler::magic_process::apply_npc_type4_support(
+            w.as_ref(),
+            npc_id,
+            sid,
+            skill_id,
+            npc_ai.zone_id,
+            npc_ai.region_x,
+            npc_ai.region_z,
+            event_npc.event_room,
+        ) {
             return Ok(false);
         }
+        // The shared Type-4 path already sent the authoritative effect packet.
+        return Ok(true);
     } else if skill_type != 3 || heal_amount == 0 {
         return Ok(false);
     }
@@ -3388,9 +3377,9 @@ fn lua_npc_cast_skill(lua: &Lua, args: LuaMultiValue) -> LuaResult<bool> {
     pkt.write_u32(0); // sData[0]
     pkt.write_u32(1); // sData[1] = effect successfully applied
     pkt.write_u32(0); // sData[2]
-    pkt.write_u32(if skill_type == 4 { effect_duration } else { heal_amount as u32 });
+    pkt.write_u32(heal_amount as u32); // sData[3]
     pkt.write_u32(0); // sData[4]
-    pkt.write_u32(effect_speed); // sData[5]: Type4 movement speed
+    pkt.write_u32(0); // sData[5]
     pkt.write_u32(0); // sData[6]
 
     // Use tokio::task::block_in_place to call async from sync context
